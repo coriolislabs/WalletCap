@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+[project]
+name = "walletcap"
+version = "0.2.0"
+description = "One spend budget per wallet for AI agents: counted across every process, replica, key, permission and payment rail."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Coriolis Labs Inc." }]
+keywords = ["ai-agents", "agent-payments", "x402", "spend-limit", "budget", "usdc", "stablecoin", "guardrails"]
+dependencies = []
+
+[project.scripts]
+walletcap = "walletcap.__main__:main"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/walletcap"]

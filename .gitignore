@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+*.egg-info/
+__pycache__/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+out/
+cache/
+work/

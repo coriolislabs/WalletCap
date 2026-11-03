@@ -1,0 +1,434 @@
+// SPDX-License-Identifier: Apache-2.0
+// Put the budget in front of Coinbase's Agentic Wallet: the awal CLI and the payments-mcp server.
+//
+// Every send and every x402 payment that goes through here is counted in the wallet's budget,
+// whichever process, session or machine makes it. An x402 payment is priced before the wallet
+// signs it, and the wallet is capped at that amount. A confirmed settlement counts for one
+// window; a payment the payee never confirms keeps counting until its owner releases it.
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
+import { pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
+import { BudgetError, BudgetRefused } from './errors.mjs';
+import { openBudget } from './index.mjs';
+import { formatUsd, normalizeWallet } from './money.mjs';
+import { assetKey, assetTable, atomicOf, toMicros as atomicToMicros } from './x402.mjs';
+
+/** The wallet's chain names, as CAIP-2 networks. */
+export const AWAL_CHAINS = Object.freeze({
+  base: 'eip155:8453',
+  'base-sepolia': 'eip155:84532',
+  polygon: 'eip155:137',
+  solana: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+  'solana-devnet': 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+});
+
+const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+
+// The wallet's own refusals, raised before it signs anything. Only these give the amount back:
+// any other failure may come after the signature left, so it keeps counting.
+const NOT_SIGNED = [
+  /^(?:UI bridge error: )?x402 request failed: Required payment \$[0-9.,]+ exceeds /,
+  /^(?:UI bridge error: )?Failed to discover payment requirements/,
+  /^Failed to start wallet/,
+  /^(?:UI bridge error: )?(?:Not authenticated|Authentication required|Please sign in)/i,
+];
+const notSigned = error => NOT_SIGNED.some(pattern => pattern.test(String(error?.message ?? error)));
+
+const decodeHeader = value => {
+  try {
+    return JSON.parse(Buffer.from(String(value), 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+};
+
+const headerOf = (headers, name) => {
+  if (headers === null || typeof headers !== 'object') return undefined;
+  const key = Object.keys(headers).find(candidate => candidate.toLowerCase() === name);
+  return key === undefined ? undefined : headers[key];
+};
+
+/** The PAYMENT-RESPONSE a payee sent back with a wallet result, decoded, or null. */
+const paymentResponseOf = result => {
+  const header = headerOf(result?.headers, 'payment-response') ?? headerOf(result?.headers, 'x-payment-response');
+  return header === undefined ? null : decodeHeader(header);
+};
+
+const requestUrl = data => {
+  const url = new URL(data.path ?? '', data.baseURL);
+  for (const [key, value] of Object.entries(data.queryParams ?? {})) url.searchParams.set(key, String(value));
+  return url;
+};
+
+/** Ask the endpoint what it charges: its 402 answer's accepted payment requirements, or null if it asks for none. */
+export async function discoverRequirements(data, { fetch: fetchImpl = globalThis.fetch } = {}) {
+  const method = String(data.method ?? 'GET').toUpperCase();
+  const init = { method, headers: { Accept: 'application/json', ...(data.headers ?? {}) }, redirect: 'follow' };
+  if (data.body !== undefined && method !== 'GET') {
+    init.body = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
+    init.headers['Content-Type'] ??= 'application/json';
+  }
+  const response = await fetchImpl(requestUrl(data), init);
+  if (response.status !== 402) return null;
+  const header = response.headers.get('payment-required');
+  const required = header ? decodeHeader(header) : await response.json().catch(() => null);
+  if (!Array.isArray(required?.accepts) || required.accepts.length === 0) {
+    throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
+  }
+  return required.accepts;
+}
+
+/**
+ * Count every send and x402 payment made through `request(channel, data)`, the wallet's own
+ * request channel, in `budget`. Returns a `request` with the same shape that applies the budget.
+ */
+export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchImpl, discover } = {}) {
+  if (typeof request !== 'function') throw new BudgetError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
+  const table = assetTable(assets);
+  const findRequirements = discover ?? (data => discoverRequirements(data, { fetch: fetchImpl }));
+  const networkOf = requirement => assetKey(requirement.network, requirement.asset).split(' ')[0];
+
+  // A failure the wallet reports before signing gives the amount back; anything else keeps counting.
+  const failed = (reservation, error, { counts }) => {
+    if (!reservation.open) return;
+    if (notSigned(error)) reservation.release();
+    else if (counts === 'window') reservation.commit({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+    else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+  };
+
+  async function send(data) {
+    const asset = String(data?.asset ?? 'USDC').toUpperCase();
+    const chain = String(data?.chain ?? 'base');
+    const network = AWAL_CHAINS[chain];
+    if (asset !== 'USDC' || network === undefined) {
+      throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset} on ${chain}, so it refuses this send`);
+    }
+    let atomic;
+    try { atomic = BigInt(data.amountAtomic); } catch { throw new BudgetError(`the send amount ${JSON.stringify(data?.amountAtomic)} is not an integer`); }
+    if (atomic <= 0n) throw new BudgetError('the send amount must be more than $0');
+    const reservation = budget.reserve(atomic, {
+      rail: 'awal', to: String(data.recipient), note: `send on ${chain}`, details: { network, asset },
+    });
+    let result;
+    try {
+      result = await request('send-transaction', { ...data, asset, chain });
+    } catch (error) {
+      failed(reservation, error, { counts: 'window' });
+      throw error;
+    }
+    if (result?.error) failed(reservation, new Error(String(result.error)), { counts: 'window' });
+    else reservation.commit({ tx: TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined });
+    return result;
+  }
+
+  async function x402(data) {
+    const offered = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0
+      ? data.paymentRequirements
+      : await findRequirements(data);
+    const url = requestUrl(data).href.slice(0, 1024);
+    if (offered === null) {
+      // The endpoint asked for nothing. Let the request through with the wallet's smallest
+      // possible payment cap, counted, in case the payee asks for money after all.
+      const reservation = budget.reserve(1n, { rail: 'awal-x402', note: url });
+      let result;
+      try {
+        result = await request('make-x402-request', { ...data, maxAmountPerRequest: 1 });
+      } catch (error) {
+        failed(reservation, error, { counts: 'window' });
+        throw error;
+      }
+      if (paymentResponseOf(result) === null) reservation.release();
+      else reservation.commit({ outcome: 'unknown' });
+      return result;
+    }
+    const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
+    const candidates = offered.filter(requirement => (preferred === undefined || networkOf(requirement) === preferred)
+      && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme));
+    const priced = candidates.filter(requirement => table.has(assetKey(requirement.network, requirement.asset)));
+    if (priced.length === 0) {
+      const first = candidates[0] ?? offered[0];
+      throw new BudgetRefused('asset', `walletcap cannot price ${first?.asset} on ${first?.network}; it pays only in the USD stablecoins it knows`);
+    }
+    // The wallet picks the terms itself when it pays, so reserve the most any offer asks
+    // and cap the wallet at exactly that: it refuses to sign for more.
+    const choice = priced.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
+    const micros = atomicToMicros(atomicOf(choice), table.get(assetKey(choice.network, choice.asset)));
+    if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
+      throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
+    }
+    // walletcap can't see when the authorization the wallet signs expires, so a payment that
+    // isn't confirmed settled keeps counting until its owner releases it (npx walletcap release).
+    const reservation = budget.reserve(micros, {
+      rail: 'awal-x402', to: choice.payTo, note: url,
+      details: { network: choice.network, asset: choice.asset, scheme: choice.scheme, maxTimeoutSeconds: choice.maxTimeoutSeconds },
+    });
+    let result;
+    try {
+      result = await request('make-x402-request', { ...data, maxAmountPerRequest: Number(atomicOf(choice)) });
+    } catch (error) {
+      failed(reservation, error, { counts: 'until-released' });
+      throw error;
+    }
+    const answer = paymentResponseOf(result);
+    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) reservation.commit({ tx: answer.transaction });
+    else reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
+    return result;
+  }
+
+  return {
+    budget,
+    async request(channel, data) {
+      if (channel === 'send-transaction') return send(data ?? {});
+      if (channel === 'make-x402-request') return x402(data ?? {});
+      return request(channel, data);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// npx walletcap awal …: the awal CLI, with every send and x402 payment counted in the budget.
+
+const HELP = `walletcap awal: Coinbase's Agentic Wallet CLI (awal), with every payment counted in the wallet's budget.
+
+Usage: npx walletcap awal <awal command> [awal options]
+
+  send and x402 pay are checked and counted by walletcap; every other command is awal's own.
+
+Environment
+  WALLETCAP_WALLET   The wallet's EVM address (default: asked from the wallet)
+  WALLETCAP_PATH     The budget file; create it first: npx walletcap set --wallet <address> --per-day <dollars>
+  WALLETCAP_AWAL     The awal package directory (default: awal resolved from the current directory)`;
+
+/** The installed awal package's directory. */
+export function locateAwal(env = process.env, from = process.cwd()) {
+  const candidates = [];
+  if (env.WALLETCAP_AWAL) candidates.push(resolve(env.WALLETCAP_AWAL));
+  try {
+    candidates.push(dirname(createRequire(join(from, 'noop.js')).resolve('awal/package.json')));
+  } catch { /* not installed here */ }
+  const found = candidates.find(dir => existsSync(join(dir, 'dist', 'ipcClient.js')));
+  if (found === undefined) throw new BudgetError('walletcap awal needs the awal CLI: npm install awal, or set WALLETCAP_AWAL to its package directory');
+  return found;
+}
+
+const walletRequest = async awalDir => (await import(pathToFileURL(join(awalDir, 'dist', 'ipcClient.js')).href)).sendIpcRequest;
+
+const addressOf = value => {
+  const match = JSON.stringify(value ?? null).match(/0x[0-9a-fA-F]{40}/);
+  return match === null ? undefined : match[0];
+};
+
+async function openGuard(env, request, options = {}) {
+  let wallet = env.WALLETCAP_WALLET ?? options.wallet;
+  if (wallet === undefined) wallet = addressOf(await request('get-wallet-address', {}));
+  if (wallet === undefined) throw new BudgetError('walletcap could not learn the wallet address; set WALLETCAP_WALLET');
+  const budget = openBudget({ wallet: normalizeWallet(wallet), path: env.WALLETCAP_PATH ?? options.path, create: false });
+  return guardAgenticWallet(budget, { request });
+}
+
+// awal's own amount rule for USDC: "$0.05" and "0.05" are dollars; a whole number above 100 is atomic units.
+export function usdcAtomic(amount) {
+  const cleaned = String(amount).replace(/^\$/, '').trim();
+  const value = parseFloat(cleaned);
+  if (Number.isNaN(value) || value <= 0) throw new BudgetError(`Invalid amount: ${amount}. Must be a positive number.`);
+  if (Number.isInteger(value) && value > 100) return Math.floor(value).toString();
+  return Math.floor(value * 1_000_000).toString();
+}
+
+const PAY_OPTIONS = {
+  method: { type: 'string', short: 'X', default: 'GET' },
+  data: { type: 'string', short: 'd' },
+  query: { type: 'string', short: 'q' },
+  headers: { type: 'string', short: 'h' },
+  'max-amount': { type: 'string' },
+  scheme: { type: 'string' },
+  'correlation-id': { type: 'string' },
+  json: { type: 'boolean' },
+};
+const SEND_OPTIONS = { chain: { type: 'string', default: 'base' }, asset: { type: 'string', default: 'USDC' }, json: { type: 'boolean' } };
+
+function payData(url, values) {
+  const parsed = new URL(url);
+  const data = { baseURL: `${parsed.protocol}//${parsed.host}`, path: parsed.pathname + parsed.search, method: values.method.toUpperCase() };
+  const jsonOption = (name, key) => {
+    if (values[name] === undefined) return;
+    try { data[key] = JSON.parse(values[name]); } catch { throw new BudgetError(`The --${name} option must be valid JSON`); }
+  };
+  jsonOption('data', 'body');
+  jsonOption('query', 'queryParams');
+  jsonOption('headers', 'headers');
+  if (values['max-amount'] !== undefined) {
+    const max = Number.parseInt(values['max-amount'], 10);
+    if (Number.isNaN(max) || max < 0) throw new BudgetError('--max-amount must be a non-negative integer (USDC atomic units)');
+    data.maxAmountPerRequest = max;
+  }
+  if (values.scheme !== undefined) data.preferredScheme = values.scheme;
+  if (values['correlation-id'] !== undefined) data.correlationId = values['correlation-id'];
+  return data;
+}
+
+/** Run one awal command; send and x402 pay go through the budget. Returns the exit code. */
+export async function awalMain(argv, { env = process.env, stdout = process.stdout, stderr = process.stderr, request } = {}) {
+  if (argv.length === 0 || argv[0] === '--walletcap-help') {
+    stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  const guarded = argv[0] === 'send' || (argv[0] === 'x402' && argv[1] === 'pay');
+  const wantsHelp = argv.includes('--help');
+  let awalDir;
+  try {
+    if (request === undefined || !guarded || wantsHelp) awalDir = locateAwal(env);
+  } catch (error) {
+    stderr.write(`${error.message}\n`);
+    return 1;
+  }
+  if (!guarded || wantsHelp) {
+    const run = spawnSync(process.execPath, [join(awalDir, 'dist', 'index.js'), ...argv], { stdio: 'inherit', env });
+    return run.status ?? 1;
+  }
+  const args = argv[0] === 'send' ? argv.slice(1) : argv.slice(2);
+  let values;
+  let positionals;
+  try {
+    ({ values, positionals } = parseArgs({ args, options: argv[0] === 'send' ? SEND_OPTIONS : PAY_OPTIONS, allowPositionals: true, strict: true }));
+  } catch (error) {
+    stderr.write(`${error.message}\n`);
+    return 2;
+  }
+  const fail = (code, message) => {
+    if (values.json) stdout.write(`${JSON.stringify({ success: false, error: { code, message } }, null, 2)}\n`);
+    else stderr.write(`${message}\n`);
+    return 1;
+  };
+  let guard;
+  try {
+    guard = await openGuard(env, request ?? await walletRequest(awalDir));
+  } catch (error) {
+    return fail('BUDGET_UNAVAILABLE', `walletcap: ${error.message}`);
+  }
+  try {
+    if (argv[0] === 'send') {
+      const [amount, recipient] = positionals;
+      if (amount === undefined || recipient === undefined) return fail('INVALID_ARGUMENTS', 'usage: send <amount> <recipient> [--chain <chain>] [--asset USDC]');
+      if (!/^0x[0-9a-fA-F]{40}$/.test(recipient) && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient)) {
+        return fail('INVALID_RECIPIENT', 'walletcap awal send takes an address (0x… or Solana), not an ENS name');
+      }
+      const asset = values.asset.toUpperCase();
+      if (asset !== 'USDC') throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset}, so it refuses this send`);
+      const result = await guard.request('send-transaction', { recipient, amountAtomic: usdcAtomic(amount), asset, chain: values.chain });
+      if (result?.error) return fail('TRANSACTION_FAILED', `Transaction failed: ${result.error}`);
+      stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `Sent ${formatUsd(BigInt(usdcAtomic(amount)))} to ${recipient}${result?.transactionHash ? ` (${result.transactionHash})` : ''}\n`);
+      return 0;
+    }
+    const [url] = positionals;
+    if (url === undefined) return fail('INVALID_ARGUMENTS', 'usage: x402 pay <url> [options]');
+    const result = await guard.request('make-x402-request', payData(url, values));
+    stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `Request completed (HTTP ${result?.status})\n${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? null, null, 2)}\n`);
+    return 0;
+  } catch (error) {
+    if (error instanceof BudgetRefused) return fail('BUDGET_REFUSED', `walletcap refused this payment: ${error.message}`);
+    return fail('REQUEST_FAILED', String(error?.message ?? error));
+  } finally {
+    guard.budget.close();
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// npx walletcap awal-mcp [--wallet <address>] [--path <file>] [-- <server command>]: Coinbase's
+// payments-mcp server behind a proxy that counts its send and make_http_request_with_x402 calls.
+
+const MCP_PAYMENT_TOOLS = { make_http_request_with_x402: 'make-x402-request', send: 'send-transaction' };
+const DEFAULT_SERVER = ['npx', '-y', '@coinbase/payments-mcp'];
+
+const toolResult = raw => {
+  const text = raw?.content?.find(item => item?.type === 'text')?.text;
+  if (raw?.isError) throw new Error(text ?? 'the wallet reported an error');
+  if (text === undefined) return raw;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object' && 'result' in parsed ? parsed.result : parsed;
+  } catch {
+    return { text };
+  }
+};
+
+/** Proxy an MCP client (stdin/stdout) to the payments-mcp server. Resolves with the server's exit code. */
+export async function awalMcpMain(argv, { env = process.env, input = process.stdin, output = process.stdout, stderr = process.stderr } = {}) {
+  const split = argv.indexOf('--');
+  const own = split < 0 ? argv : argv.slice(0, split);
+  const server = split < 0 ? DEFAULT_SERVER : argv.slice(split + 1);
+  const { values } = parseArgs({ args: own, options: { wallet: { type: 'string' }, path: { type: 'string' } }, strict: true });
+  const child = spawn(server[0], server.slice(1), { stdio: ['pipe', 'pipe', 'inherit'], env });
+  const write = (stream, message) => stream.write(`${JSON.stringify(message)}\n`);
+  const pending = new Map();
+  let next = 0;
+  const callTool = (name, args) => new Promise((resolveCall, rejectCall) => {
+    const id = `walletcap-${next += 1}`;
+    pending.set(id, { resolve: resolveCall, reject: rejectCall });
+    write(child.stdin, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+  });
+
+  createInterface({ input: child.stdout }).on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch { output.write(`${line}\n`); return; }
+    const waiting = pending.get(message?.id);
+    if (waiting === undefined) { output.write(`${line}\n`); return; }
+    pending.delete(message.id);
+    if (message.error) waiting.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+    else waiting.resolve(message.result);
+  });
+
+  // The guard talks to the wallet through the server's own tools, one guard per call so concurrent
+  // calls keep their own answers; the agent gets the server's own answer back, or the refusal.
+  const TOOL_OF = { ...Object.fromEntries(Object.entries(MCP_PAYMENT_TOOLS).map(([tool, channel]) => [channel, tool])), 'get-wallet-address': 'get_wallet_address' };
+  let budget;
+  const budgetOf = async () => {
+    if (budget === undefined) {
+      const opened = await openGuard({
+        ...env,
+        ...(values.wallet ? { WALLETCAP_WALLET: values.wallet } : {}),
+        ...(values.path ? { WALLETCAP_PATH: values.path } : {}),
+      }, async (channel, data) => toolResult(await callTool(TOOL_OF[channel], data)));
+      budget = opened.budget;
+    }
+    return budget;
+  };
+
+  const handle = async message => {
+    let raw;
+    try {
+      const guard = guardAgenticWallet(await budgetOf(), {
+        request: async (channel, data) => {
+          raw = await callTool(TOOL_OF[channel], data);
+          return toolResult(raw);
+        },
+      });
+      await guard.request(MCP_PAYMENT_TOOLS[message.params.name], message.params.arguments ?? {});
+      write(output, { jsonrpc: '2.0', id: message.id, result: raw });
+    } catch (error) {
+      const result = raw === undefined
+        ? { content: [{ type: 'text', text: `walletcap refused this payment: ${error.message}` }], isError: true }
+        : raw;
+      write(output, { jsonrpc: '2.0', id: message.id, result });
+    }
+  };
+
+  createInterface({ input }).on('line', line => {
+    let message;
+    try { message = JSON.parse(line); } catch { child.stdin.write(`${line}\n`); return; }
+    if (message?.method === 'tools/call' && Object.hasOwn(MCP_PAYMENT_TOOLS, message.params?.name ?? '')) {
+      handle(message).catch(error => stderr.write(`walletcap: ${error.message}\n`));
+      return;
+    }
+    child.stdin.write(`${line}\n`);
+  }).on('close', () => child.stdin.end());
+
+  return new Promise(resolveExit => child.on('exit', code => {
+    budget?.close();
+    resolveExit(code ?? 1);
+  }));
+}

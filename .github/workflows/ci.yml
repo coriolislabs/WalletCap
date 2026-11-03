@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  javascript:
+    name: JavaScript
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install the test dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: js
+      - name: Run the suite
+        run: node --test
+        working-directory: js
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Run the suite
+        # Node is on PATH here, so the cross-language tests run rather than skip.
+        run: uv run --with pytest --python 3.12 pytest -q
+
+  solidity:
+    name: Solidity
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install the check's dependencies
+        run: npm install --no-audit --no-fund
+        working-directory: solidity/evm
+      - name: Drive the contract on an EVM
+        run: node check.mjs ..
+        working-directory: solidity/evm

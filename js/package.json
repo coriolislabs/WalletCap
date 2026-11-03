@@ -1,0 +1,53 @@
+{
+  "name": "walletcap",
+  "version": "0.2.0",
+  "description": "One spend budget per wallet for AI agents: counted across every process, replica, key, permission and payment rail. Restarts don't reset it, limit changes don't zero it, and if it can't be read nothing is paid.",
+  "license": "Apache-2.0",
+  "author": "Coriolis Labs Inc.",
+  "type": "module",
+  "keywords": [
+    "ai-agents",
+    "agent-payments",
+    "x402",
+    "spend-limit",
+    "budget",
+    "usdc",
+    "coinbase",
+    "cdp",
+    "stablecoin",
+    "guardrails"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    },
+    "./agentic": "./agentic.mjs"
+  },
+  "bin": {
+    "walletcap": "cli.mjs"
+  },
+  "files": [
+    "agentic.mjs",
+    "cdp.mjs",
+    "cli.mjs",
+    "errors.mjs",
+    "index.d.ts",
+    "index.mjs",
+    "ledger.mjs",
+    "money.mjs",
+    "x402.mjs"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "devDependencies": {
+    "@x402/core": "2.28.0",
+    "@x402/evm": "2.28.0",
+    "@x402/fetch": "2.28.0",
+    "viem": "2.37.13"
+  }
+}
