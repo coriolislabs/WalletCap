@@ -8,7 +8,7 @@ import { x402Client } from '@x402/core/client';
 import { ExactEvmScheme } from '@x402/evm/exact/client';
 import { privateKeyToAccount } from 'viem/accounts';
 import { openBudget } from 'walletcap';
-import { SharedSpendStore } from './spend-store.mjs';
+import { SharedSpendStore, withLatency } from './spend-store.mjs';
 
 export const BASE = 'eip155:8453';
 export const ASSETS = {
@@ -23,6 +23,16 @@ const cdpControls = () => ({
   maxCumulativeSpend: { atomic: 150_000_000n, asset: ASSETS.USDC.address },
   maxCumulativeSpendWindow: '24h',
   allowedNetworks: [BASE],
+});
+
+// walletcap's README for CDP's controls, exactly: the same caps, USDC the only allowed asset, and
+// CDP's ledger kept by budget.cdpStore() in the budget file every agent opens.
+const cdpStoreControls = store => ({
+  maxAmountPerPayment: { atomic: 50_000_000n, asset: ASSETS.USDC.address },
+  maxCumulativeSpend: { atomic: 150_000_000n, asset: ASSETS.USDC.address },
+  maxCumulativeSpendWindow: '24h',
+  allowedAssets: [ASSETS.USDC.address],
+  store,
 });
 
 const required = (payment, payTo) => {
@@ -60,6 +70,14 @@ if (config.control === 'walletcap') {
   const store = new SharedSpendStore(config.storePath, { latencyMs: config.storeLatencyMs });
   applySpendControls(client, { ...cdpControls(), store });
   close = () => store.close();
+} else if (config.control === 'cdp-store') {
+  const budget = openBudget({ wallet: account.address, path: config.budgetPath });
+  const store = budget.cdpStore({ asset: ASSETS.USDC.address });
+  applySpendControls(client, cdpStoreControls(config.storeLatencyMs > 0 ? withLatency(store, config.storeLatencyMs) : store));
+  close = () => {
+    store.close();
+    budget.close();
+  };
 } else {
   applySpendControls(client, cdpControls());
 }

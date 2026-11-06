@@ -41,17 +41,18 @@ no dependencies · Apache-2.0
 
 `npx walletcap-crash-test` puts Coinbase's agent spend controls through the events that hand an
 agent a fresh budget, then puts walletcap through the same ones. CDP's x402 controls are set as
-Coinbase's README shows. Spend Permissions run Coinbase's deployed contract code on a local EVM.
-It runs offline in under ten seconds and sends nothing.
+Coinbase's README shows, then run again on walletcap's `cdpStore` as this README shows. Spend
+Permissions run Coinbase's deployed contract code on a local EVM. It runs offline in under
+fifteen seconds and sends nothing.
 
 ```console
 $ npx walletcap-crash-test
 
-CDP x402 spend controls                      CDP's controls                     walletcap
-  restart, then pay again                    $300 signed · $150 over            $150 signed · $0 over
-  10 replicas                                $1,500 signed · $1,350 over        $150 signed · $0 over
-  10 replicas, shared store 1 ms away        $350 signed · $200 over            $150 signed · $0 over
-  payee asks for EURC, not USDC              1,000 EURC signed, counted as $0   refused before signing
+CDP x402 spend controls                      CDP's controls                     walletcap guard          walletcap cdpStore
+  restart, then pay again                    $300 signed · $150 over            $150 signed · $0 over    $150 signed · $0 over
+  10 replicas                                $1,500 signed · $1,350 over        $150 signed · $0 over    $150 signed · $0 over
+  10 replicas, shared store 1 ms away        $350 signed · $200 over            $150 signed · $0 over    $150 signed · $0 over
+  payee asks for EURC, not USDC              1,000 EURC signed, counted as $0   refused before signing   refused before signing
 
 Spend Permissions                            SpendPermissionManager             AccountCapSpender
   a second permission                        $300 pulled · $150 over            $150 pulled · $0 over

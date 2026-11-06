@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The crash test end to end: Coinbase's published SDK breaks where the README says it does, and
-// walletcap holds every event at $0 over the cap.
+// walletcap holds every event at $0 over the cap, as its guard and as CDP's store.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
@@ -8,10 +8,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { agentkitRow, crashTest, report } from '../cli.mjs';
+import { agentkitRow, crashTest, held, report } from '../cli.mjs';
 
 const USD = 1_000_000n;
 const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
+
+// One full run, shared by the tests that read it.
+let fullRun;
+const crashTestOnce = () => (fullRun ??= crashTest());
 
 test('the CLI runs through a symlink, as npm runs a bin', () => {
   const dir = mkdtempSync(join(tmpdir(), 'walletcap-crash-bin-'));
@@ -27,8 +31,8 @@ test('the CLI runs through a symlink, as npm runs a bin', () => {
   }
 });
 
-test("CDP's controls let money past the cap on every event; walletcap holds each one at $0", async () => {
-  const run = await crashTest();
+test("CDP's controls let money past the cap on every event; walletcap's guard holds each one at $0", async () => {
+  const run = await crashTestOnce();
   const by = Object.fromEntries(run.scenarios.map(s => [s.id, s]));
 
   // A restart hands the in-memory store a fresh count: the cap is paid twice.
@@ -58,8 +62,52 @@ test("CDP's controls let money past the cap on every event; walletcap holds each
   assert.equal(sp['period-boundary'].walletcap.pulled, 150n * USD);
   assert.ok(run.spendPermissions.rows.every(r => r.walletcap.refusals.every(reason => reason === 'OverBudget')));
 
-  assert.match(report(run), /with walletcap\./);
+  assert.match(report(run), /\$0 with walletcap's guard and AccountCapSpender; \$0 with CDP's controls on walletcap's cdpStore\./);
   assert.ok(run.seconds < 60, `the crash test took ${run.seconds}s`);
+});
+
+test("CDP's controls on walletcap's cdpStore, set as walletcap's README shows, hold every event at $0", async () => {
+  const run = await crashTestOnce();
+  const by = Object.fromEntries(run.scenarios.map(s => [s.id, s]));
+  // CDP refuses on its own check, or walletcap's store refuses when CDP records past the cap.
+  const refusals = new Set(['cumulative_cap', 'budget_budget']);
+
+  // The restarted process reads the first one's $150 from the budget file, and CDP refuses it.
+  assert.equal(by.restart.cdpStore.usdc, 150n * USD);
+  assert.equal(by.restart.cdpStore.refused, 5);
+  assert.deepEqual(by.restart.cdpStore.reasons, ['cumulative_cap']);
+
+  // Ten replicas record into one budget file: three $50 payments, and 27 refused.
+  assert.equal(by.replicas.cdpStore.usdc, 150n * USD);
+  assert.equal(by.replicas.cdpStore.refused, 27);
+  assert.ok(by.replicas.cdpStore.reasons.every(reason => refusals.has(reason)), by.replicas.cdpStore.reasons.join(', '));
+
+  // With the store 1 ms away, more replicas pass CDP's check together; the store's re-check holds.
+  assert.equal(by['shared-store'].cdpStore.usdc, 150n * USD);
+  assert.equal(by['shared-store'].cdpStore.refused, 27);
+  assert.ok(by['shared-store'].cdpStore.reasons.every(reason => refusals.has(reason)), by['shared-store'].cdpStore.reasons.join(', '));
+
+  // allowedAssets, which walletcap's README sets, refuses EURC before signing.
+  assert.equal(by['asset-switch'].cdpStore.eurc, 0n);
+  assert.equal(by['asset-switch'].cdpStore.refused, 1);
+  assert.deepEqual(by['asset-switch'].cdpStore.reasons, ['asset_not_allowed']);
+
+  for (const s of run.scenarios) {
+    assert.equal(s.cdpStore.over, 0n, `${s.id}: CDP on walletcap's cdpStore let money past the cap`);
+    assert.equal(s.cdpStore.eurc, 0n, `${s.id}: CDP on walletcap's cdpStore signed EURC`);
+  }
+  assert.match(report(run), /walletcap guard {2,}walletcap cdpStore/);
+});
+
+test("the run fails if walletcap's guard or CDP on walletcap's cdpStore lets anything past the cap", async () => {
+  const run = await crashTestOnce();
+  assert.equal(held(run), true);
+  const leak = (arm, result) => ({ ...run, scenarios: run.scenarios.map(s => (s.id === 'replicas' ? { ...s, [arm]: { ...s[arm], ...result } } : s)) });
+  assert.equal(held(leak('cdpStore', { usdc: 200n * USD, over: 50n * USD })), false);
+  assert.equal(held(leak('cdpStore', { eurc: 1_000n * USD })), false);
+  assert.equal(held(leak('walletcap', { usdc: 200n * USD, over: 50n * USD })), false);
+  // CDP's own controls are what's measured: their overage is the finding, not a failure.
+  assert.equal(held(leak('cdp', { usdc: 1_500n * USD, over: 1_350n * USD })), true);
 });
 
 const agentkitInstalled = (() => {
