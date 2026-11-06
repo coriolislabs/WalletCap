@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Publish walletcap to PyPI and npm when a GitHub Release is published, or by hand.
-# Both use trusted publishing, so no token is stored. PyPI matches this repository,
+# Publish when a GitHub Release is published, or by hand.
+# - A release tagged v<version> publishes walletcap to PyPI and npm.
+# - A release tagged crash-test-v<version> publishes walletcap-crash-test to npm, and nothing else.
+# Everything uses trusted publishing, so no token is stored. PyPI matches this repository,
 # the workflow filename (publish.yml) and the "pypi" environment, and attaches PEP 740
-# attestations. npm matches this repository, publish.yml and the "npm" environment,
-# and attaches provenance.
+# attestations. npm matches this repository, publish.yml and the "npm" environment, for
+# each of the two packages, and attaches provenance.
 name: Publish
 
 on:
@@ -18,6 +20,7 @@ permissions:
 jobs:
   pypi:
     name: PyPI
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'crash-test-v')
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -43,6 +46,7 @@ jobs:
 
   npm:
     name: npm
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'crash-test-v')
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -66,4 +70,31 @@ jobs:
           node --test
       - name: Publish to npm with provenance
         working-directory: js
+        run: npm publish --provenance
+
+  crash-test:
+    name: npm (crash test)
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'crash-test-v')
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Use an npm that supports trusted publishing (11.5.1 or later)
+        run: npm install --global npm@11.21.1
+      - name: Check the release tag matches the package version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: test "$TAG" = "crash-test-v$(node -p "require('./crash-test/package.json').version")"
+      - name: Run the crash test on the walletcap users get from npm
+        working-directory: crash-test
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          node --test
+      - name: Publish to npm with provenance
+        working-directory: crash-test
         run: npm publish --provenance

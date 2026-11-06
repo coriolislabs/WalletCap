@@ -56,4 +56,12 @@ Nothing is sent. Each payment is an x402 authorization (EIP-3009) signed with a 
 - **More than one machine.** The replicas share one machine, and walletcap's budget file is single-host.
 - **Other vendors' controls.** Only Coinbase's CDP x402 controls are covered so far. Spend Permissions, the Agentic Wallet, AgentKit, Safe, MetaMask, Tempo and AP2 come next.
 
+## Releasing
+
+To release a new version:
+1. Bump `version` in `crash-test/package.json` and merge the change.
+2. Publish a GitHub Release tagged `crash-test-v<version>`. Untick "Set as the latest release", so walletcap's own release stays the latest.
+
+The Publish workflow then runs the crash test against the walletcap on npm and publishes with provenance. Releases tagged `v<version>` publish walletcap only.
+
 To have the same measurement run against your own agent, inside your walls, with every control on and a signed result, [ask for a ShadowPath report](mailto:paul@coriolislabs.ca).
