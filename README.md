@@ -191,8 +191,8 @@ const fetchPaid = wrapFetchWithPayment(fetch, client);
   expires, plus one window: the confirmation is the payee's own word, and a payee that answers
   "payment failed" still holds the signed authorization too.
 - A payee may ask for an authorization valid up to an hour (`MAX_PAYMENT_TIMEOUT_SECONDS`, 3600),
-  as Coinbase's CDP spend controls allow. Anything longer is refused before signing, with the
-  reason `timeout`.
+  as Coinbase's CDP spend controls allow. Longer terms are passed over for shorter ones on offer;
+  when none are, the payment is refused before signing, with the reason `timeout`.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of
   the box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
   `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged
@@ -274,17 +274,19 @@ command after `--`.
   left out of the tool list: walletcap can't count it. `--allow-tool <name>` lets one through,
   uncounted. JSON-RPC batches are refused.
 - An x402 payment is priced from the endpoint's own 402 answer, and the wallet is capped at exactly
-  that amount, so it refuses to sign for more.
-- A payment the payee confirms as settled counts for one window. One it doesn't confirm keeps
-  counting until you release it: the wallet signs whatever validity the payee asks for, and
-  walletcap can't see it. Check the chain, then `npx walletcap release <id>`. The exception: when
-  the caller hands the wallet the payment requirements (`paymentRequirements`, all x402's exact
-  scheme on an EVM chain) and the wallet answers, the payment counts until the longest of their
-  `maxTimeoutSeconds`, plus a minute, after that answer, plus one window, whatever the payee
-  says about it.
+  that amount, so it refuses to sign for more. The wallet is handed the terms walletcap priced, as
+  `paymentRequirements`: the caller's, or the ones walletcap discovered. With terms handed to it,
+  the wallet skips its own discovery and signs only a term equal to one of them.
+- Terms valid more than an hour, or that don't give a whole number of seconds, are refused before
+  the wallet is asked. Once the wallet answers, the payment counts until the longest
+  `maxTimeoutSeconds` among the terms (a Solana term at least two minutes, the life of its
+  blockhash), plus a minute, after that answer, plus one window, whatever the payee says about it.
 - The wallet's own refusal, before it signs, gives the amount back. Any other failure, a send
-  included, keeps counting as unknown until you release it. A free endpoint's one-unit hold is
-  given back unless the payee confirms a payment.
+  included, keeps counting as unknown until you release it: check the chain, then
+  `npx walletcap release <id>`. A free endpoint's one-unit hold is given back unless the payee
+  confirms a payment.
+- A refusal tells the agent why, not which holds its owner could release: `walletcap holds` and
+  `budget.check()` name them.
 - Only USDC is counted; a send in any other asset is refused. Amounts are read exactly: `100.5abc`
   is refused, not read as $100.50.
 - It binds the payments that go through it. The wallet app takes requests from any process of
@@ -331,13 +333,14 @@ $ npx walletcap unfreeze
 $ npx walletcap history
 $ npx walletcap holds                  # open payments that still count, and why
 $ npx walletcap release <id>           # an in-flight payment you know never left
-$ npx walletcap release --all-unknown --older-than 24h   # every unknown one older than that
+$ npx walletcap release --all-unknown --older-than 24h   # every unknown or refused one older than that
 ```
 
 Python ships the same commands as `walletcap`. Amounts are dollars; leave out the `$`
 sign, which your shell would expand. Add `--wallet` when the file holds more than one budget,
 and `--json` for scripts. A refusal names the open payments that take up the room, and
-`budget.holds()` lists them in code.
+`budget.holds()` lists them in code. `release --all-unknown` leaves a payment the payee could
+still settle: it counts until one window past the time it can't.
 
 ## Where the budget lives
 
@@ -394,8 +397,8 @@ wallet become one budget, with the tighter of every limit and every payment.
 | `llms.txt` | a summary of the package and links to the docs, for language models |
 
 ```console
-$ cd js && npm install && node --test            # 96 tests
-$ uv run --with pytest pytest -q                 # 140 tests, from the repository root
+$ cd js && npm install && node --test            # 104 tests
+$ uv run --with pytest pytest -q                 # 142 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
 ```

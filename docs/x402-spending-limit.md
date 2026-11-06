@@ -39,7 +39,8 @@ const response = await fetchPaid('https://api.example.com/paid');
   expires, plus one window: the confirmation is the payee's own word, and a payee that answers
   "payment failed" still holds the signed authorization too.
 - A payee may ask for an authorization valid up to an hour, as Coinbase's CDP spend controls
-  allow. Anything longer is refused before signing.
+  allow. Longer terms are passed over for shorter ones on offer; when none are, the payment is
+  refused before signing.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of the
   box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
   `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged

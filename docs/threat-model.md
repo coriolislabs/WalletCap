@@ -20,10 +20,11 @@ observer.
 | A second process or replica on the same host | Race for the last dollar | `BEGIN IMMEDIATE` + a re-check inside the write transaction | A process that writes the file outside the library |
 | A second host | Open the same file over NFS, SMB or a Docker Desktop bind mount | Not supported: the file serves one host, on a local disk | SQLite's locks aren't reliable on those filesystems, so two hosts can both take the last dollar. Multiple hosts need a shared service, which isn't shipped yet |
 | A process with a wrong clock | Pay as if the window had passed | The ledger reads the system clock; there is no clock option, and a settle-by time already past counts as now | A host whose system clock is wrong |
-| A payee | Ask for a different asset, a longer validity, or a "failed" settlement it keeps | The guard prices known USD stablecoins and refuses the rest; the CDP store refuses a different asset; an unknown outcome keeps counting | An asset the guard cannot price is refused, not valued |
-| A payee with a 402 it can replay | Hold authorizations and settle later | A reservation counts until it is committed/released, or its expiry plus one window; the guard refuses an authorization valid more than an hour | A confirmed settlement still needs the chain to be read back |
-| A payee that says "settled" | Answer success with a made-up hash, keep the authorization and redeem it later | A commit never shortens a hold: the payment counts until one window past its authorization's expiry, whatever the payee says | Terms the Agentic Wallet discovers on its own carry no expiry walletcap can see |
-| A payment call that fails halfway | Time out after the money left | An error never settles a payment: the reservation stays open, marked unknown, until its settle-by time plus one window or until an owner releases it | An owner who releases a payment that did settle |
+| A payee | Ask for a different asset, a longer validity, or a "failed" settlement it keeps | The guard prices known USD stablecoins and refuses the rest, and passes over terms valid more than an hour; the CDP store refuses a different asset; an unknown outcome keeps counting | An asset the guard cannot price is refused, not valued |
+| A payee with a 402 it can replay | Hold authorizations and settle later | A reservation counts until it is committed/released, or its expiry plus one window; neither the guard nor the Agentic Wallet wrapper signs terms valid more than an hour, or terms that don't say how long | A confirmed settlement still needs the chain to be read back |
+| A payee that says "settled" | Answer success with a made-up hash, keep the authorization and redeem it later | A commit never shortens a hold: the payment counts until one window past its authorization's expiry, whatever the payee says. The guard reads the expiry from the signed payload (EIP-3009 `validBefore`, Permit2 `deadline`), or else takes the signing time plus `maxTimeoutSeconds`. The Agentic Wallet wrapper hands the wallet the terms it checked, discovered ones included, and takes the longest `maxTimeoutSeconds` among them, plus a minute | The Agentic Wallet decides what it signs, in a page Coinbase hosts and can change: walletcap relies on it signing only a term it was handed, as it did when checked (awal 2.12.2, November 2026). A payment the wallet never answered counts until an owner releases it |
+| A payment call that fails halfway | Time out after the money left | An error never settles a payment: the reservation stays open, marked unknown, until its settle-by time plus one window or until an owner releases it. `release --all-unknown` leaves one the payee could still settle | An owner who releases a payment that did settle |
+| An agent told why it was refused | Learn which holds take the room, and ask for them to be released | What the Agentic Wallet wrapper, its CLI and its MCP proxy tell the agent leaves out hold ids and release instructions; `walletcap holds` and `budget.check()` keep them for the owner | An agent with a shell as the owner's user can run `walletcap holds` itself |
 | Another local user | Read the budget file | The parent directory is created `0700`; use a `0600` file if you pass a custom `path` | Files copied out of that directory keep their mode |
 | A host failure | Lose the file | The database is one file; back it up like any other state | A lost file is a lost count; the default refuses to recreate it |
 | A later on-chain revoke | Land in the same block after a payment | The payment is already ordered ahead of the revoke | The owner's revocation is not retroactive |
@@ -47,9 +48,9 @@ observer.
 
 - It does not decide whether a payment *should* happen; it only bounds it.
 - It does not confirm settlement. A payment the payee calls failed keeps
-  counting until its authorization expires, plus one window, and a payment with
-  no expiry keeps counting until an owner releases it. A payment whose outcome
-  is unknown counts the same way.
+  counting until its authorization expires (the EIP-3009 `validBefore`, the
+  Permit2 `deadline`, or the signing time plus `maxTimeoutSeconds`), plus one
+  window. A payment whose outcome is unknown counts the same way.
 - It does not protect the wallet key or the chain.
 - It does not make an unaudited contract safe.
 

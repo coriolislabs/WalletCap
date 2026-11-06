@@ -20,8 +20,11 @@ not a patch.
   a payment settled can't free the budget while its authorization can still be redeemed.
 - The budget file is schema 2. 0.3 upgrades a 0.2.x file when it first opens it: a budget kept
   under another spelling of a wallet (checksummed, uppercase, CAIP-10) moves to the lowercase
-  name, merged with any budget there with the tighter of every limit and every payment. 0.2.x
-  refuses a schema 2 file, so stop 0.2.x processes before upgrading.
+  name, merged with any budget there with the tighter of every limit and every payment.
+  `declare()` with other limits than a merged budget's says what the upgrade merged. A budget in
+  another unit than the wallet's can't be merged: it stays under its 0.2.x name, and the wallet
+  is frozen, with the reason in its refusals, until its owner unfreezes it; the rest of the file
+  upgrades as usual. 0.2.x refuses a schema 2 file, so stop 0.2.x processes before upgrading.
 - The `clock` option is gone from `openBudget`, `cdpStore` and `SharedBudgetStore`, and from
   Python's `open_budget`, `Budget` and `Ledger`. The ledger reads the system clock. Passing a
   clock is an error.
@@ -33,9 +36,12 @@ not a patch.
   the reservation id (`reservationId`, `reservation_id`) and the cause.
 - `MAX_AMOUNT` is 10^15 micro-dollars ($1,000,000,000), not 2^63 − 1. A larger amount, cap or
   per-payment limit is refused.
-- The x402 guard refuses, before signing, a requirement whose `maxTimeoutSeconds` is over 3600
-  (`MAX_PAYMENT_TIMEOUT_SECONDS`), as Coinbase's CDP spend controls do. The refusal's reason is
-  `'timeout'`.
+- The x402 guard pays only on terms whose `maxTimeoutSeconds` is a whole number of seconds up to
+  3600 (`MAX_PAYMENT_TIMEOUT_SECONDS`), as Coinbase's CDP spend controls do. It passes over
+  longer terms for shorter ones on offer, and refuses before signing, with the reason
+  `'timeout'`, when none are.
+- The Agentic Wallet wrapper refuses a paid x402 request, before the wallet is asked, if any of
+  its terms asks for more than an hour or gives no whole number of seconds (reason `'timeout'`).
 - `guard(client, { assets })` and the Agentic Wallet wrapper's `assets` refuse an entry that
   changes a built-in asset's decimals, and decimals that aren't an integer from 0 to 18.
 - Amounts and windows take only the digits 0-9, and only ASCII whitespace is trimmed, in both
@@ -52,7 +58,11 @@ not a patch.
   window.
 - A payee could answer "settled" with a made-up hash, keep the authorization and redeem it later:
   the commit had ended the count after one window. With a 30-day validity, five $0.15
-  authorizations passed a $0.15-a-day cap.
+  authorizations passed a $0.15-a-day cap; with Permit2, $0.75 passed a $0.15-per-10-minutes cap
+  in 50 minutes. A payment now counts until one window past its authorization's expiry. The
+  guard reads it from the signed payload (EIP-3009 `validBefore`, Permit2 `deadline`), or takes
+  the signing time plus `maxTimeoutSeconds`. The Agentic Wallet wrapper takes the longest
+  `maxTimeoutSeconds` among the terms it hands the wallet, whatever their scheme.
 - The CDP store counted a payment for one window from when CDP recorded it, though CDP signs it
   after and lets the authorization be redeemed for up to an hour. It now counts until an hour
   and a minute after the record, plus one window.
@@ -88,16 +98,21 @@ not a patch.
 - `budget.holds()` (Python: `budget.holds()`, returning `Hold`s) and `walletcap holds` list the
   open payments that still count: id, amount, reason (in flight, refused, unknown), age, and
   when each stops counting. `walletcap release --all-unknown --older-than <24h|7d|30m>` gives
-  back every payment of unknown outcome older than that, for an owner who has checked the chain.
+  back every payment of unknown or refused outcome older than that, for an owner who has checked
+  the chain, except one whose settle-by time is still ahead: the payee could still settle it.
 - A budget or payment-count refusal names the open payments that take up the room, oldest
-  first, and says how to list and release them.
+  first, and says how to list and release them. `BudgetRefused.brief` is the refusal without
+  them, and the Agentic Wallet wrapper, its CLI and its MCP proxy tell the agent only that.
 - Python's `pay()` takes `settles_by`, as JavaScript's `pay()` takes `settlesBy`. Python's
   `Reservation` and `Ledger` have `annotate()`.
 - The Agentic Wallet wrapper:
-  - When the caller hands the wallet the payment requirements, all of them x402's exact scheme on
-    an EVM chain, a payment counts until the longest of their `maxTimeoutSeconds`, plus a minute,
-    after the wallet answers, plus one window, instead of until it is released. That holds for
-    one the payee calls settled too.
+  - It hands the wallet the terms it priced as `paymentRequirements`: the caller's, or the ones
+    walletcap discovered, with the 402's extensions unless the caller gave some. The wallet then
+    skips its own discovery and signs only a term equal to one of them.
+  - Once the wallet answers, a paid request counts until the longest `maxTimeoutSeconds` among
+    its terms (a Solana term at least two minutes, the life of its blockhash), plus a minute,
+    after that answer, plus one window, instead of until it is released. That holds for one the
+    payee calls settled too. One the wallet never answered counts until it is released.
   - A free endpoint's one-unit hold is released unless the payee confirms a payment, so a free
     endpoint that fails can't use up `maxPayments`.
   - Every ledger write after the wallet answers raises `PaymentNotRecorded` if it fails.
