@@ -186,16 +186,23 @@ $ npx walletcap awal x402 pay https://api.example.com/data   # instead of: npx a
 $ npx walletcap awal send 0.05 0xRecipient --chain base       # instead of: npx awal send …
 ```
 
-For an MCP client such as Claude Desktop, start Coinbase's server behind walletcap. It runs
-`npx -y @coinbase/payments-mcp`; put another command after `--`.
+For an MCP client such as Claude Desktop, start Coinbase's server behind walletcap. Install the
+server once: `npx @coinbase/payments-mcp install --client other --no-auto-config` puts it in
+`~/.payments-mcp`, and walletcap runs `~/.payments-mcp/bundle.js` from there. (`npx
+@coinbase/payments-mcp` is the installer, not the server.) To run another server, put its
+command after `--`.
 
 ```json
 { "mcpServers": { "payments": { "command": "npx", "args": ["walletcap", "awal-mcp", "--wallet", "0xYourAgentWallet"] } } }
 ```
 
 - `send` and `x402 pay` (over MCP, `send` and `make_http_request_with_x402`) are checked against
-  the wallet's budget before the wallet signs anything, and counted. Every other command and tool
-  is the wallet's own.
+  the wallet's budget before the wallet signs anything, and counted. Every other CLI command is
+  the wallet's own.
+- Over MCP, the tools that move no money (balance, address, sign-in, bazaar search, payment
+  discovery) pass through. Any other tool, `trade` or one the server adds later, is refused and
+  left out of the tool list: walletcap can't count it. `--allow-tool <name>` lets one through,
+  uncounted. JSON-RPC batches are refused.
 - An x402 payment is priced from the endpoint's own 402 answer, and the wallet is capped at exactly
   that amount, so it refuses to sign for more.
 - A payment the payee confirms as settled counts for one window. One it doesn't confirm keeps
@@ -211,20 +218,19 @@ For an MCP client such as Claude Desktop, start Coinbase's server behind walletc
 
 ### Coinbase AgentKit
 
-AgentKit's x402 actions build their own x402 client on every call. Put the budget on that client
-with a three-line subclass, and every payment is checked against the wallet's budget before it
-is signed, whatever terms the merchant sends:
+AgentKit's x402 actions build their own x402 client on every call. `budget.guardAgentKit()` puts
+the budget on every client the provider builds, so each payment is checked against the wallet's
+budget before it is signed, whatever terms the merchant sends:
 
 ```js
 import { X402ActionProvider } from '@coinbase/agentkit';
 
-class BudgetedX402ActionProvider extends X402ActionProvider {
-  async createX402Client(walletProvider) {
-    return budget.guard(await super.createX402Client(walletProvider));
-  }
-}
-// AgentKit.from({ walletProvider, actionProviders: [new BudgetedX402ActionProvider()] })
+const x402 = budget.guardAgentKit(new X402ActionProvider());
+// AgentKit.from({ walletProvider, actionProviders: [x402] })
 ```
+
+It compiles in TypeScript, where a subclass can't override AgentKit's private
+`createX402Client`. Tested against the shape of AgentKit 0.10.4.
 
 ### Coinbase Spend Permissions, on chain
 
@@ -233,7 +239,9 @@ spender for Spend Permissions. Deploy it with the SpendPermissionManager, the ag
 address, the cap, the window, the per-payment max and the payees allowed. Grant Spend
 Permissions to the contract instead of the agent; the agent calls
 `pay(permission, amount, payee)`. Every permission the account grants it then shares one
-rolling cap.
+rolling cap. The window is counted in 24 buckets, so every payment costs the same gas however
+many came before it; a payment counts for up to one bucket (window/24) past its window, never
+less.
 
 ## The owner's controls
 
@@ -293,7 +301,7 @@ only for a demo or a first-run setup.
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
 
 ```console
-$ cd js && npm install && node --test            # 61 tests
+$ cd js && npm install && node --test            # 65 tests
 $ uv run --with pytest pytest -q                 # 59 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
@@ -301,7 +309,9 @@ $ cd solidity && forge test                      # the contract's canonical test
 
 The JavaScript suite runs the x402 guard against x402's own client and fetch wrapper, and runs
 restarts and racing replicas as separate processes, and drives the Agentic Wallet wrapper and
-MCP proxy against stand-ins for Coinbase's wallet and MCP server. The Python suite covers the ledger, the API,
+MCP proxy against stand-ins for Coinbase's wallet and MCP server. It builds AgentKit's x402
+client the way AgentKit 0.10.4 does, and type-checks the AgentKit recipe with `tsc` against
+AgentKit's declared types. The Python suite covers the ledger, the API,
 the CLI and one budget shared between both languages. `solidity/evm/check.mjs` compiles the
 contract with solc-js and drives it on an in-process EVM, covering what the Foundry tests cover.
 
