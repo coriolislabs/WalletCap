@@ -1,6 +1,6 @@
 {
   "name": "walletcap-crash-test",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Crash-test an AI agent's spend limits: restart it, scale it, change the asset, and count the dollars that get past the cap. Offline: nothing is sent.",
   "license": "Apache-2.0",
   "author": "Coriolis Labs Inc.",

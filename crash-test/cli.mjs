@@ -23,11 +23,15 @@ const CAP = 150_000_000n; // $150, in USDC's six decimals
 const FIFTY = { asset: 'USDC', atomic: '50000000' };
 const EURC_1000 = { asset: 'EURC', atomic: '1000000000' };
 
-/** Each event runs once under CDP's controls and once under walletcap, from a fresh start. */
+/**
+ * Each event runs three times, each from a fresh start: under CDP's controls as Coinbase's README
+ * sets them, under walletcap's guard, and under CDP's controls on walletcap's cdpStore as
+ * walletcap's README sets them. In the shared-store event, every SpendStore is a network hop away.
+ */
 export const SCENARIOS = [
   { id: 'restart', label: 'restart, then pay again', cdp: 'cdp', agents: 2, together: false, payments: Array(4).fill(FIFTY) },
   { id: 'replicas', label: '10 replicas', cdp: 'cdp', agents: 10, together: true, payments: Array(3).fill(FIFTY) },
-  { id: 'shared-store', label: `10 replicas, shared store ${STORE_LATENCY_MS} ms away`, cdp: 'cdp-shared', agents: 10, together: true, payments: Array(3).fill(FIFTY) },
+  { id: 'shared-store', label: `10 replicas, shared store ${STORE_LATENCY_MS} ms away`, cdp: 'cdp-shared', storeLatencyMs: STORE_LATENCY_MS, agents: 10, together: true, payments: Array(3).fill(FIFTY) },
   { id: 'asset-switch', label: 'payee asks for EURC, not USDC', cdp: 'cdp', agents: 1, together: false, payments: [EURC_1000] },
 ];
 
@@ -84,11 +88,11 @@ async function runControl(scenario, control, payTo) {
   try {
     const key = generatePrivateKey();
     const budgetPath = join(dir, 'budget.sqlite');
-    if (control === 'walletcap') {
+    if (control === 'walletcap' || control === 'cdp-store') {
       // The owner sets the budget once, as `npx walletcap set` does; every agent opens it.
       openBudget({ wallet: privateKeyToAccount(key).address, path: budgetPath, perPayment: '$50', perDay: '$150', create: true }).close();
     }
-    const base = { control, key, payTo, budgetPath, storePath: join(dir, 'cdp-store.sqlite'), storeLatencyMs: STORE_LATENCY_MS, payments: scenario.payments };
+    const base = { control, key, payTo, budgetPath, storePath: join(dir, 'cdp-store.sqlite'), storeLatencyMs: scenario.storeLatencyMs ?? 0, payments: scenario.payments };
     const results = (await runAgents(Array.from({ length: scenario.agents }, () => base), scenario.together, dir)).flat();
     const signed = asset => results.filter(r => r.signed && r.asset === asset).reduce((sum, r) => sum + BigInt(r.atomic), 0n);
     const usdc = signed('USDC');
@@ -115,6 +119,7 @@ export async function crashTest({ agentkit = false } = {}) {
       label: scenario.label,
       cdp: await runControl(scenario, scenario.cdp, payTo),
       walletcap: await runControl(scenario, 'walletcap', payTo),
+      cdpStore: await runControl(scenario, 'cdp-store', payTo),
     });
   }
   const spendPermissions = await spendPermissionsRows();
@@ -165,14 +170,14 @@ const pulledCell = result => `${dollars(result.pulled)} pulled · ${dollars(resu
 export function report(run) {
   const sp = run.spendPermissions;
   const rows = [
-    ['CDP x402 spend controls', "CDP's controls", 'walletcap'],
-    ...run.scenarios.map(s => [`  ${s.label}`, cell(s.cdp), cell(s.walletcap)]),
-    ['', '', ''],
-    ['Spend Permissions', 'SpendPermissionManager', 'AccountCapSpender'],
-    ...sp.rows.map(r => [`  ${r.label}`, pulledCell(r.vendor), pulledCell(r.walletcap)]),
+    ['CDP x402 spend controls', "CDP's controls", 'walletcap guard', 'walletcap cdpStore'],
+    ...run.scenarios.map(s => [`  ${s.label}`, cell(s.cdp), cell(s.walletcap), cell(s.cdpStore)]),
+    ['', '', '', ''],
+    ['Spend Permissions', 'SpendPermissionManager', 'AccountCapSpender', ''],
+    ...sp.rows.map(r => [`  ${r.label}`, pulledCell(r.vendor), pulledCell(r.walletcap), '']),
   ];
-  const widths = [0, 1].map(col => Math.max(...rows.map(row => row[col].length)) + 3);
-  const table = rows.map(row => (row[0].padEnd(widths[0]) + row[1].padEnd(widths[1]) + row[2]).trimEnd()).join('\n');
+  const widths = [0, 1, 2].map(col => Math.max(...rows.map(row => row[col].length)) + 3);
+  const table = rows.map(row => row.map((text, col) => (col < widths.length ? text.padEnd(widths[col]) : text)).join('').trimEnd()).join('\n');
   const total = side => run.scenarios.reduce((sum, s) => sum + s[side].over, 0n);
   const totalEurc = side => run.scenarios.reduce((sum, s) => sum + s[side].eurc, 0n);
   const past = side => [total(side) > 0n || totalEurc(side) === 0n ? dollars(total(side)) : null, totalEurc(side) > 0n ? eurc(totalEurc(side)) : null].filter(Boolean).join(' and ');
@@ -187,14 +192,18 @@ export function report(run) {
     table,
     '',
     `Past the $150 cap: ${past('cdp')} with CDP's controls, ${dollars(spOver('vendor'))} with Spend Permissions;`,
-    `${dollars(walletcapOver)} with walletcap.`,
+    `${dollars(walletcapOver)} with walletcap's guard and AccountCapSpender; ${past('cdpStore')} with CDP's controls on walletcap's cdpStore.`,
     '',
     "CDP's controls: applySpendControls, set as Coinbase's README shows, with its default in-memory store,",
     `or with a shared store built to its SpendStore interface that answers each call after ${STORE_LATENCY_MS} ms, as Redis`,
     "or Postgres over the network does. CDP reads the total, then records the payment: replicas can read",
-    'the same total before any of them records. walletcap: budget.guard() on the same x402 client, with',
-    'one budget file every agent opens. Each payment is an x402 authorization signed offline by a',
-    'throwaway key that holds nothing; a payee holding one could settle it on Base until it expires.',
+    'the same total before any of them records. walletcap guard: budget.guard() on the same x402 client,',
+    'with one budget file every agent opens. walletcap cdpStore: the same applySpendControls, set as',
+    "walletcap's README shows (USDC the only allowed asset), with store: budget.cdpStore() on that budget",
+    'file. The store re-checks the cap inside its write transaction when CDP records a payment. In the',
+    `shared-store row it too answers each call after ${STORE_LATENCY_MS} ms.`,
+    'Each payment is an x402 authorization signed offline by a throwaway key that holds nothing; a payee',
+    'holding one could settle it on Base until it expires.',
     '',
     "Spend Permissions: Coinbase's SpendPermissionManager and Smart Wallet run on a local EVM from the",
     `code deployed on Base mainnet (block ${sp.block}). A Smart Wallet grants the agent $150 a day per`,
@@ -209,14 +218,16 @@ export function report(run) {
   ].join('\n');
 }
 
-const held = run => run.scenarios.every(s => s.walletcap.over === 0n && s.walletcap.eurc === 0n)
+/** Whether walletcap held: its guard, CDP's controls on its cdpStore, AccountCapSpender and the AgentKit guard. */
+export const held = run => run.scenarios.every(s => [s.walletcap, s.cdpStore].every(r => r.over === 0n && r.eurc === 0n))
   && run.spendPermissions.rows.every(r => r.walletcap.over === 0n)
   && (!run.agentkit || run.agentkit.walletcap.received.length === 0);
 
 const HELP = `walletcap-crash-test: put Coinbase's agent spend controls and walletcap through the same events
 and count what gets past the cap. CDP's x402 controls face a restart, replicas, a shared store and a
-different asset; Spend Permissions face a second permission and a period boundary; with --agentkit,
-AgentKit faces a merchant who lists a bigger offer first. Offline: nothing is sent.
+different asset, on their own store and on walletcap's; Spend Permissions face a second permission
+and a period boundary; with --agentkit, AgentKit faces a merchant who lists a bigger offer first.
+Offline: nothing is sent.
 
 Usage: npx walletcap-crash-test [--json] [--agentkit]
 
@@ -225,7 +236,8 @@ Usage: npx walletcap-crash-test [--json] [--agentkit]
               ${AGENTKIT_INSTALL}
   --version   Print the version
 
-Exits 1 if walletcap lets anything past the cap.`;
+Exits 1 if walletcap's guard, CDP's controls on walletcap's cdpStore, or any other walletcap
+control lets anything past the cap.`;
 
 // npm runs a bin through a symlink, so compare real paths: argv[1] is the link, import.meta.url the file.
 const isMain = () => {

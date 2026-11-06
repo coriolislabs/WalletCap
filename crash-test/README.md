@@ -5,11 +5,11 @@ This puts Coinbase's agent spend controls through the events that hand an AI age
 
 | Control | Events |
 |---|---|
-| CDP's x402 controls | a restart, replicas, a shared store, a payee who switches assets |
+| CDP's x402 controls, on their own store and on walletcap's | a restart, replicas, a shared store, a payee who switches assets |
 | Spend Permissions | a second permission, a period boundary |
 | AgentKit (`--agentkit`) | a merchant who lists a bigger offer first |
 
-It runs offline in under ten seconds and sends nothing.
+It runs offline in under fifteen seconds and sends nothing.
 
 ```console
 $ npx walletcap-crash-test
@@ -18,21 +18,21 @@ walletcap crash test: Coinbase's agent spend controls
 @coinbase/cdp-sdk 1.61.0 · @x402/core 2.30.0 · SpendPermissionManager 1.0.0 · walletcap 0.2.3
 Every agent is held to $50 a payment and $150 in any 24 hours, in USDC on Base.
 
-CDP x402 spend controls                      CDP's controls                     walletcap
-  restart, then pay again                    $300 signed · $150 over            $150 signed · $0 over
-  10 replicas                                $1,500 signed · $1,350 over        $150 signed · $0 over
-  10 replicas, shared store 1 ms away        $350 signed · $200 over            $150 signed · $0 over
-  payee asks for EURC, not USDC              1,000 EURC signed, counted as $0   refused before signing
+CDP x402 spend controls                      CDP's controls                     walletcap guard          walletcap cdpStore
+  restart, then pay again                    $300 signed · $150 over            $150 signed · $0 over    $150 signed · $0 over
+  10 replicas                                $1,500 signed · $1,350 over        $150 signed · $0 over    $150 signed · $0 over
+  10 replicas, shared store 1 ms away        $350 signed · $200 over            $150 signed · $0 over    $150 signed · $0 over
+  payee asks for EURC, not USDC              1,000 EURC signed, counted as $0   refused before signing   refused before signing
 
 Spend Permissions                            SpendPermissionManager             AccountCapSpender
   a second permission                        $300 pulled · $150 over            $150 pulled · $0 over
   across a period boundary, 1 second apart   $300 pulled · $150 over            $150 pulled · $0 over
 
 Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls, $300 with Spend Permissions;
-$0 with walletcap.
+$0 with walletcap's guard and AccountCapSpender; $0 with CDP's controls on walletcap's cdpStore.
 ```
 
-It needs Node 22.13 or later. Add `--json` for machine-readable results. The process exits 1 if walletcap lets anything past the cap.
+It needs Node 22.13 or later. Add `--json` for machine-readable results; each event's `cdp`, `walletcap` and `cdpStore` hold the three columns. The process exits 1 if walletcap's guard, CDP's controls on walletcap's cdpStore, or any other walletcap control lets anything past the cap.
 
 To run it from this repository instead: `cd crash-test && npm install && npm start`.
 
@@ -40,22 +40,25 @@ To run it from this repository instead: `cd crash-test && npm install && npm sta
 
 Every agent is a separate Node process with its own throwaway key. It builds an `@x402/core` client with the exact EVM scheme and tries its payments.
 
-The two controls:
+The three controls:
 - **CDP's controls:** `applySpendControls` from `@coinbase/cdp-sdk/x402`, the same guardrails `CdpX402Client` uses. The settings follow Coinbase's README example: per-payment and cumulative caps in USDC, Base only, and no asset allowlist. Like `CdpX402Client`, the agent turns off x402's own default cap.
-- **walletcap:** `budget.guard()` on the same client. The owner sets the budget once, and every agent opens the same file.
+- **walletcap guard:** `budget.guard()` on the same client. The owner sets the budget once, and every agent opens the same file.
+- **walletcap cdpStore:** CDP's own `applySpendControls` again, set exactly as [walletcap's README](https://github.com/coriolislabs/WalletCap#coinbase-cdp-spend-controls) shows: the same caps, `allowedAssets: [USDC]`, and `store: budget.cdpStore({ asset: USDC })`. The owner sets the budget once, and every agent, replica or restart opens the same file, so CDP's ledger is that file.
 
-The events, each from a fresh start:
+The events, each from a fresh start, once per control:
 
 | Event | What happens |
 |---|---|
 | Restart | One process pays until it is refused. A second process, the restart, pays again. |
 | 10 replicas | Ten processes start together and pay. |
-| 10 replicas, shared store | The same, with CDP's ledger in one shared store built to its `SpendStore` interface. |
+| 10 replicas, shared store | The same, with CDP's ledger in one shared store built to its `SpendStore` interface. In the cdpStore column, walletcap's store answers each call after the same 1 ms. |
 | EURC instead of USDC | The payee asks for 1,000 EURC. |
 
 The shared store is what Coinbase's docs advise for replicas: "implement this interface against a shared durable backend (Redis, Postgres, DynamoDB, etc.)". The store in `spend-store.mjs` does exactly what the interface says, and answers each call after 1 ms, as a network database does.
 
 The interface has no single step that both checks the cap and records the payment. CDP reads the total, decides, then appends, and its lock covers one process. Replicas can read the same total before any of them appends. How many overlap varies from run to run.
+
+walletcap's cdpStore sits behind the same interface, so CDP still reads, decides, then appends. Its `append` re-checks the cap inside one SQLite write transaction and throws if the payment would go past it. CDP appends before it signs, so a payment the store refuses is never signed. In the replica rows, the re-check usually refuses a few payments that CDP's own check had passed (`budget_budget` in `--json`); how many varies from run to run. In the EURC row, CDP's `allowedAssets`, which walletcap's README sets, refuses before the store is asked.
 
 ## Coinbase Spend Permissions
 
@@ -104,7 +107,7 @@ Nothing is sent. Each payment is an x402 authorization (EIP-3009) signed with a 
 ## What it doesn't cover
 
 - **Settlement of x402 payments.** For x402 it measures what the client-side control lets the agent sign, not what lands on chain. The Spend Permissions rows do move tokens on the local EVM.
-- **More than one machine.** The replicas share one machine, and walletcap's budget file is single-host.
+- **More than one machine.** The replicas share one machine, and walletcap's budget file, behind both its guard and its cdpStore, is single-host.
 - **A revoke in the same block.** A revoke that lands after the agent's payment in the same block doesn't stop that payment, with either control. Neither control can make a revoke retroactive.
 - **Other vendors' controls.** Coinbase's CDP x402 controls, Spend Permissions and AgentKit are covered so far. The Agentic Wallet, Safe, MetaMask, Tempo and AP2 come next.
 

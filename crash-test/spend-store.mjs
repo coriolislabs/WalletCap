@@ -65,3 +65,22 @@ export class SharedSpendStore {
     this.#db.close();
   }
 }
+
+/**
+ * Any SpendStore, answering each call after `latencyMs` as SharedSpendStore does. The shared-store
+ * row puts walletcap's store at the same distance, so CDP's check and its record are as far apart.
+ */
+export function withLatency(store, latencyMs) {
+  const call = method => async (...args) => {
+    await sleep(latencyMs);
+    return store[method](...args);
+  };
+  return {
+    size: call('size'),
+    load: call('load'),
+    append: call('append'),
+    prune: call('prune'),
+    removeEntry: call('removeEntry'),
+    close: () => store.close(),
+  };
+}
