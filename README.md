@@ -234,9 +234,13 @@ applySpendControls(client, {
 it cannot value instead of letting CDP count only the asset named in the cap.
 
 walletcap's store re-checks the budget when CDP records a payment, so it holds across replicas
-on one host on its own. It records the payment at its own time, not the time in CDP's entry. When CDP removes a payment from its store, the store can't tell why, so the payment
-stays counted as in-flight until you check the chain and run `npx walletcap release <id>`. Use
-CDP 1.56.0 or later; the store is tested against the published 1.60.0.
+on one host on its own. It records the payment at its own time, not the time in CDP's entry,
+and counts it until an hour (and a minute) after that, plus one window: CDP signs the payment
+after recording it, and lets a payee ask for an authorization it can redeem for up to an hour.
+When CDP removes a payment from its store, the store can't tell why, so the payment stays
+counted as in-flight until you check the chain and run `npx walletcap release <id>`. Use CDP
+1.60.0 or later: its published source refuses a `maxTimeoutSeconds` over 3600, which the store's
+hour relies on. The store is tested against 1.60.0, and the crash test runs 1.61.0.
 
 ### Coinbase Agentic Wallet (awal CLI and MCP server)
 

@@ -406,24 +406,29 @@ export class Ledger {
   }
 
   /** What counts against the budget right now: total and number of payments. */
-  counted(name, now = this.now()) {
+  counted(name) {
     const instrument = instrumentName(name);
-    return this.read(() => this.#counted(instrument, now));
+    return this.read(() => this.#counted(instrument, this.now()));
   }
 
-  countedRows(name, now = this.now()) {
+  /** The payments that count right now, and the ledger's time they were read at. */
+  countedRows(name) {
     const instrument = instrumentName(name);
-    return this.read(() => this.statement(
-      `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms, spend.expires_at_ms ${COUNTED}`,
-    ).all(instrument, now, now, now));
+    return this.read(() => {
+      const now = this.now();
+      const rows = this.statement(
+        `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms, spend.expires_at_ms ${COUNTED}`,
+      ).all(instrument, now, now, now);
+      return { now, rows };
+    });
   }
 
   /** Whether `amount` would be refused right now, without reserving it. */
   check(name, amount) {
     const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
-    const now = this.now();
     return this.read(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       const counted = this.#counted(instrument, now);
       const refused = refusal(row, counted, spend);
@@ -445,8 +450,9 @@ export class Ledger {
     identifier(rail, 'rail');
     const text = referenceText(reference);
     const settlesBy = settlesByMs === null ? null : integer(settlesByMs, 'settlesByMs', { allowZero: true });
-    const now = this.now();
     return this.transaction(() => {
+      // Read once the write lock is held: a wait for another process can't leave it stale.
+      const now = this.now();
       const row = this.#required(instrument);
       const refused = refusal(row, this.#counted(instrument, now), spend);
       if (refused !== null) throw refused;
@@ -461,20 +467,24 @@ export class Ledger {
   /**
    * Record a payment as settled now, after the same checks. Coinbase's SDK
    * records a payment when it creates it; the time is always the ledger's own.
+   * With settlesWithinMs, the payment can still settle up to that long after it
+   * is recorded, so it counts until one window past that moment too.
    */
-  record(name, amount, { rail, reference = null }) {
+  record(name, amount, { rail, reference = null, settlesWithinMs = null }) {
     const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
     identifier(rail, 'rail');
     const text = referenceText(reference);
-    const now = this.now();
+    const within = settlesWithinMs === null ? null : integer(settlesWithinMs, 'settlesWithinMs');
     return this.transaction(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       const refused = refusal(row, this.#counted(instrument, now), spend);
       if (refused !== null) throw refused;
       const spendId = `${rail}-${randomUUID()}`;
-      this.statement("INSERT INTO spend VALUES (?, ?, ?, 'committed', ?, ?, ?, NULL)")
-        .run(spendId, instrument, spend, rail, text, now);
+      const expires = within === null ? null : expiry(now + within, now, row.window_ms);
+      this.statement("INSERT INTO spend VALUES (?, ?, ?, 'committed', ?, ?, ?, ?)")
+        .run(spendId, instrument, spend, rail, text, now, expires);
       return spendId;
     });
   }
@@ -488,8 +498,8 @@ export class Ledger {
   commit(spendId, { reference } = {}) {
     identifier(spendId, 'spend_id');
     const text = referenceText(reference);
-    const now = this.now();
     this.transaction(() => {
+      const now = this.now();
       const row = this.statement('SELECT status FROM spend WHERE spend_id = ?').get(spendId);
       if (row === undefined) throw new BudgetError('unknown reservation');
       if (row.status === 'committed') throw new BudgetError('reservation is already committed');
@@ -507,8 +517,8 @@ export class Ledger {
   settlesBy(spendId, settlesByMs) {
     identifier(spendId, 'spend_id');
     const settlesBy = integer(settlesByMs, 'settlesByMs', { allowZero: true });
-    const now = this.now();
     this.transaction(() => {
+      const now = this.now();
       const row = this.statement('SELECT spend.status, spend.expires_at_ms, budgets.window_ms FROM spend '
         + 'JOIN budgets ON budgets.instrument = spend.instrument WHERE spend.spend_id = ?').get(spendId);
       if (row === undefined || row.status !== 'reserved' || row.expires_at_ms !== null) return;
@@ -564,8 +574,8 @@ export class Ledger {
   /** Refuse every later payment from the instrument, on every rail. */
   revoke(name) {
     const instrument = instrumentName(name);
-    const now = this.now();
     this.transaction(() => {
+      const now = this.now();
       this.#required(instrument);
       this.statement('UPDATE budgets SET revoked_at_ms = ? WHERE instrument = ? AND revoked_at_ms IS NULL').run(now, instrument);
     });
@@ -583,8 +593,8 @@ export class Ledger {
   /** What counts against the budget right now, in its own unit. */
   status(name) {
     const instrument = instrumentName(name);
-    const now = this.now();
     return this.read(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       const sums = Object.fromEntries(this.statement(
         `SELECT spend.status AS status, COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses ${COUNTED} GROUP BY spend.status`,
@@ -613,8 +623,8 @@ export class Ledger {
   history(name, { limit = 20 } = {}) {
     const instrument = instrumentName(name);
     const rows = integer(limit, 'limit');
-    const now = this.now();
     return this.read(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       return this.statement('SELECT * FROM spend WHERE instrument = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?')
         .all(instrument, rows)
@@ -637,8 +647,8 @@ export class Ledger {
   prune(name, cutoffMs) {
     const instrument = instrumentName(name);
     const cutoff = integer(cutoffMs, 'olderThanMs', { allowZero: true });
-    const now = this.now();
     this.transaction(() => {
+      const now = this.now();
       const { window_ms: window } = this.#required(instrument);
       // Reservations stay until committed or released: a lapsed one may still settle.
       this.statement("DELETE FROM spend WHERE instrument = ? AND status = 'committed' AND at_ms < ? AND at_ms + ? < ? "

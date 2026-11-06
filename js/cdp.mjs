@@ -10,12 +10,20 @@
 import { BudgetError } from './errors.mjs';
 import { checkKeys, instrumentName, integer, Ledger } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
+import { MAX_PAYMENT_TIMEOUT_SECONDS } from './x402.mjs';
 
 // The CDP store is its own rail. The x402 guard also writes rail 'x402',
 // and a shared rail let a guard row reach the CDP loader with the wrong
 // reference shape.
 const RAIL = 'cdp';
 const OPTION_KEYS = new Set(['path', 'instrument', 'asset', 'scale', 'busyTimeoutMs']);
+
+// How long after CDP records a payment it can still settle. CDP records a payment just before
+// it signs it, and its applySpendControls refuses a requirement whose maxTimeoutSeconds is over
+// 3600 (MAX_PAYMENT_TIMEOUT_SECONDS in @coinbase/cdp-sdk 1.60.0 and 1.61.0), so the signed
+// authorization can be redeemed for up to an hour. 60 seconds more covers the time between the
+// record and the signature. The payment counts until one window after that.
+const SETTLES_WITHIN_MS = BigInt(MAX_PAYMENT_TIMEOUT_SECONDS) * 1000n + 60_000n;
 
 // CDP compares assets after this normalization (EVM addresses lowercased).
 const normalizeAsset = asset => {
@@ -76,14 +84,14 @@ export class SharedBudgetStore {
   }
 
   async load() {
-    const now = this.#ledger.now();
+    const { now, rows } = this.#ledger.countedRows(this.#instrument);
     const { window_ms: windowMs } = this.#ledger.budget(this.#instrument) ?? {};
     // A settled payment that still counts past its window (its reservation's expiry) is dated
     // to the moment it counts from, so CDP's own window check keeps it while walletcap does.
     const countsFrom = row => (row.expires_at_ms !== null && windowMs !== undefined && row.expires_at_ms - windowMs - 1n > row.at_ms
       ? row.expires_at_ms - windowMs - 1n
       : row.at_ms);
-    return this.#ledger.countedRows(this.#instrument, now).map(row => {
+    return rows.map(row => {
       const own = parseReference(row.reference);
       // A CDP entry carries atomicAmount. 0.2.0 wrote those on rail 'x402'; accept
       // both so an existing budget keeps counting after the rail split. A guard
@@ -121,10 +129,11 @@ export class SharedBudgetStore {
     const spend = atomic * this.#scale;
     if (spend > MAX_AMOUNT) throw new BudgetError('payment does not fit in the budget unit');
     // The SDK records a payment when it creates it and removes it if settlement
-    // fails, so the row counts at once, with no expiry: an unknown outcome keeps counting.
-    // It counts from the ledger's own time; the entry's `at` is CDP's, so it is kept only
-    // in the reference, which is how removeEntry() finds the row again.
-    this.#ledger.record(this.#instrument, spend, { rail: RAIL, reference: reference(entry) });
+    // fails, so the row counts at once: an unknown outcome keeps counting. It counts
+    // from the ledger's own time, until one window past the last moment the signed
+    // authorization can be redeemed (SETTLES_WITHIN_MS). The entry's `at` is CDP's, so
+    // it is kept only in the reference, which is how removeEntry() finds the row again.
+    this.#ledger.record(this.#instrument, spend, { rail: RAIL, reference: reference(entry), settlesWithinMs: SETTLES_WITHIN_MS });
   }
 
   async prune(olderThanMs) {

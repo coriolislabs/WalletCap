@@ -676,8 +676,8 @@ class Ledger:
 
         instrument = _instrument(instrument)
         _amount(amount, "amount")
-        now = self._now_ms()
         with self._read() as connection:
+            now = self._now_ms()
             row = self._budget_row(connection, instrument)
             total, uses = self._counted(connection, instrument, now)
         left = 0 if row["revoked_at_ms"] is not None else max(row["cap"] - total, 0)
@@ -707,8 +707,8 @@ class Ledger:
         _reference(reference)
         if settles_by_ms is not None:
             _integer(settles_by_ms, "settles_by_ms", allow_zero=True)
-        now = self._now_ms()
         with self._transaction() as connection:
+            now = self._now_ms()
             budget = self._budget_row(connection, instrument)
             total, uses = self._counted(connection, instrument, now)
             refusal = _refusal(budget, total, uses, amount)
@@ -738,8 +738,8 @@ class Ledger:
 
         _identifier(spend_id, "spend_id")
         _reference(reference)
-        now = self._now_ms()
         with self._transaction() as connection:
+            now = self._now_ms()
             row = connection.execute(
                 "SELECT status FROM spend WHERE spend_id = ?", (spend_id,)
             ).fetchone()
@@ -805,8 +805,8 @@ class Ledger:
         """What counts against the instrument's budget right now."""
 
         instrument = _instrument(instrument)
-        now = self._now_ms()
         with self._read() as connection:
+            now = self._now_ms()
             budget = self._budget_row(connection, instrument)
             sums = {
                 row[0]: (row[1], row[2])
@@ -836,8 +836,8 @@ class Ledger:
 
         instrument = _instrument(instrument)
         _integer(limit, "limit")
-        now = self._now_ms()
         with self._read() as connection:
+            now = self._now_ms()
             window = self._budget_row(connection, instrument)["window_ms"]
             rows = connection.execute(
                 "SELECT * FROM spend WHERE instrument = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?",
@@ -849,8 +849,8 @@ class Ledger:
         """One payment by id, or None."""
 
         _identifier(spend_id, "spend_id")
-        now = self._now_ms()
         with self._read() as connection:
+            now = self._now_ms()
             row = connection.execute(
                 "SELECT spend.*, budgets.window_ms AS window_ms FROM spend "
                 "JOIN budgets ON budgets.instrument = spend.instrument WHERE spend_id = ?",
@@ -885,8 +885,8 @@ class Ledger:
         """
 
         instrument = _instrument(instrument)
-        now = self._now_ms()
         with self._transaction() as connection:
+            now = self._now_ms()
             window = self._budget_row(connection, instrument)["window_ms"]
             deleted: int = connection.execute(
                 "DELETE FROM spend WHERE instrument = ? AND status = 'committed' "

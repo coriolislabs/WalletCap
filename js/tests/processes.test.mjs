@@ -2,6 +2,7 @@
 // Separate processes stand in for a restart and for replicas: the budget lives in
 // the file, so neither starts the count again.
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,4 +48,28 @@ test('x402 replicas racing with guarded clients cannot pass the shared cap', asy
   assert.equal(count(results, 'paid'), 3);
   assert.equal(openBudget({ wallet: kit.account.address, path }).status().spent, 150_000_000n);
   return undefined;
+});
+
+test("the ledger reads the time once it holds the write lock, so waiting for another process can't make it stale", async () => {
+  const path = join(DIR, 'lock.sqlite');
+  const budget = openBudget({ wallet: WALLET, path, ...LIMITS, create: true });
+  // Another process takes the write lock and holds it for 400 ms.
+  const holder = spawn(process.execPath, ['--input-type=module', '-e', [
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const db = new DatabaseSync(process.argv[1]);',
+    "db.exec('BEGIN IMMEDIATE');",
+    "process.stdout.write('locked\\n');",
+    "setTimeout(() => { db.exec('COMMIT'); db.close(); }, 400);",
+  ].join(' '), path], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const exited = new Promise(resolve => holder.on('exit', resolve));
+  await new Promise(resolve => holder.stdout.once('data', resolve));
+  const asked = Date.now();
+  const held = budget.reserve('$1');
+  const [row] = budget.history();
+  assert.equal(row.id, held.id);
+  // 0.3.0 read the time before it waited for the lock, so the payment was dated, and stopped
+  // counting, as much as the wait earlier than it was taken.
+  assert.ok(row.at.getTime() - asked >= 250, `dated ${row.at.getTime() - asked} ms after it was asked for`);
+  await exited;
+  budget.close();
 });

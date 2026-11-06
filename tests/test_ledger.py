@@ -276,6 +276,33 @@ def test_a_commit_never_shortens_a_hold(tmp_path: Path, clock: Clock) -> None:
     _pay(ledger)
 
 
+def test_the_time_is_read_once_the_write_lock_is_held(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite"
+    ledger = _ledger(path)
+    script = (
+        "import sqlite3, sys, time\n"
+        "connection = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(0.4)\n"
+        "connection.execute('COMMIT')\n"
+    )
+    # Another process takes the write lock and holds it for 400 ms.
+    holder = subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    asked = time.time()
+    spend_id = ledger.reserve("agent", 1)
+    [spend] = ledger.history("agent")
+    assert spend.spend_id == spend_id
+    # 0.3.0 read the time before it waited for the lock, so the payment was dated, and stopped
+    # counting, as much as the wait earlier than it was taken.
+    assert spend.at_ms / 1000 - asked >= 0.25
+    assert holder.wait(timeout=30) == 0
+
+
 def test_a_checksummed_address_names_the_one_lowercase_budget(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "budget.sqlite")
     lower = "0xd797ead28c38575fdf4fc523866287372340ca02"

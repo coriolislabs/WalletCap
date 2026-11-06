@@ -5,12 +5,16 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, test } from 'node:test';
+import { after, afterEach, test } from 'node:test';
+import { resetClock, setClock } from '../_clock.mjs';
 import { openBudget, SharedBudgetStore } from '../index.mjs';
 import { Ledger } from '../ledger.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
+afterEach(resetClock);
+const DAY = 86_400_000;
+const HOUR = 3_600_000;
 
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 const USDC = '0x036cbd53842c5426634e7929541ec2318f3dcf7e'; // all lowercase on purpose
@@ -123,7 +127,7 @@ test("an entry CDP backdates still counts from the ledger's own time", async () 
     await store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 });
     assert.equal(budget.status().spent, 1_000_000n);
     const [row] = await store.load();
-    assert.ok(Math.abs(row.at - Date.now()) < 60_000, `the entry is dated ${row.at}`);
+    assert.ok(row.at >= Date.now() - 60_000, `the entry is dated ${row.at}, not when CDP said`);
     await assert.rejects(store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 }), { reason: 'budget' });
     assert.equal(budget.status().spent, 1_000_000n);
   } finally {
@@ -155,6 +159,31 @@ test('a checksummed or CAIP-10 instrument spends from the one lowercase budget',
     assert.deepEqual(ledger.budgets().map(row => row.instrument), [WALLET]);
   } finally {
     ledger.close();
+    budget.close();
+  }
+});
+
+test('a CDP payment counts until an hour after it is recorded, plus one window: its authorization can be redeemed that long', async () => {
+  const clock = { now: Date.now() };
+  setClock(() => clock.now);
+  const { budget, store } = fixture();
+  const entry = atomicAmount => ({ atomicAmount, asset: USDC, network: NETWORK, payTo: PAY_TO, at: clock.now });
+  try {
+    const recorded = clock.now;
+    await store.append(entry(1_000_000n));
+    // CDP lets a payee ask for an authorization valid an hour; 0.3.0 counted the payment one
+    // window from when CDP recorded it, so a second $1 passed the $1 cap while the first was redeemable.
+    clock.now = recorded + DAY + 1;
+    await assert.rejects(store.append(entry(1n)), { reason: 'budget' });
+    const [counted] = await store.load();
+    assert.ok(counted.at >= clock.now - DAY, "CDP's own window keeps it too");
+    clock.now = recorded + HOUR + 60_000 + DAY;
+    assert.equal(budget.status().spent, 1_000_000n);
+    clock.now += 1;
+    assert.equal(budget.status().spent, 0n);
+    await store.append(entry(1_000_000n));
+  } finally {
+    store.close();
     budget.close();
   }
 });
