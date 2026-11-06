@@ -1,17 +1,61 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# walletcap
+# walletcap: spend limits for AI agent wallets
 
-[![CircleCI](https://dl.circleci.com/status-badge/img/circleci/9kf5Wo9wYAuLZHsV9nFTQC/Pcdc3JTt5shsZfYpip6SBB/tree/main.svg?style=svg)](https://app.circleci.com/pipelines/circleci/9kf5Wo9wYAuLZHsV9nFTQC/Pcdc3JTt5shsZfYpip6SBB)
+[![npm](https://img.shields.io/npm/v/walletcap?label=npm)](https://www.npmjs.com/package/walletcap)
+[![PyPI](https://img.shields.io/pypi/v/walletcap?label=PyPI)](https://pypi.org/project/walletcap/)
+[![CI](https://github.com/coriolislabs/WalletCap/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/coriolislabs/WalletCap/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/coriolislabs/WalletCap/blob/main/LICENSE)
 
-**Your agent's spending limit forgets. This one doesn't.** By ShadowPath.
+**Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour
+budget that holds across restarts, replicas and payment rails.** walletcap plugs into x402
+clients, Coinbase CDP's x402 spend controls, Coinbase AgentKit, the Coinbase Agentic Wallet CLI
+and payments MCP server, and Coinbase Spend Permissions. By ShadowPath.
 
-Agent payment kits count "spent so far" per process, per key, per permission or per
-period. So a restart, a second replica, one more key, or the next period hands the agent a
-fresh budget. walletcap counts **per wallet**: one budget that every process,
-replica, key, permission and payment rail spends from.
+## Crash test: CDP's controls let $1,600–$1,700 past a $150 cap, walletcap lets $0
 
-The owner creates the budget once. Opening it never creates one; pass `create: true` only
-for a demo or first-run setup:
+`npx walletcap-crash-test` puts Coinbase's agent spend controls through four ordinary events (a
+restart, 10 replicas, 10 replicas on a shared store, and a payee who asks for EURC), then puts
+walletcap through the same events. CDP's x402 controls are set as Coinbase's README shows, then
+run again on walletcap's `cdpStore` as this README shows. Spend Permissions run Coinbase's
+deployed contract code on a local EVM. Every agent is held to $50 a payment and $150 in any 24
+hours, in USDC on Base. It runs offline in about 15 seconds and sends nothing.
+
+```console
+$ npx walletcap-crash-test
+```
+
+| CDP x402 spend controls | CDP's controls | walletcap guard | walletcap cdpStore |
+|---|---|---|---|
+| restart, then pay again | $300 signed · $150 over | $150 signed · $0 over | $150 signed · $0 over |
+| 10 replicas | $1,500 signed · $1,350 over | $150 signed · $0 over | $150 signed · $0 over |
+| 10 replicas, shared store 1 ms away | $350 signed · $200 over | $150 signed · $0 over | $150 signed · $0 over |
+| payee asks for EURC, not USDC | 1,000 EURC signed, counted as $0 | refused before signing | refused before signing |
+
+| Spend Permissions | SpendPermissionManager | AccountCapSpender |
+|---|---|---|
+| a second permission | $300 pulled · $150 over | $150 pulled · $0 over |
+| across a period boundary, 1 second apart | $300 pulled · $150 over | $150 pulled · $0 over |
+
+Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls, $300 with Spend Permissions; $0
+with walletcap's guard, its cdpStore and AccountCapSpender. The shared-store row varies from
+run to run: in eight runs on 6 November 2026 it was $100 over five times and $200 over three
+times. Those runs used `@coinbase/cdp-sdk` 1.61.0, `@x402/core` 2.30.0, SpendPermissionManager
+1.0.0 and walletcap 0.2.3.
+
+Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and AgentKit signs
+the merchant's first-listed $1.00 on Base mainnet. walletcap, at 2¢ a payment, refuses it before
+signing. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/crash-test)
+says exactly what runs.
+
+## Install and use
+
+```console
+$ npm install walletcap     # Node 22.13+, no dependencies
+$ pip install walletcap     # Python 3.11+, no dependencies
+```
+
+The owner creates the budget once. Opening it never creates one; pass `create: true` only for a
+demo or first-run setup:
 
 ```console
 $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
@@ -34,35 +78,18 @@ with budget.pay("$12.50"):
     send_usdc(payee, "12.50")
 ```
 
-`npm install walletcap` (Node 22.13+) · `pip install walletcap` (Python 3.11+) ·
-no dependencies · Apache-2.0
+| Integration | Install | Use |
+|---|---|---|
+| [Any x402 client](https://github.com/coriolislabs/WalletCap/blob/main/docs/x402-spending-limit.md) (`@x402/core`, `@x402/fetch`) | `npm install walletcap` | `budget.guard(client)` |
+| [Coinbase CDP x402 spend controls](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-cdp-spend-controls.md) | `npm install walletcap @coinbase/cdp-sdk` | `store: budget.cdpStore({ asset: USDC })` in `applySpendControls` |
+| [Coinbase AgentKit](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-agentkit-spending-limit.md) | `npm install walletcap @coinbase/agentkit` | `budget.guardAgentKit(new X402ActionProvider())` |
+| [Coinbase Agentic Wallet CLI](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-agentic-wallet-budget.md) | `npm install walletcap awal` | `npx walletcap awal x402 pay <url>` |
+| [Coinbase payments MCP server](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-agentic-wallet-budget.md#the-mcp-server-one-entry-in-the-clients-config) | `npx @coinbase/payments-mcp install --client other --no-auto-config` | MCP server command: `npx walletcap awal-mcp --wallet 0x…` |
+| [Coinbase Spend Permissions](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-spend-permissions-cap.md) | deploy `solidity/src/AccountCapSpender.sol` (testnet only, unaudited) | the agent calls `pay(permission, amount, payee)` |
+| [Python](https://github.com/coriolislabs/WalletCap/blob/main/docs/python-agent-spending-limit.md) | `pip install walletcap` | `with budget.pay("$12.50"):` |
 
-## Crash-test a spend limit
-
-`npx walletcap-crash-test` puts Coinbase's agent spend controls through the events that hand an
-agent a fresh budget, then puts walletcap through the same ones. CDP's x402 controls are set as
-Coinbase's README shows, then run again on walletcap's `cdpStore` as this README shows. Spend
-Permissions run Coinbase's deployed contract code on a local EVM. It runs offline in under
-fifteen seconds and sends nothing.
-
-```console
-$ npx walletcap-crash-test
-
-CDP x402 spend controls                      CDP's controls                     walletcap guard          walletcap cdpStore
-  restart, then pay again                    $300 signed · $150 over            $150 signed · $0 over    $150 signed · $0 over
-  10 replicas                                $1,500 signed · $1,350 over        $150 signed · $0 over    $150 signed · $0 over
-  10 replicas, shared store 1 ms away        $350 signed · $200 over            $150 signed · $0 over    $150 signed · $0 over
-  payee asks for EURC, not USDC              1,000 EURC signed, counted as $0   refused before signing   refused before signing
-
-Spend Permissions                            SpendPermissionManager             AccountCapSpender
-  a second permission                        $300 pulled · $150 over            $150 pulled · $0 over
-  across a period boundary, 1 second apart   $300 pulled · $150 over            $150 pulled · $0 over
-```
-
-Every agent is held to $50 a payment and $150 in any 24 hours. The shared-store row varies from
-run to run. Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and
-AgentKit signs the merchant's first-listed $1.00 on Base mainnet. [crash-test/README.md](crash-test/README.md)
-says exactly what runs.
+Each link opens a page with a full snippet. The [Use it](#use-it) section below covers every
+integration too.
 
 ## Try it without a wallet
 
@@ -327,6 +354,8 @@ only for a demo or a first-run setup.
 | `solidity/` | `AccountCapSpender`, the on-chain cap for Coinbase Spend Permissions |
 | `crash-test/` | the crash test: CDP's spend controls and walletcap through the same events, in dollars |
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
+| `docs/` | the docs site for GitHub Pages: one page per integration, each with a full snippet, plus the threat model |
+| `llms.txt` | a summary of the package and links to the docs, for language models |
 
 ```console
 $ cd js && npm install && node --test            # 65 tests
