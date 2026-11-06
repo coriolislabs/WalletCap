@@ -218,6 +218,27 @@ test('the hold lasts as long as the longest terms the wallet was handed, not onl
   assert.equal(budget.status().inFlight, 0n);
 });
 
+test("a budget that can't be written after the wallet answered raises PaymentNotRecorded, not a BudgetError", async () => {
+  // The wallet answers, then the budget can't be written: closed here, a busy timeout in practice.
+  // 0.3.0 let the ledger's BudgetError through, which code that retries on one would retry.
+  const cases = [
+    ['make-x402-request', { ...x402(), paymentRequirements: [requirement('50000', 300)] }, () => ({ status: 200, headers: {} }), 50_000n],
+    ['make-x402-request', x402(), () => { throw new Error('IPC request timed out'); }, 50_000n],
+    ['make-x402-request', { baseURL: base, path: '/free', method: 'GET' }, () => { throw new Error('fetch failed'); }, 1n],
+    ['send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia' }, () => ({ error: 'transaction underpriced' }), 50_000n],
+  ];
+  for (const [channel, data, answer, held] of cases) {
+    const { budget, path } = newBudget();
+    const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return answer(); }).request });
+    await assert.rejects(
+      guard.request(channel, data),
+      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError) && /could not be recorded; it still counts as in flight/.test(error.message),
+      `${channel} ${data.path ?? ''}`,
+    );
+    assert.equal(newBudget(undefined, path).budget.status().inFlight, held);
+  }
+});
+
 test('a send that went through but cannot be recorded throws PaymentNotRecorded', async () => {
   const { budget, path } = newBudget();
   const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return { transactionHash: TX }; }).request });

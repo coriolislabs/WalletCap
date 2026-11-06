@@ -25,14 +25,17 @@ export class BudgetRefused extends BudgetError {
 }
 
 /**
- * The payment went through, but the budget could not record it as settled. It
- * still counts as in flight. This is not a BudgetError, so code that retries on
- * a BudgetError does not pay twice. `reservationId` names the payment, and
- * `cause` is why it could not be recorded.
+ * The budget could not record what happened to a payment that went through,
+ * or may have: it still counts as in flight. This is not a BudgetError, so code
+ * that retries on a BudgetError does not pay twice. `reservationId` names the
+ * payment, and `cause` is why it could not be recorded. Pass `settled: false`
+ * when the payment's outcome isn't a confirmed settlement.
  */
 export class PaymentNotRecorded extends Error {
-  constructor(reservationId, options) {
-    super(`the payment went through but could not be recorded as settled; it still counts as in flight (${reservationId})`, options);
+  constructor(reservationId, { settled = true, ...options } = {}) {
+    super(settled
+      ? `the payment went through but could not be recorded as settled; it still counts as in flight (${reservationId})`
+      : `what happened to the payment could not be recorded; it still counts as in flight (${reservationId})`, options);
     this.name = 'PaymentNotRecorded';
     this.reservationId = reservationId;
   }

@@ -54,6 +54,16 @@ const settled = (reservation, tx) => {
   }
 };
 
+// Record what the wallet answered. If the ledger can't (a busy timeout, say), the payment still
+// counts as in flight, and the caller gets PaymentNotRecorded, not a BudgetError it might retry on.
+const recorded = (reservation, write) => {
+  try {
+    write();
+  } catch (error) {
+    throw new PaymentNotRecorded(reservation.id, { cause: error, settled: false });
+  }
+};
+
 // The amount the wallet sends is the amount counted: a whole number of atomic units in ASCII
 // digits, passed on to the wallet as walletcap read it ("0x10" or " 5" could read differently there).
 const sendAmount = value => {
@@ -123,8 +133,10 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   // settles a payment.
   const failed = (reservation, error) => {
     if (!reservation.open) return;
-    if (notSigned(error)) reservation.release();
-    else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+    recorded(reservation, () => {
+      if (notSigned(error)) reservation.release();
+      else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+    });
   };
 
   // When an unconfirmed x402 payment can no longer settle, if walletcap can tell. The wallet signs
@@ -186,12 +198,12 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       try {
         result = await request('make-x402-request', { ...data, maxAmountPerRequest: 1 });
       } catch (error) {
-        reservation.release();
+        recorded(reservation, () => reservation.release());
         throw error;
       }
       const answer = paymentResponseOf(result);
       if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
-      else reservation.release();
+      else recorded(reservation, () => reservation.release());
       return result;
     }
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
@@ -227,10 +239,10 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     // hold learns when the authorization expires, before anything else: a commit never shortens
     // a hold, so the payee's own word that the payment settled can't free the budget early.
     const settlesBy = settlesByOf(offered, handed);
-    if (settlesBy !== null) reservation[SETTLES_BY](settlesBy);
+    if (settlesBy !== null) recorded(reservation, () => reservation[SETTLES_BY](settlesBy));
     const answer = paymentResponseOf(result);
     if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
-    else reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
+    else recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));
     return result;
   }
 

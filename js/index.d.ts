@@ -34,8 +34,9 @@ export declare class BudgetRefused extends BudgetError {
 }
 
 /**
- * The payment went through, but the budget could not record it as settled; it still counts as
- * in flight. Not a BudgetError, so code that retries on a BudgetError does not pay twice.
+ * The budget could not record what happened to a payment that went through, or may have; it
+ * still counts as in flight. Not a BudgetError, so code that retries on a BudgetError does not
+ * pay twice.
  */
 export declare class PaymentNotRecorded extends Error {
   /** The reservation whose payment went through. */
