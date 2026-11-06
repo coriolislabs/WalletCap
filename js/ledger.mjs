@@ -291,6 +291,12 @@ export class Ledger {
         return this.#row(instrument);
       }
       if (!unitsMatch(row.unit, unit)) throw new BudgetError(`${shortWallet(instrument)}'s budget counts in ${row.unit}, not ${unit}`);
+      if (limits.windowMs !== undefined && limits.windowMs !== row.window_ms) {
+        const used = this.statement('SELECT 1 FROM spend WHERE instrument = ? LIMIT 1').get(instrument);
+        if (used) {
+          throw new BudgetError(`${shortWallet(instrument)} has spend in this budget; the window cannot change. Create a new budget instead.`);
+        }
+      }
       this.statement('UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ? WHERE instrument = ?').run(
         limits.cap ?? row.cap,
         limits.windowMs ?? row.window_ms,

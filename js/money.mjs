@@ -5,6 +5,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { BudgetError } from './errors.mjs';
+import { keccak256Hex } from './_keccak.mjs';
 
 export const MICROS = 1_000_000n;
 export const MAX_AMOUNT = (1n << 63n) - 1n;
@@ -16,6 +17,7 @@ const DURATION_MS = { ms: 1n, s: 1_000n, m: 60_000n, h: 3_600_000n, d: 86_400_00
 const DURATION_WORDS = { hour: 3_600_000n, day: 86_400_000n, week: 604_800_000n };
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const CAIP10_EVM = /^eip155:\d+:(0x[0-9a-fA-F]{40})$/;
+const CAIP10_SOLANA = /^solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const IDENTIFIER = /^[A-Za-z0-9_.:@/-]{1,128}$/;
 
 export const WINDOWS = { perHour: DURATION_WORDS.hour, perDay: DURATION_WORDS.day, perWeek: DURATION_WORDS.week };
@@ -90,16 +92,39 @@ export function formatWindow(ms) {
 /**
  * The name a wallet's budget is kept under. An EVM address (bare or CAIP-10)
  * is lowercased, so a checksummed and a lowercase address, or the same address
- * on two chains, share one budget instead of splitting it.
+ * on two chains, share one budget instead of splitting it. A mixed-case EVM
+ * address is checked against EIP-55 first. A Solana CAIP-10 is reduced to its
+ * address, so it and the bare address share one budget.
  */
+const checksumOk = address => {
+  const hex = address.slice(2);
+  const digest = keccak256Hex(hex.toLowerCase());
+  for (let i = 0; i < hex.length; i += 1) {
+    const char = hex[i];
+    if (/\d/.test(char)) continue;
+    if ((parseInt(digest[i], 16) >= 8) !== (char === char.toUpperCase())) return false;
+  }
+  return true;
+};
+
 export function normalizeWallet(wallet) {
   if (typeof wallet !== 'string' || wallet.trim().length === 0) {
     throw new BudgetError('wallet is required: the address or account the money leaves from');
   }
   let name = wallet.trim();
-  const caip = CAIP10_EVM.exec(name);
+  let caip = CAIP10_EVM.exec(name);
   if (caip) name = caip[1];
-  if (EVM_ADDRESS.test(name)) return name.toLowerCase();
+  else {
+    caip = CAIP10_SOLANA.exec(name);
+    if (caip) name = caip[1];
+  }
+  if (EVM_ADDRESS.test(name)) {
+    const hex = name.slice(2);
+    if (hex !== hex.toLowerCase() && hex !== hex.toUpperCase() && !checksumOk(name)) {
+      throw new BudgetError(`wallet ${JSON.stringify(name)} has an invalid EIP-55 checksum; copy the address or use all lowercase`);
+    }
+    return name.toLowerCase();
+  }
   // A mistyped address must not quietly open a second budget.
   if (/^0x/i.test(name)) throw new BudgetError(`wallet ${JSON.stringify(name)} looks like an EVM address but is not 40 hex digits`);
   if (!IDENTIFIER.test(name)) {

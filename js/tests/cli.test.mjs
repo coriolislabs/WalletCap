@@ -21,7 +21,7 @@ const cli = (path, ...args) => {
 test('an owner sets, reads, freezes and unfreezes a budget from the command line', async () => {
   const path = join(DIR, 'owner.sqlite');
   assert.match(cli(path).out, /No budget in .* yet/);
-  const set = cli(path, 'set', '--wallet', '0xD797ead28C38575FDf4fC523866287372340Ca02', '--per-day', '150', '--per-payment', '50');
+  const set = cli(path, 'set', '--wallet', '0xd797ead28C38575FDf4fC523866287372340Ca02', '--per-day', '150', '--per-payment', '50');
   assert.equal(set.code, 0, set.err);
   assert.match(set.out, /\$150\.00 per 24h, at most \$50\.00 a payment/);
 

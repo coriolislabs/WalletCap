@@ -519,6 +519,15 @@ class Ledger:
                     raise BudgetError(
                         f"{short_wallet(instrument)}'s budget counts in {row['unit']}, not {unit}"
                     )
+                if window_ms is not None and window_ms != row["window_ms"]:
+                    used = connection.execute(
+                        "SELECT 1 FROM spend WHERE instrument = ? LIMIT 1", (instrument,)
+                    ).fetchone()
+                    if used is not None:
+                        raise BudgetError(
+                            f"{short_wallet(instrument)} has spend in this budget; the window "
+                            "cannot change. Create a new budget instead."
+                        )
                 connection.execute(
                     "UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ? "
                     "WHERE instrument = ?",

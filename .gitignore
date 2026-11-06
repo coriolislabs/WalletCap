@@ -10,6 +10,7 @@ __pycache__/
 out/
 cache/
 work/
+examples/quickstart/demo.sqlite
 
 # The fake awal stand-in in the tests is committed on purpose: the CLI test
 # needs its dist/ layout, and the dist/ rule above would hide it.

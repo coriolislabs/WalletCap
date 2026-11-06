@@ -37,6 +37,10 @@ $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 0.05 --per-day 0.15
 $ npx walletcap freeze
 ```
 
+Security: [policy](https://github.com/coriolislabs/WalletCap/blob/main/SECURITY.md) ·
+[threat model](https://github.com/coriolislabs/WalletCap/blob/main/docs/threat-model.md).
+`AccountCapSpender` is unaudited; testnet only until an independent audit.
+
 [Source, Python package and full documentation](https://github.com/coriolislabs/WalletCap)
 
 Apache-2.0. Copyright 2026 Coriolis Labs Inc.

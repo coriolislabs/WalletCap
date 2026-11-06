@@ -69,6 +69,13 @@ test('raising a limit keeps what was spent: the total stays a total', async () =
   await assert.rejects(paid(budget, '$0.05'), refusedFor('budget'));
 });
 
+test('the window cannot change after spend, so the count cannot be reset', async () => {
+  const { budget } = fixture({ perPayment: '$0.05', perDay: '$0.15' });
+  await paid(budget, '$0.05');
+  assert.throws(() => budget.setLimits({ cap: '$0.15', window: '1ms' }), /window cannot change/);
+  assert.equal(budget.status().spent, 50_000n);
+});
+
 test('lowering a limit below what was spent refuses until the spend ages out', async () => {
   const { budget, clock } = fixture();
   await paid(budget, '$50');
@@ -169,7 +176,7 @@ test('freezing stops every payment in every process until unfrozen', async () =>
 
 test('checksummed, lowercase and CAIP-10 addresses spend from one budget', async () => {
   const { path, clock } = fixture({ perDay: '$150' });
-  const a = openBudget({ wallet: '0xD797ead28C38575FDf4fC523866287372340Ca02', path, clock: () => clock.now });
+  const a = openBudget({ wallet: '0xd797ead28C38575FDf4fC523866287372340Ca02', path, clock: () => clock.now });
   const b = openBudget({ wallet: `eip155:8453:${WALLET}`, path, clock: () => clock.now });
   await paid(a, '$100');
   await assert.rejects(paid(b, '$100'), refusedFor('budget'));

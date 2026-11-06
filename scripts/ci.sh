@@ -21,6 +21,10 @@ else
   exit 1
 fi
 
+echo "== Examples =="
+node examples/quickstart/quickstart.mjs >/dev/null
+python3 examples/quickstart/quickstart.py >/dev/null
+
 echo "== Solidity (Foundry) =="
 if command -v forge >/dev/null 2>&1; then
   (cd solidity && forge test)

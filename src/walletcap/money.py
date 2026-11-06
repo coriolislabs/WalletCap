@@ -17,6 +17,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Final
 
+from walletcap._keccak import keccak256
 from walletcap.errors import BudgetError
 
 MICROS: Final = 1_000_000
@@ -32,6 +33,7 @@ _DURATION_MS: Final = {"ms": 1, "s": 1_000, "m": 60_000, "h": HOUR_MS, "d": DAY_
 _DURATION_WORDS: Final = {"hour": HOUR_MS, "day": DAY_MS, "week": WEEK_MS}
 _EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _CAIP10_EVM = re.compile(r"^eip155:\d+:(0x[0-9a-fA-F]{40})$")
+_CAIP10_SOLANA = re.compile(r"^solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
 _EXAMPLES = 'dollars, like "$12.50", 12.5 or "12.50 USDC"'
 
@@ -90,13 +92,13 @@ def format_amount(amount: int, unit: str) -> str:
 
 
 def to_window_ms(value: object, label: str = "window") -> int:
-    """A rolling window as milliseconds: "24h", "7d", "30m", "day", or int seconds."""
+    """A rolling window as milliseconds: "24h", "7d", "30m", "day", or int milliseconds."""
 
     ms: int | None = None
     if isinstance(value, bool):
         ms = None
     elif isinstance(value, int):
-        ms = value * 1_000
+        ms = value
     elif isinstance(value, str):
         text = value.strip().lower()
         match = _DURATION.match(text)
@@ -106,7 +108,7 @@ def to_window_ms(value: object, label: str = "window") -> int:
             ms = _DURATION_WORDS.get(text)
     if ms is None or ms <= 0 or ms > MAX_AMOUNT:
         raise BudgetError(
-            f'{label} must be a duration like "24h", "7d" or "30m", or a positive number of seconds'
+            f'{label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds'
         )
     return ms
 
@@ -122,11 +124,26 @@ def format_window(ms: int) -> str:
     return f"{ms}ms"
 
 
+def _checksum_ok(address: str) -> bool:
+    """Whether *address* has a valid EIP-55 mixed-case checksum."""
+
+    hexpart = address[2:]
+    digest = keccak256(hexpart.lower().encode("ascii")).hex()
+    for index, char in enumerate(hexpart):
+        if char.isdigit():
+            continue
+        if (int(digest[index], 16) >= 8) != char.isupper():
+            return False
+    return True
+
+
 def normalize_wallet(wallet: object) -> str:
     """The name a wallet's budget is kept under.
 
     An EVM address, bare or CAIP-10, is lowercased, so a checksummed and a
-    lowercase address, or the same address on two chains, share one budget.
+    lowercase address, or the same address on two chains, share one budget. A
+    mixed-case EVM address is checked against EIP-55 first. A Solana CAIP-10 is
+    reduced to its address, so it and the bare address share one budget.
     """
 
     if not isinstance(wallet, str) or not wallet.strip():
@@ -135,7 +152,21 @@ def normalize_wallet(wallet: object) -> str:
     caip = _CAIP10_EVM.match(name)
     if caip is not None:
         name = caip.group(1)
+    else:
+        caip = _CAIP10_SOLANA.match(name)
+        if caip is not None:
+            name = caip.group(1)
     if _EVM_ADDRESS.match(name):
+        hexpart = name[2:]
+        if (
+            hexpart != hexpart.lower()
+            and hexpart != hexpart.upper()
+            and not _checksum_ok(name)
+        ):
+            raise BudgetError(
+                f"wallet {name!r} has an invalid EIP-55 checksum; "
+                "copy the address or use all lowercase"
+            )
         return name.lower()
     # A mistyped address must not quietly open a second budget.
     if name[:2].lower() == "0x":

@@ -35,7 +35,7 @@ from walletcap import (  # noqa: E402
 )
 
 WALLET = "0xd797ead28c38575fdf4fc523866287372340ca02"
-CHECKSUMMED = "0xD797ead28C38575FDf4fC523866287372340Ca02"
+CHECKSUMMED = "0xd797ead28C38575FDf4fC523866287372340Ca02"
 DAY = 86_400
 TX = "0x" + "ab" * 32
 NODE = shutil.which("node")
@@ -96,6 +96,17 @@ def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
     _pay(budget, "0.05")
     with pytest.raises(BudgetRefused):
         _pay(budget, "0.05")
+
+
+def test_the_window_cannot_change_after_spend(tmp_path: Path) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "window.sqlite", per_day="$150", create=True)
+    _pay(budget, "$1")
+    with pytest.raises(BudgetError, match="window cannot change"):
+        budget.set_limits(cap="$150", window="1ms")
+    assert budget.status().spent == 1_000_000
+
+    fresh = open_budget(WALLET, path=tmp_path / "fresh.sqlite", per_day="$150", create=True)
+    assert fresh.set_limits(cap="$150", window="1h").window_ms == 3_600_000
 
 
 def test_code_can_lower_a_limit_for_everyone_and_the_window_rolls(tmp_path: Path) -> None:

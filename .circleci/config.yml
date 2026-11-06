@@ -23,6 +23,11 @@ jobs:
             /tmp/venv/bin/pip install --quiet pytest
             /tmp/venv/bin/python -m pytest -q
       - run:
+          name: Examples
+          command: |
+            node examples/quickstart/quickstart.mjs
+            python3 examples/quickstart/quickstart.py
+      - run:
           name: Solidity
           command: |
             cd solidity/evm

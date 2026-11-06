@@ -37,6 +37,21 @@ with budget.pay("$12.50"):
 `npm install walletcap` (Node 22.13+) · `pip install walletcap` (Python 3.11+) ·
 no dependencies · Apache-2.0
 
+## Try it without a wallet
+
+Two runnable demos use a fake payee and a temporary file: no wallet, chain, keys or
+network.
+
+```console
+$ node examples/quickstart/quickstart.mjs
+$ python3 examples/quickstart/quickstart.py
+```
+
+They show three `$0.05` payments against a `$0.15` rolling cap, a `$1.00` refusal, a
+fourth `$0.05` refusal, and a restart that cannot raise the limits. The demo uses
+`create: true`; a production agent opens with the default `create: false` after the
+owner runs `walletcap set`.
+
 ## Why a per-wallet count
 
 Most agent spend controls keep "spent so far" next to something temporary or repeatable: a
@@ -257,8 +272,9 @@ only for a demo or a first-run setup.
   go around it: call the wallet directly, or delete the file. To bound an agent like that, keep
   the budget out of its reach (another OS user, another service) or enforce on chain, as
   `AccountCapSpender` does for Spend Permissions.
-- **One file is one host, or a shared volume.** A Postgres backend for replicas on separate
-  hosts is next.
+- **One file is one host.** A shared volume can work for one host's containers, but SQLite
+  over NFS is not a multi-host database. A Postgres backend for replicas on separate hosts is
+  next.
 - **It can't see a revoke that lands later in the same block,** and for x402 schemes that settle
   later (batch vouchers), a payment counts from when the server confirms it.
 - **Some x402 payments can't be confirmed.** `@x402/fetch` doesn't report v1 settlements
@@ -277,8 +293,8 @@ only for a demo or a first-run setup.
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
 
 ```console
-$ cd js && npm install && node --test            # 58 tests
-$ uv run --with pytest pytest -q                 # 54 tests, from the repository root
+$ cd js && npm install && node --test            # 61 tests
+$ uv run --with pytest pytest -q                 # 59 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
 ```
@@ -289,9 +305,19 @@ MCP proxy against stand-ins for Coinbase's wallet and MCP server. The Python sui
 the CLI and one budget shared between both languages. `solidity/evm/check.mjs` compiles the
 contract with solc-js and drives it on an in-process EVM, covering what the Foundry tests cover.
 
-One test is **not** here: the integration test that drives Coinbase's CDP spend controls through
-the shared store. It runs against a vendored build of Coinbase's SDK and lives in ShadowPath's
-own repository. Porting it to the published `@coinbase/cdp-sdk` is open work.
+The JavaScript suite also drives the published `@coinbase/cdp-sdk@1.60.0` through the
+shared store, so the CDP integration is covered against the package users install.
+
+## Security and audit
+
+- [Security policy](SECURITY.md): how to report a vulnerability, supported versions,
+  and the 90-day coordinated-disclosure window for walletcap itself.
+- [Threat model](docs/threat-model.md): what the guard stops, what it does not, and the
+  deployment patterns that hold.
+- [Vendor benchmark disclosure](docs/vendor-disclosure.md): the separate 7-day
+  pre-publication notice for vendor findings in the Agent Payment Benchmark.
+- `AccountCapSpender` is **unaudited**. Read [solidity/README.md](solidity/README.md)
+  before deploying it; testnet only until an independent audit.
 
 ## Prove it holds in your deployment
 

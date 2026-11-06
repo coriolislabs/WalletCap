@@ -37,13 +37,22 @@ test('amounts and windows read back the way people write them', () => {
 
 test('one wallet is one budget, however its address is written', () => {
   const lower = '0xd797ead28c38575fdf4fc523866287372340ca02';
-  assert.equal(normalizeWallet('0xD797ead28C38575FDf4fC523866287372340Ca02'), lower);
+  assert.equal(normalizeWallet('0xd797ead28C38575FDf4fC523866287372340Ca02'), lower);
   assert.equal(normalizeWallet(`eip155:8453:${lower.toUpperCase().replace('0X', '0x')}`), lower);
   assert.equal(normalizeWallet(' card-visa-4242 '), 'card-visa-4242');
   // A truncated address must not quietly open a second budget.
   assert.throws(() => normalizeWallet('0xd797ead28c38575fdf4fc523866287372340ca0'), /not 40 hex digits/);
   assert.throws(() => normalizeWallet('has space'), { name: 'BudgetError' });
   assert.throws(() => normalizeWallet(''), { name: 'BudgetError' });
+});
+
+
+test('mixed-case EVM addresses are checked against EIP-55, and Solana CAIP-10 is one wallet', () => {
+  const sol = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  assert.equal(normalizeWallet(sol), sol);
+  assert.equal(normalizeWallet(`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${sol}`), sol);
+  assert.throws(() => normalizeWallet('0xD797ead28C38575FDf4fC523866287372340Ca02'), /EIP-55/);
+  assert.equal(toWindowMs(86_400_000), 86_400_000n);
 });
 
 test('one rolling limit at a time, and nothing left out silently', () => {

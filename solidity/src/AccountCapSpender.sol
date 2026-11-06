@@ -19,6 +19,7 @@ interface ISpendPermissionManager {
     function spend(SpendPermission calldata spendPermission, uint160 value) external;
 }
 
+/// @custom:security UNAUDITED. Testnet only until an independent audit; see solidity/README.md.
 /// @title AccountCapSpender
 /// @notice One rolling budget per account and token across every Spend Permission
 /// that names this contract as its spender.
