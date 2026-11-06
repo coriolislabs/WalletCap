@@ -183,6 +183,22 @@ def to_window_ms(value: object, label: str = "window") -> int:
     return ms
 
 
+def format_age(ms: int) -> str:
+    """How long ago, roughly: ``"3d 4h"``, ``"4h 12m"``, ``"12m 5s"`` or ``"5s"``."""
+
+    units = (("d", DAY_MS), ("h", HOUR_MS), ("m", 60_000), ("s", 1_000))
+    parts: list[str] = []
+    left = max(ms, 0)
+    for suffix, size in units:
+        if not parts and left < size and suffix != "s":
+            continue
+        parts.append(f"{left // size}{suffix}")
+        left %= size
+        if len(parts) == 2:
+            break
+    return " ".join(parts)
+
+
 def format_window(ms: int) -> str:
     """``"24h"`` for a day (it rolls), then ``"7d"``, ``"30m"``, ``"90s"`` or ``"1500ms"``."""
 

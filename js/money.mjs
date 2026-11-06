@@ -116,6 +116,20 @@ export function toWindowMs(value, label = 'window') {
   return ms;
 }
 
+/** How long ago, roughly: "3d 4h", "4h 12m", "12m 5s" or "5s". */
+export function formatAge(ms) {
+  const units = [['d', 86_400_000n], ['h', 3_600_000n], ['m', 60_000n], ['s', 1_000n]];
+  const parts = [];
+  let left = ms < 0n ? 0n : ms;
+  for (const [suffix, size] of units) {
+    if (parts.length === 0 && left < size && suffix !== 's') continue;
+    parts.push(`${left / size}${suffix}`);
+    left %= size;
+    if (parts.length === 2) break;
+  }
+  return parts.join(' ');
+}
+
 /** "24h" for a day (it rolls), then "7d", "30m", "90s" or "1500ms". */
 export function formatWindow(ms) {
   if (ms === DURATION_MS.d) return '24h';

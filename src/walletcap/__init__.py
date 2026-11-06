@@ -12,6 +12,7 @@
 from walletcap.budget import (
     Budget,
     Check,
+    Hold,
     Paying,
     Payment,
     Reservation,
@@ -58,6 +59,7 @@ __all__ = [
     "BudgetStatus",
     "BudgetWarning",
     "Check",
+    "Hold",
     "Ledger",
     "NotSent",
     "OverBudget",

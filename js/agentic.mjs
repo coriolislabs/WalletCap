@@ -174,19 +174,20 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     const url = requestUrl(data).href.slice(0, 1024);
     if (offered === null) {
       // The endpoint asked for nothing. Let the request through with the wallet's smallest
-      // possible payment cap, counted, in case the payee asks for money after all.
+      // possible payment cap, one atomic unit, counted, in case the payee asks for money after
+      // all. Nothing was signed for value, so unless the payee confirms a payment the hold is
+      // given back: a free endpoint that fails can't leave holds that use up maxPayments.
       const reservation = budget.reserve(1n, { rail: 'awal-x402', note: url });
       let result;
       try {
         result = await request('make-x402-request', { ...data, maxAmountPerRequest: 1 });
       } catch (error) {
-        failed(reservation, error);
+        reservation.release();
         throw error;
       }
       const answer = paymentResponseOf(result);
-      if (answer === null) reservation.release();
-      else if (answer.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
-      else reservation.annotate({ outcome: answer.success === false ? 'refused' : 'unknown' });
+      if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
+      else reservation.release();
       return result;
     }
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];

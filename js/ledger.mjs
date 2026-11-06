@@ -145,10 +145,24 @@ const referenceText = reference => {
 const unreadable = (path, error) => new BudgetError(`the budget file ${path} cannot be used: ${error.message}`, { cause: error });
 
 /** Why `row`'s budget refuses `spend` on top of what already counts, or null. */
-export function refusal(row, { total, uses }, spend) {
+// Open payments named in a refusal, so its owner can see which holds take the room: the oldest few.
+const SHOWN_HOLDS = 3;
+const heldNote = (heldUses, openIds) => {
+  const ids = openIds();
+  const more = heldUses > BigInt(ids.length) ? ` and ${heldUses - BigInt(ids.length)} more` : '';
+  return `${ids.join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can release it`;
+};
+
+/**
+ * Why `row`'s budget refuses `spend` on top of what already counts, or null.
+ * `heldTotal` and `heldUses` are the part of the count that is open payments,
+ * and `openIds()` gives the oldest of their ids, so the refusal can name them.
+ */
+export function refusal(row, { total, uses, heldTotal = 0n, heldUses = 0n }, spend, openIds = () => []) {
   const name = shortWallet(row.instrument);
   const money = value => formatAmount(value, row.unit);
   const window = formatWindow(row.window_ms);
+  const plural = count => (count === 1n ? '' : 's');
   if (row.revoked_at_ms !== null) {
     return new BudgetRefused('revoked', `${name}'s budget is frozen: nothing can be paid until its owner unfreezes it`);
   }
@@ -157,10 +171,15 @@ export function refusal(row, { total, uses }, spend) {
   }
   if (total + spend > row.cap) {
     const left = row.cap > total ? row.cap - total : 0n;
-    return new BudgetRefused('budget', `${money(spend)} would bring ${name} to ${money(total + spend)} in the last ${window}, over its ${money(row.cap)} limit (${money(left)} left)`);
+    const held = heldUses > 0n ? `; ${money(heldTotal)} of it is ${heldUses} open payment${plural(heldUses)} (${heldNote(heldUses, openIds)})` : '';
+    return new BudgetRefused('budget', `${money(spend)} would bring ${name} to ${money(total + spend)} in the last ${window}, over its ${money(row.cap)} limit (${money(left)} left)${held}`);
   }
   if (row.max_uses !== null && uses + 1n > row.max_uses) {
-    return new BudgetRefused('uses', `${name} already made ${uses} payment${uses === 1n ? '' : 's'} in the last ${window}, the most its budget allows`);
+    if (heldUses === 0n) {
+      return new BudgetRefused('uses', `${name} already made ${uses} payment${plural(uses)} in the last ${window}, the most its budget allows`);
+    }
+    return new BudgetRefused('uses', `${name} has ${uses} payment${plural(uses)} counting in the last ${window}, the most its budget allows, `
+      + `and ${heldUses} of them ${heldUses === 1n ? 'is' : 'are'} still open (${heldNote(heldUses, openIds)})`);
   }
   return null;
 }
@@ -277,8 +296,16 @@ export class Ledger {
   }
 
   #counted(instrument, now) {
-    return this.statement(`SELECT COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses ${COUNTED}`)
+    return this.statement('SELECT COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses, '
+      + "COALESCE(SUM(CASE WHEN spend.status = 'reserved' THEN spend.amount END), 0) AS heldTotal, "
+      + `COUNT(CASE WHEN spend.status = 'reserved' THEN 1 END) AS heldUses ${COUNTED}`)
       .get(instrument, now, now, now);
+  }
+
+  // The ids of the oldest open payments that count, for a refusal to name.
+  #openIds(instrument, now) {
+    return () => this.statement(`SELECT spend.spend_id ${COUNTED} AND spend.status = 'reserved' ORDER BY spend.at_ms, spend.rowid LIMIT ?`)
+      .all(instrument, now, now, now, SHOWN_HOLDS).map(row => row.spend_id);
   }
 
   #insert(instrument, unit, { cap, windowMs, perPayment = null, maxUses = null }) {
@@ -431,7 +458,7 @@ export class Ledger {
       const now = this.now();
       const row = this.#required(instrument);
       const counted = this.#counted(instrument, now);
-      const refused = refusal(row, counted, spend);
+      const refused = refusal(row, counted, spend, this.#openIds(instrument, now));
       const left = row.cap - counted.total;
       return { refusal: refused, total: counted.total, uses: counted.uses, remaining: row.revoked_at_ms !== null || left < 0n ? 0n : left };
     });
@@ -454,7 +481,7 @@ export class Ledger {
       // Read once the write lock is held: a wait for another process can't leave it stale.
       const now = this.now();
       const row = this.#required(instrument);
-      const refused = refusal(row, this.#counted(instrument, now), spend);
+      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now));
       if (refused !== null) throw refused;
       const spendId = `spend-${randomUUID().replaceAll('-', '')}`;
       const expires = settlesBy === null ? null : expiry(settlesBy, now, row.window_ms);
@@ -479,7 +506,7 @@ export class Ledger {
     return this.transaction(() => {
       const now = this.now();
       const row = this.#required(instrument);
-      const refused = refusal(row, this.#counted(instrument, now), spend);
+      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now));
       if (refused !== null) throw refused;
       const spendId = `${rail}-${randomUUID()}`;
       const expires = within === null ? null : expiry(now + within, now, row.window_ms);
@@ -634,6 +661,41 @@ export class Ledger {
             ? spend.at_ms + row.window_ms >= now || (spend.expires_at_ms !== null && spend.expires_at_ms > now)
             : spend.expires_at_ms === null || spend.expires_at_ms > now,
         }));
+    });
+  }
+
+  /**
+   * The open payments that still count, oldest first: in flight, refused by the
+   * payee, or of unknown outcome. Each row carries the ledger's time as `now`.
+   */
+  holds(name) {
+    const instrument = instrumentName(name);
+    return this.read(() => {
+      const now = this.now();
+      this.#required(instrument);
+      return this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' "
+        + 'AND (expires_at_ms IS NULL OR expires_at_ms > ?) ORDER BY at_ms, rowid').all(instrument, now)
+        .map(row => ({ ...row, now }));
+    });
+  }
+
+  /**
+   * Give back every open payment whose outcome is unknown and that was taken at
+   * least `olderThanMs` ago, for an owner who has checked they never left the
+   * wallet. Returns the payments released.
+   */
+  releaseUnknown(name, olderThanMs) {
+    const instrument = instrumentName(name);
+    const age = integer(olderThanMs, 'olderThanMs', { allowZero: true });
+    const outcomeOf = text => { try { return JSON.parse(text)?.outcome; } catch { return undefined; } };
+    return this.transaction(() => {
+      const now = this.now();
+      this.#required(instrument);
+      const released = this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' AND at_ms <= ? ORDER BY at_ms, rowid")
+        .all(instrument, now - age).filter(row => outcomeOf(row.reference) === 'unknown');
+      const remove = this.statement("DELETE FROM spend WHERE spend_id = ? AND status = 'reserved'");
+      for (const row of released) remove.run(row.spend_id);
+      return released;
     });
   }
 

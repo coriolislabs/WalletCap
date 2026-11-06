@@ -152,6 +152,27 @@ export interface Payment {
  * A USD-pegged stablecoin the budget counts at $1 a token. List only USD-pegged stablecoins:
  * nothing else is priced. An entry can add an asset but can't change a built-in one's decimals.
  */
+/** An open payment that still counts against the budget. */
+export interface Hold {
+  id: string;
+  /** Micro-dollars. */
+  amount: bigint;
+  /**
+   * 'in flight': no outcome yet. 'refused': the payee said it failed, but may still hold the
+   * authorization. 'unknown': the payment call failed after the money may have left.
+   */
+  reason: 'in flight' | 'refused' | 'unknown';
+  at: Date;
+  /** How long ago it was taken, in milliseconds. */
+  ageMs: bigint;
+  /** When it stops counting, or null if only a release ends it. */
+  until: Date | null;
+  rail: string;
+  to?: string;
+  note?: string;
+  error?: string;
+}
+
 export interface AssetEntry {
   /** CAIP-2, like 'eip155:8453'. */
   network: string;
@@ -193,6 +214,8 @@ export declare class Budget {
   freeze(): void;
   unfreeze(): void;
   history(options?: { limit?: number }): Payment[];
+  /** The open payments that still count, oldest first, and why. Its owner releases one that never left: walletcap release <id>. */
+  holds(): Hold[];
   /**
    * Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client.
    * `assets` adds USD-pegged stablecoins to the built-in table; it can't change a built-in's decimals.

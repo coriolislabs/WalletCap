@@ -140,14 +140,25 @@ test('a send whose outcome is unknown keeps counting until its owner releases it
   assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown']);
 });
 
-test('a free endpoint that charges after all keeps an unconfirmed payment counting', async () => {
-  const clock = { now: Date.now() };
-  const { budget } = newBudget(clock);
-  const w = wallet(() => ({ status: 200, headers: { 'PAYMENT-RESPONSE': b64({ success: false }) } }));
-  await guardAgenticWallet(budget, { request: w.request }).request('make-x402-request', { baseURL: base, path: '/free', method: 'GET' });
-  clock.now += 30 * DAY;
-  assert.equal(budget.status().inFlight, 1n);
-  assert.equal(budget.history()[0].status, 'refused');
+test("a free endpoint gives its hold back unless the payee confirms a payment, so it can't use up maxPayments", async () => {
+  setClock(Date.now);
+  const budget = openBudget({ wallet: WALLET, path: join(DIR, `b${files++}.sqlite`), perDay: '$150', maxPayments: 3, create: true });
+  const free = { baseURL: base, path: '/free', method: 'GET' };
+  // The payee answers with a PAYMENT-RESPONSE it controls, or the wallet's request fails. 0.3.0
+  // kept each one-unit hold counting until released: three of them refused every payment after.
+  const refusing = guardAgenticWallet(budget, { request: wallet(() => ({ status: 200, headers: { 'PAYMENT-RESPONSE': b64({ success: false }) } })).request });
+  const failing = guardAgenticWallet(budget, { request: wallet(() => { throw new Error('fetch failed'); }).request });
+  for (let i = 0; i < 3; i += 1) {
+    await refusing.request('make-x402-request', free);
+    await assert.rejects(failing.request('make-x402-request', free), /fetch failed/);
+  }
+  assert.deepEqual([budget.status().inFlight, budget.status().payments], [0n, 0n]);
+  // A confirmed payment on a free endpoint counts, and a paid request still goes through.
+  const confirming = guardAgenticWallet(budget, { request: wallet().request });
+  await confirming.request('make-x402-request', free);
+  await confirming.request('make-x402-request', x402());
+  assert.deepEqual([budget.status().spent, budget.status().payments], [50_001n, 2n]);
+  budget.close();
 });
 
 test('an unconfirmed x402 payment on terms handed to the wallet counts until they expire, plus a window', async () => {

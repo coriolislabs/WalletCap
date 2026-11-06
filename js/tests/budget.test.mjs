@@ -168,6 +168,26 @@ test("a commit never shortens a hold: it counts until one window past the hold's
   await paid(budget, '$150');
 });
 
+test('a refusal names the open payments that take up the room, and holds() lists them', async () => {
+  const { budget, clock } = fixture({ perDay: '$150', maxPayments: 3 });
+  for (const amount of ['$10', '$20']) await assert.rejects(budget.pay(amount, async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
+  clock.now += 3_600_000;
+  budget.reserve('$5', { settlesBy: new Date(clock.now + 300_000) });
+  const holds = budget.holds();
+  assert.deepEqual(holds.map(hold => [hold.reason, hold.amount, hold.ageMs, hold.until === null]), [
+    ['unknown', 10_000_000n, 3_600_000n, true], ['unknown', 20_000_000n, 3_600_000n, true], ['in flight', 5_000_000n, 0n, false],
+  ]);
+  assert.equal(holds[0].error, 'rpc timeout');
+  assert.equal(holds[2].until.getTime(), clock.now + 300_000 + DAY);
+  // 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
+  const used = budget.check('$1');
+  assert.equal(used.reason, 'uses');
+  assert.match(used.message, /has 3 payments counting in the last 24h, the most its budget allows, and 3 of them are still open \(spend-\w+, spend-\w+, spend-\w+; walletcap holds lists them/);
+  const { budget: other } = fixture({ perDay: '$150' });
+  await assert.rejects(other.pay('$100', async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
+  assert.match(other.check('$60').message, /over its \$150\.00 limit \(\$50\.00 left\); \$100\.00 of it is 1 open payment \(spend-\w+; walletcap holds lists them/);
+});
+
 test('a payment that went through but cannot be recorded throws PaymentNotRecorded, not a BudgetError', async () => {
   const { path, budget } = fixture({ perDay: '$150' });
   let id;

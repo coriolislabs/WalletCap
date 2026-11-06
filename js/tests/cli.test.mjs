@@ -5,12 +5,14 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { after, test } from 'node:test';
+import { after, afterEach, test } from 'node:test';
+import { resetClock, setClock } from '../_clock.mjs';
 import { openBudget } from '../index.mjs';
 
 const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cli-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
+afterEach(resetClock);
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 
 const cli = (path, ...args) => {
@@ -74,6 +76,27 @@ test('an owner can release a payment whose outcome is unknown, once the chain sh
   const released = cli(path, 'release', payment.id);
   assert.equal(released.code, 0, released.err);
   assert.equal(budget.status().inFlight, 0n);
+});
+
+test('an owner lists the open holds and releases the unknown ones in bulk', async () => {
+  const path = join(DIR, 'holds.sqlite');
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
+  setClock(() => Date.now() - 2 * 3_600_000); // these two payments failed two hours ago
+  for (const amount of ['$1', '$2']) await assert.rejects(budget.pay(amount, async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
+  resetClock();
+  const recent = budget.reserve('$3');
+  const listed = cli(path, 'holds');
+  assert.equal(listed.code, 0, listed.err);
+  assert.match(listed.out, /spend-\w+ +\$1\.00 +unknown +2h 0m old +js +counts until released/);
+  assert.match(listed.out, new RegExp(`${recent.id} +\\$3\\.00 +in flight +\\d+s old`));
+  assert.equal(JSON.parse(cli(path, 'holds', '--json').out).length, 3);
+  assert.equal(cli(path, 'release', '--all-unknown').code, 2);
+  const released = cli(path, 'release', '--all-unknown', '--older-than', '1h');
+  assert.equal(released.code, 0, released.err);
+  assert.match(released.out, /Released 2 payments of unknown outcome older than 1h \(\$3\.00 from 0xd797…ca02\)/);
+  assert.deepEqual(budget.holds().map(hold => hold.id), [recent.id]);
+  assert.match(cli(path, 'release', '--all-unknown', '--older-than', '1h').out, /No payment of unknown outcome/);
+  budget.close();
 });
 
 test('mistakes are reported, not guessed', () => {

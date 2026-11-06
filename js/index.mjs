@@ -287,6 +287,31 @@ export class Budget {
 
   unfreeze() { this.#ledger.unrevoke(this.#wallet); }
 
+  /**
+   * The open payments that still count, oldest first, with why each is open:
+   * 'in flight' (no outcome yet), 'refused' (the payee said it failed but may
+   * still hold the authorization) or 'unknown' (the payment call failed after
+   * the money may have left). `until` is when it stops counting, or null if
+   * only a release ends it. Its owner releases one that never left the wallet.
+   */
+  holds() {
+    return this.#ledger.holds(this.#wallet).map(row => {
+      const info = parseInfo(row.reference);
+      return {
+        id: row.spend_id,
+        amount: row.amount,
+        reason: info.outcome === 'refused' || info.outcome === 'unknown' ? info.outcome : 'in flight',
+        at: new Date(Number(row.at_ms)),
+        ageMs: row.now - row.at_ms,
+        until: row.expires_at_ms === null ? null : new Date(Number(row.expires_at_ms - 1n)),
+        rail: row.rail,
+        to: info.to ?? info.payTo,
+        note: info.note ?? (info.network ? `${info.network}` : undefined),
+        error: info.error,
+      };
+    });
+  }
+
   /** The newest payments first. */
   history({ limit = 20 } = {}) {
     return this.#ledger.history(this.#wallet, { limit }).map(row => {

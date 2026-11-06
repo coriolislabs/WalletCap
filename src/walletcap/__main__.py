@@ -22,11 +22,13 @@ from walletcap.money import (
     default_budget_path,
     describe_limits,
     expand_home,
+    format_age,
     format_usd,
     format_window,
     normalize_wallet,
     short_wallet,
     strip_ascii,
+    to_window_ms,
 )
 
 _EPILOG = "Amounts are dollars: --per-day 150. Leave out the $ sign, which your shell would expand."
@@ -56,7 +58,7 @@ def _parser() -> argparse.ArgumentParser:
         "command",
         nargs="?",
         default="status",
-        choices=["status", "set", "freeze", "unfreeze", "history", "release"],
+        choices=["status", "set", "freeze", "unfreeze", "history", "holds", "release"],
     )
     parser.add_argument("id", nargs="?", help="the payment to release")
     parser.add_argument("--wallet", help="the wallet the money leaves from")
@@ -69,6 +71,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--window", help="24h, 7d, 30m")
     parser.add_argument("--max-payments", help="most payments in one window, or none")
     parser.add_argument("--limit", type=_whole, default=20, help="how many payments history shows")
+    parser.add_argument(
+        "--all-unknown",
+        action="store_true",
+        help="with release: every payment of unknown outcome older than --older-than",
+    )
+    parser.add_argument("--older-than", help="with release --all-unknown: 24h, 7d, 30m")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
@@ -241,7 +249,62 @@ def _history(args: argparse.Namespace, path: Path) -> str:
     return "\n".join(lines)
 
 
+def _holds(args: argparse.Namespace, path: Path) -> str:
+    budget = _open(args, path)
+    holds = budget.holds()
+    if args.json:
+        return _json(holds)
+    if not holds:
+        return f"No open payments from {short_wallet(budget.wallet)}."
+    lines = []
+    for hold in holds:
+        until = (
+            "counts until released"
+            if hold.until is None
+            else f"counts until {hold.until.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        )
+        fields = [
+            hold.id,
+            format_usd(hold.amount).rjust(10),
+            hold.reason.ljust(9),
+            f"{format_age(hold.age_ms)} old".ljust(12),
+            hold.rail.ljust(6),
+            f"to {short_wallet(hold.to.lower())}" if hold.to else (hold.note or ""),
+            until,
+        ]
+        lines.append("  ".join(field for field in fields if field))
+    return "\n".join(lines)
+
+
+def _release_unknown(args: argparse.Namespace, path: Path) -> str:
+    """Every payment of unknown outcome older than --older-than, for an owner who checked."""
+
+    if args.id is not None:
+        raise _Usage("release takes an id or --all-unknown, not both")
+    if args.older_than is None:
+        raise _Usage("release --all-unknown needs --older-than, like --older-than 24h")
+    older_than = to_window_ms(args.older_than, "--older-than")
+    if not path.exists():
+        raise BudgetError(f"no budget file at {path}")
+    wallet = _wallet(args, path)
+    released = Ledger(path).release_unknown(wallet, older_than)
+    if args.json:
+        return _json([{"id": spend.spend_id, "amount": spend.amount} for spend in released])
+    window = format_window(older_than)
+    if not released:
+        return f"No payment of unknown outcome from {short_wallet(wallet)} is older than {window}."
+    plural = "" if len(released) == 1 else "s"
+    total = sum(spend.amount for spend in released)
+    return (
+        f"Released {len(released)} payment{plural} of unknown outcome older than {window} "
+        f"({format_usd(total)} from {short_wallet(wallet)}): they no longer count. "
+        "Only do this for payments you know never left the wallet."
+    )
+
+
 def _release(args: argparse.Namespace, path: Path) -> str:
+    if args.all_unknown:
+        return _release_unknown(args, path)
     if args.id is None:
         raise _Usage("release needs the id of an in-flight payment; history shows it")
     if not path.exists():
@@ -273,6 +336,7 @@ _COMMANDS = {
     "freeze": _freeze,
     "unfreeze": _unfreeze,
     "history": _history,
+    "holds": _holds,
     "release": _release,
 }
 

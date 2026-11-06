@@ -26,9 +26,10 @@ client, an x402 guard and a Python agent can spend from one budget.
 from __future__ import annotations
 
 import enum
+import json
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -254,12 +255,49 @@ def _units_match(stored: str, wanted: str) -> bool:
     return stored in DOLLAR_UNITS if wanted in DOLLAR_UNITS else stored == wanted
 
 
-def _refusal(row: sqlite3.Row, total: int, uses: int, amount: int) -> BudgetRefused | None:
-    """Why the budget in ``row`` refuses ``amount`` on top of what already counts, or None."""
+@dataclass(frozen=True)
+class _Counted:
+    """What counts right now, and the part of it that is open payments."""
+
+    total: int
+    uses: int
+    held_total: int
+    held_uses: int
+
+
+# Open payments named in a refusal, so its owner can see which holds take the room: the oldest few.
+_SHOWN_HOLDS = 3
+
+
+def _held_note(held_uses: int, open_ids: Callable[[], list[str]]) -> str:
+    ids = open_ids()
+    more = f" and {held_uses - len(ids)} more" if held_uses > len(ids) else ""
+    return (
+        f"{', '.join(ids)}{more}; walletcap holds lists them, "
+        "and if one never left the wallet its owner can release it"
+    )
+
+
+def _refusal(
+    row: sqlite3.Row,
+    counted: _Counted,
+    amount: int,
+    open_ids: Callable[[], list[str]] = list,
+) -> BudgetRefused | None:
+    """Why the budget in ``row`` refuses ``amount`` on top of what already counts, or None.
+
+    A refusal names the open payments that take part of the room, oldest first,
+    from ``open_ids()``. The JavaScript ledger words it the same way.
+    """
 
     name = short_wallet(row["instrument"])
     unit = row["unit"]
     window = format_window(row["window_ms"])
+    total, uses, held_uses = counted.total, counted.uses, counted.held_uses
+
+    def plural(count: int) -> str:
+        return "" if count == 1 else "s"
+
     if row["revoked_at_ms"] is not None:
         return BudgetRevoked(
             f"{name}'s budget is frozen: nothing can be paid until its owner unfreezes it"
@@ -271,16 +309,28 @@ def _refusal(row: sqlite3.Row, total: int, uses: int, amount: int) -> BudgetRefu
         )
     if total + amount > row["cap"]:
         left = max(row["cap"] - total, 0)
+        held = (
+            f"; {format_amount(counted.held_total, unit)} of it is {held_uses} open "
+            f"payment{plural(held_uses)} ({_held_note(held_uses, open_ids)})"
+            if held_uses
+            else ""
+        )
         return OverBudget(
             f"{format_amount(amount, unit)} would bring {name} to "
             f"{format_amount(total + amount, unit)} in the last {window}, over its "
-            f"{format_amount(row['cap'], unit)} limit ({format_amount(left, unit)} left)"
+            f"{format_amount(row['cap'], unit)} limit ({format_amount(left, unit)} left){held}"
         )
     if row["max_uses"] is not None and uses + 1 > row["max_uses"]:
-        plural = "" if uses == 1 else "s"
+        if not held_uses:
+            return OverUses(
+                f"{name} already made {uses} payment{plural(uses)} in the last {window}, "
+                "the most its budget allows"
+            )
         return OverUses(
-            f"{name} already made {uses} payment{plural} in the last {window}, "
-            "the most its budget allows"
+            f"{name} has {uses} payment{plural(uses)} counting in the last {window}, "
+            f"the most its budget allows, and {held_uses} of them "
+            f"{'is' if held_uses == 1 else 'are'} still open "
+            f"({_held_note(held_uses, open_ids)})"
         )
     return None
 
@@ -434,12 +484,30 @@ class Ledger:
         return row
 
     @staticmethod
-    def _counted(connection: sqlite3.Connection, instrument: str, now: int) -> tuple[int, int]:
-        total, uses = connection.execute(
-            f"SELECT COALESCE(SUM(spend.amount), 0), COUNT(spend.spend_id) {_COUNTED}",  # noqa: S608
+    def _counted(connection: sqlite3.Connection, instrument: str, now: int) -> _Counted:
+        total, uses, held_total, held_uses = connection.execute(
+            "SELECT COALESCE(SUM(spend.amount), 0), COUNT(spend.spend_id), "
+            "COALESCE(SUM(CASE WHEN spend.status = 'reserved' THEN spend.amount END), 0), "
+            f"COUNT(CASE WHEN spend.status = 'reserved' THEN 1 END) {_COUNTED}",  # noqa: S608
             (instrument, now, now, now),
         ).fetchone()
-        return int(total), int(uses)
+        return _Counted(int(total), int(uses), int(held_total), int(held_uses))
+
+    @staticmethod
+    def _open_ids(
+        connection: sqlite3.Connection, instrument: str, now: int
+    ) -> Callable[[], list[str]]:
+        """The ids of the oldest open payments that count, for a refusal to name."""
+
+        def ids() -> list[str]:
+            rows = connection.execute(
+                f"SELECT spend.spend_id {_COUNTED} AND spend.status = 'reserved' "  # noqa: S608
+                "ORDER BY spend.at_ms, spend.rowid LIMIT ?",
+                (instrument, now, now, now, _SHOWN_HOLDS),
+            ).fetchall()
+            return [str(row[0]) for row in rows]
+
+        return ids
 
     def declare(
         self,
@@ -679,9 +747,10 @@ class Ledger:
         with self._read() as connection:
             now = self._now_ms()
             row = self._budget_row(connection, instrument)
-            total, uses = self._counted(connection, instrument, now)
-        left = 0 if row["revoked_at_ms"] is not None else max(row["cap"] - total, 0)
-        return Checked(_refusal(row, total, uses, amount), left)
+            counted = self._counted(connection, instrument, now)
+            refusal = _refusal(row, counted, amount, self._open_ids(connection, instrument, now))
+        left = 0 if row["revoked_at_ms"] is not None else max(row["cap"] - counted.total, 0)
+        return Checked(refusal, left)
 
     def reserve(
         self,
@@ -710,8 +779,8 @@ class Ledger:
         with self._transaction() as connection:
             now = self._now_ms()
             budget = self._budget_row(connection, instrument)
-            total, uses = self._counted(connection, instrument, now)
-            refusal = _refusal(budget, total, uses, amount)
+            counted = self._counted(connection, instrument, now)
+            refusal = _refusal(budget, counted, amount, self._open_ids(connection, instrument, now))
             if refusal is not None:
                 raise refusal
             spend_id = f"spend-{uuid4().hex}"
@@ -843,6 +912,59 @@ class Ledger:
                 "SELECT * FROM spend WHERE instrument = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?",
                 (instrument, limit),
             ).fetchall()
+        return [self._spend(row, window, now) for row in rows]
+
+    def holds(self, instrument: str) -> list[Spend]:
+        """The open payments that still count, oldest first.
+
+        In flight, refused by the payee, or of unknown outcome: what its owner
+        may need to release.
+        """
+
+        instrument = _instrument(instrument)
+        with self._read() as connection:
+            now = self._now_ms()
+            window = self._budget_row(connection, instrument)["window_ms"]
+            rows = connection.execute(
+                "SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' "
+                "AND (expires_at_ms IS NULL OR expires_at_ms > ?) ORDER BY at_ms, rowid",
+                (instrument, now),
+            ).fetchall()
+        return [self._spend(row, window, now) for row in rows]
+
+    def release_unknown(self, instrument: str, older_than_ms: int) -> list[Spend]:
+        """Give back every open payment of unknown outcome taken ``older_than_ms`` ago or more.
+
+        For an owner who has checked they never left the wallet. Returns the
+        payments released.
+        """
+
+        def outcome(reference: str | None) -> object:
+            try:
+                info = json.loads(reference) if reference else {}
+            except ValueError:
+                return None
+            return info.get("outcome") if isinstance(info, dict) else None
+
+        instrument = _instrument(instrument)
+        _integer(older_than_ms, "older_than_ms", allow_zero=True)
+        with self._transaction() as connection:
+            now = self._now_ms()
+            window = self._budget_row(connection, instrument)["window_ms"]
+            rows = [
+                row
+                for row in connection.execute(
+                    "SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' "
+                    "AND at_ms <= ? ORDER BY at_ms, rowid",
+                    (instrument, now - older_than_ms),
+                ).fetchall()
+                if outcome(row["reference"]) == "unknown"
+            ]
+            for row in rows:
+                connection.execute(
+                    "DELETE FROM spend WHERE spend_id = ? AND status = 'reserved'",
+                    (row["spend_id"],),
+                )
         return [self._spend(row, window, now) for row in rows]
 
     def payment(self, spend_id: str) -> Spend | None:

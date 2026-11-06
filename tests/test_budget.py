@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import warnings
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -198,6 +200,75 @@ def test_a_payment_that_went_through_but_was_not_recorded(
     assert raised.value.__cause__ is raised.value.cause
     assert str(raised.value).endswith(f"still counts as in flight ({payment.id})")
     assert budget.status().in_flight == 5_000_000
+
+
+def test_a_refusal_names_the_open_payments_and_holds_lists_them(
+    tmp_path: Path, clock: Clock
+) -> None:
+    budget = open_budget(
+        WALLET, path=tmp_path / "b.sqlite", per_day="$150", max_payments=3, create=True
+    )
+    for amount in ("$10", "$20"):
+        with pytest.raises(TimeoutError), budget.pay(amount):
+            raise TimeoutError("rpc timeout")
+    clock.at += 3_600
+    budget.reserve("$5", settles_by=datetime.fromtimestamp(clock.at + 300, tz=UTC))
+    holds = budget.holds()
+    assert [(hold.reason, hold.amount, hold.age_ms, hold.until is None) for hold in holds] == [
+        ("unknown", 10_000_000, 3_600_000, True),
+        ("unknown", 20_000_000, 3_600_000, True),
+        ("in flight", 5_000_000, 0, False),
+    ]
+    assert holds[0].error == "rpc timeout"
+    # 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
+    used = budget.check("$1")
+    assert used.reason == "uses"
+    assert used.message is not None
+    assert re.search(
+        r"has 3 payments counting in the last 24h, the most its budget allows, and 3 of them "
+        r"are still open \(spend-\w+, spend-\w+, spend-\w+; walletcap holds lists them",
+        used.message,
+    )
+    other = open_budget(WALLET, path=tmp_path / "other.sqlite", per_day="$150", create=True)
+    with pytest.raises(TimeoutError), other.pay("$100"):
+        raise TimeoutError("rpc timeout")
+    over = other.check("$60").message
+    assert over is not None
+    assert re.search(
+        r"over its \$150\.00 limit \(\$50\.00 left\); \$100\.00 of it is 1 open payment "
+        r"\(spend-\w+; walletcap holds lists them",
+        over,
+    )
+
+
+def test_an_owner_lists_holds_and_releases_the_unknown_ones_in_bulk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "holds.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    monkeypatch.setattr(_clock, "source", lambda: time.time() - 7_200)  # two hours ago
+    for amount in ("$1", "$2"):
+        with pytest.raises(TimeoutError), budget.pay(amount):
+            raise TimeoutError("rpc timeout")
+    monkeypatch.undo()
+    recent = budget.reserve("$3")
+    listed = _cli(path, "holds")
+    assert listed.returncode == 0, listed.stderr
+    assert re.search(
+        r"spend-\w+ +\$1\.00 +unknown +2h 0m old +python +counts until released", listed.stdout
+    )
+    assert re.search(rf"{recent.id} +\$3\.00 +in flight +\d+s old", listed.stdout)
+    assert len(json.loads(_cli(path, "holds", "--json").stdout)) == 3
+    assert _cli(path, "release", "--all-unknown").returncode == 2
+    released = _cli(path, "release", "--all-unknown", "--older-than", "1h")
+    assert released.returncode == 0, released.stderr
+    assert (
+        "Released 2 payments of unknown outcome older than 1h ($3.00 from 0xd797…ca02)"
+        in released.stdout
+    )
+    assert [hold.id for hold in budget.holds()] == [recent.id]
+    nothing = _cli(path, "release", "--all-unknown", "--older-than", "1h")
+    assert "No payment of unknown outcome" in nothing.stdout
 
 
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:

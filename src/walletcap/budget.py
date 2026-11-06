@@ -28,6 +28,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from walletcap import _clock
 from walletcap.errors import BudgetError, BudgetWarning, NotSent, PaymentNotRecorded
 from walletcap.ledger import UNSET, BudgetLimits, Ledger
 from walletcap.money import (
@@ -46,7 +47,7 @@ from walletcap.money import (
     to_window_ms,
 )
 
-__all__ = ["Budget", "Check", "Payment", "Paying", "Reservation", "Status", "open_budget"]
+__all__ = ["Budget", "Check", "Hold", "Payment", "Paying", "Reservation", "Status", "open_budget"]
 
 _TO_LIMIT = 256
 _NOTE_LIMIT = 1024
@@ -109,6 +110,28 @@ class Payment:
     to: str | None
     note: str | None
     tx: str | None
+
+
+@dataclass(frozen=True)
+class Hold:
+    """An open payment that still counts against the budget. ``amount`` is micro-dollars.
+
+    ``reason`` is ``"in flight"`` (no outcome yet), ``"refused"`` (the payee
+    said it failed, but may still hold the authorization) or ``"unknown"``
+    (the payment call failed after the money may have left). ``until`` is when
+    it stops counting, or None if only a release ends it.
+    """
+
+    id: str
+    amount: int
+    reason: str
+    at: datetime
+    age_ms: int
+    until: datetime | None
+    rail: str
+    to: str | None
+    note: str | None
+    error: str | None
 
 
 def _limits(
@@ -534,6 +557,34 @@ class Budget:
 
     def unfreeze(self) -> None:
         self._ledger.unrevoke(self._wallet)
+
+    def holds(self) -> list[Hold]:
+        """The open payments that still count, oldest first, and why each is open.
+
+        Its owner releases one that never left the wallet: ``walletcap release <id>``.
+        """
+
+        now_ms = _clock.now_ms()
+        holds = []
+        for spend in self._ledger.holds(self._wallet):
+            info = _info(spend.reference)
+            outcome = info.get("outcome")
+            until = spend.expires_at_ms
+            holds.append(
+                Hold(
+                    spend.spend_id,
+                    spend.amount,
+                    outcome if outcome in ("refused", "unknown") else "in flight",
+                    datetime.fromtimestamp(spend.at_ms / 1000, tz=UTC),
+                    max(now_ms - spend.at_ms, 0),
+                    None if until is None else datetime.fromtimestamp((until - 1) / 1000, tz=UTC),
+                    spend.rail,
+                    info.get("to") or info.get("payTo"),
+                    info.get("note") or info.get("network"),
+                    info.get("error"),
+                )
+            )
+        return holds
 
     def history(self, limit: int = 20) -> list[Payment]:
         """The newest payments first."""
