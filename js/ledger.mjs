@@ -13,6 +13,12 @@ import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, shortWallet } fro
 export const SCHEMA_VERSION = '1';
 export const REFERENCE_LIMIT = 4096;
 
+/**
+ * Internal: the key of Reservation's method that gives an open payment, once, the
+ * last moment it could still settle. The package does not export it.
+ */
+export const SETTLES_BY = Symbol('walletcap/settles-by');
+
 const ID = /^[A-Za-z0-9_.:@/-]{1,128}$/;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS budget_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -395,6 +401,25 @@ export class Ledger {
       if (row.status === 'committed') throw new BudgetError('reservation is already committed');
       this.statement("UPDATE spend SET status = 'committed', at_ms = MAX(at_ms, ?), expires_at_ms = NULL, "
         + 'reference = COALESCE(?, reference) WHERE spend_id = ?').run(now, text, spendId);
+    });
+  }
+
+  /**
+   * Give an open reservation that has no settle-by time the last moment its
+   * payment could settle: it then counts until one window after that moment,
+   * as reserve() with settlesByMs does. A reservation that already has one
+   * keeps it.
+   */
+  settlesBy(spendId, settlesByMs) {
+    identifier(spendId, 'spend_id');
+    const settlesBy = units(settlesByMs, 'settlesByMs', { allowZero: true });
+    this.transaction(() => {
+      const row = this.statement('SELECT spend.status, spend.expires_at_ms, budgets.window_ms FROM spend '
+        + 'JOIN budgets ON budgets.instrument = spend.instrument WHERE spend.spend_id = ?').get(spendId);
+      if (row === undefined || row.status !== 'reserved' || row.expires_at_ms !== null) return;
+      const expires = settlesBy + row.window_ms >= MAX_AMOUNT ? MAX_AMOUNT : settlesBy + row.window_ms + 1n;
+      this.statement("UPDATE spend SET expires_at_ms = ? WHERE spend_id = ? AND status = 'reserved' AND expires_at_ms IS NULL")
+        .run(expires, spendId);
     });
   }
 

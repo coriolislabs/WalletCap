@@ -235,24 +235,44 @@ class Reservation:
         self._ledger.release(self._id)
         self._state = "released"
 
+    def annotate(self, **fields: Any) -> None:
+        """Note what is known about an open payment, like ``outcome="unknown"``; it keeps counting."""
+
+        if not self.open:
+            return
+        self._info = {**self._info, **fields}
+        self._ledger.annotate(self._id, json.dumps(self._info))
+
 
 class Paying:
     """``with budget.pay(amount):`` reserves on entry and records the payment on exit.
 
-    A clean exit commits it. An exception commits it as an unknown outcome (it
-    may have left the wallet), unless the exception is ``NotSent``, which gives
-    the amount back. Works with ``async with`` too.
+    A clean exit commits it. An exception never settles it: the payment may
+    have left the wallet, so it stays in flight, marked unknown, and counts
+    until one window past ``settles_by``, or, without one, until its owner
+    releases it. ``NotSent`` gives the amount back. Works with ``async with``
+    too.
     """
 
-    def __init__(self, budget: Budget, amount: object, info: dict[str, Any], rail: str) -> None:
+    def __init__(
+        self,
+        budget: Budget,
+        amount: object,
+        info: dict[str, Any],
+        rail: str,
+        settles_by: datetime | None,
+    ) -> None:
         self._budget = budget
         self._amount = amount
         self._info = info
         self._rail = rail
+        self._settles_by = settles_by
         self._reservation: Reservation | None = None
 
     def __enter__(self) -> Reservation:
-        self._reservation = self._budget._reserve(self._amount, self._info, self._rail, None)
+        self._reservation = self._budget._reserve(
+            self._amount, self._info, self._rail, self._settles_by
+        )
         return self._reservation
 
     def __exit__(
@@ -277,7 +297,7 @@ class Paying:
             if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:
                 reservation.release()
             else:
-                reservation.commit(outcome="unknown", error=str(exc)[:200])
+                reservation.annotate(outcome="unknown", error=str(exc)[:200])
         except BudgetError:
             pass  # recording failed; the reservation stays open, and keeps counting
 
@@ -398,7 +418,9 @@ class Budget:
         """Take ``amount`` before paying, or raise ``BudgetRefused``.
 
         Commit the reservation when the payment settles; release it only if the
-        payment never left the wallet.
+        payment never left the wallet. ``settles_by`` is the last moment the
+        payment could still settle, if known: an open reservation stops counting
+        one window after it.
         """
 
         return self._reserve(amount, _describe(to, note, details), rail, settles_by)
@@ -425,14 +447,17 @@ class Budget:
         note: str | None = None,
         details: dict[str, Any] | None = None,
         rail: str = "python",
+        settles_by: datetime | None = None,
     ) -> Paying:
         """``with budget.pay("$12.50"):`` reserve, pay inside the block, and record it.
 
         Raises ``BudgetRefused`` on entry if the budget would be passed. If the
-        block raises, the payment still counts, unless it raised ``NotSent``.
+        block raises, the payment stays in flight, marked unknown: it counts
+        until one window past ``settles_by``, or, without one, until its owner
+        releases it. ``NotSent`` gives the amount back.
         """
 
-        return Paying(self, amount, _describe(to, note, details), rail)
+        return Paying(self, amount, _describe(to, note, details), rail, settles_by)
 
     def status(self) -> Status:
         status = self._ledger.status(self._wallet)

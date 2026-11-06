@@ -104,12 +104,37 @@ test('spend counts for one rolling window from when it settled', async () => {
 test('a payment that fails halfway keeps counting; one tagged notSent is given back', async () => {
   const { budget } = fixture();
   await assert.rejects(budget.pay('$50', async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
-  assert.equal(budget.status().spent, 50_000_000n);
+  assert.equal(budget.status().inFlight, 50_000_000n);
   await assert.rejects(budget.pay('$50', async () => { throw notSent(new Error('card declined')); }), /card declined/);
   await assert.rejects(budget.pay('$50', async () => { throw notSent('never broadcast'); }), /never broadcast/);
-  assert.equal(budget.status().spent, 50_000_000n);
+  assert.deepEqual([budget.status().spent, budget.status().inFlight], [0n, 50_000_000n]);
   const [newest] = budget.history();
   assert.equal(newest.status, 'unknown');
+});
+
+test('an error never settles a payment: an unknown outcome counts until its owner releases it', async () => {
+  const { budget, clock } = fixture({ perDay: '$150' });
+  // A transfer whose receipt wait timed out can still be mined hours later.
+  await assert.rejects(budget.pay('$150', async () => { throw new Error('receipt timeout'); }), /receipt timeout/);
+  clock.now += 30 * DAY;
+  const status = budget.status();
+  assert.deepEqual([status.spent, status.inFlight, status.remaining], [0n, 150_000_000n, 0n]);
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+  const [unknown] = budget.history();
+  assert.deepEqual([unknown.status, unknown.counting], ['unknown', true]);
+});
+
+test('an unknown outcome with a settle-by time counts until one window past it', async () => {
+  const { budget, clock } = fixture({ perDay: '$150' });
+  const settlesBy = new Date(clock.now + 300_000);
+  await assert.rejects(budget.pay('$150', async () => { throw new Error('rpc timeout'); }, { settlesBy }), /rpc timeout/);
+  clock.now += 300_000 + DAY;
+  assert.equal(budget.status().inFlight, 150_000_000n);
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+  clock.now += 1;
+  assert.equal(budget.status().inFlight, 0n);
+  assert.equal(budget.history()[0].status, 'expired');
+  await paid(budget, '$150');
 });
 
 test('pay() returns what the payment returns and keeps its transaction hash', async () => {

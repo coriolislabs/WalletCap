@@ -141,8 +141,39 @@ def test_a_failed_payment_keeps_counting_unless_it_never_left(tmp_path: Path) ->
     with pytest.raises(NotSent), budget.pay("$50"):
         raise NotSent("card declined")
     status = budget.status()
-    assert (status.spent, status.in_flight) == (50_000_000, 0)
+    assert (status.spent, status.in_flight) == (0, 50_000_000)
     assert [payment.status for payment in budget.history()] == ["unknown"]
+
+
+def test_an_error_never_settles_a_payment(tmp_path: Path, clock: Clock) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
+    # A transfer whose receipt wait timed out can still be mined hours later.
+    with pytest.raises(TimeoutError), budget.pay("$150"):
+        raise TimeoutError("receipt timeout")
+    clock.at += 30 * DAY
+    status = budget.status()
+    assert (status.spent, status.in_flight, status.remaining) == (0, 150_000_000, 0)
+    with pytest.raises(BudgetRefused):
+        _pay(budget, "$1")
+    [unknown] = budget.history()
+    assert (unknown.status, unknown.counting) == ("unknown", True)
+
+
+def test_an_unknown_outcome_with_a_settle_by_time_counts_one_window_past_it(
+    tmp_path: Path, clock: Clock
+) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
+    settles_by = datetime.fromtimestamp(clock.at, tz=UTC) + timedelta(minutes=5)
+    with pytest.raises(TimeoutError), budget.pay("$150", settles_by=settles_by):
+        raise TimeoutError("rpc timeout")
+    clock.at += 300 + DAY
+    assert budget.status().in_flight == 150_000_000
+    with pytest.raises(BudgetRefused):
+        _pay(budget, "$1")
+    clock.at += 0.002
+    assert budget.status().in_flight == 0
+    assert budget.history()[0].status == "expired"
+    _pay(budget, "$150")
 
 
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
@@ -270,6 +301,18 @@ def test_the_python_cli_sets_reads_and_freezes(tmp_path: Path) -> None:
     assert _cli(path, "release", held.id).returncode == 0
     assert budget.status().in_flight == 0
     assert _cli(path, "release", held.id).returncode == 1
+
+
+def test_an_owner_can_release_a_payment_whose_outcome_is_unknown(tmp_path: Path) -> None:
+    path = tmp_path / "unknown.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    with pytest.raises(TimeoutError), budget.pay("$4"):
+        raise TimeoutError("rpc timeout")
+    [payment] = budget.history()
+    assert f"({payment.id})" in _cli(path, "history").stdout
+    released = _cli(path, "release", payment.id)
+    assert released.returncode == 0, released.stderr
+    assert budget.status().in_flight == 0
 
 
 @needs_node

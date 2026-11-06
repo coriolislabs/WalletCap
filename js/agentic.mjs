@@ -4,7 +4,8 @@
 // Every send and every x402 payment that goes through here is counted in the wallet's budget,
 // whichever process, session or machine makes it. An x402 payment is priced before the wallet
 // signs it, and the wallet is capped at that amount. A confirmed settlement counts for one
-// window; a payment the payee never confirms keeps counting until its owner releases it.
+// window. A payment that isn't confirmed keeps counting until it can no longer settle, when
+// walletcap can tell, or else until its owner releases it.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -14,8 +15,10 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { now } from './_clock.mjs';
 import { BudgetError, BudgetRefused } from './errors.mjs';
 import { openBudget } from './index.mjs';
+import { SETTLES_BY } from './ledger.mjs';
 import { formatUsd, normalizeWallet } from './money.mjs';
 import { assetKey, assetTable, atomicOf, toMicros as atomicToMicros } from './x402.mjs';
 
@@ -94,12 +97,30 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   const findRequirements = discover ?? (data => discoverRequirements(data, { fetch: fetchImpl }));
   const networkOf = requirement => assetKey(requirement.network, requirement.asset).split(' ')[0];
 
-  // A failure the wallet reports before signing gives the amount back; anything else keeps counting.
-  const failed = (reservation, error, { counts }) => {
+  // A failure the wallet reports before signing gives the amount back. Anything else may come after
+  // the payment left, so it stays in flight, marked unknown, and keeps counting: an error never
+  // settles a payment.
+  const failed = (reservation, error) => {
     if (!reservation.open) return;
     if (notSigned(error)) reservation.release();
-    else if (counts === 'window') reservation.commit({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
     else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+  };
+
+  // When an unconfirmed x402 payment can no longer settle, if walletcap can tell. The wallet signs
+  // the terms it was handed (awal then skips its own 402 discovery); terms walletcap discovered
+  // itself, the wallet asks for again, and a payee can answer the two requests differently. On
+  // EVM, x402's exact scheme signs an authorization that expires maxTimeoutSeconds after it is
+  // signed, and once the wallet has answered, it has signed. Anything else counts until released.
+  const settlesByOf = (requirements, handed) => {
+    if (!handed) return null;
+    let longest = 0;
+    for (const requirement of requirements) {
+      const seconds = requirement?.maxTimeoutSeconds;
+      if (requirement?.scheme !== 'exact' || !networkOf(requirement).startsWith('eip155:')
+        || !Number.isSafeInteger(seconds) || seconds <= 0) return null;
+      longest = Math.max(longest, seconds);
+    }
+    return BigInt(now()) + BigInt(longest) * 1000n;
   };
 
   async function send(data) {
@@ -119,18 +140,19 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     try {
       result = await request('send-transaction', { ...data, asset, chain });
     } catch (error) {
-      failed(reservation, error, { counts: 'window' });
+      failed(reservation, error);
       throw error;
     }
-    if (result?.error) failed(reservation, new Error(String(result.error)), { counts: 'window' });
+    // A transaction the wallet reports as failed may still be mined: it keeps counting.
+    if (result?.error) failed(reservation, new Error(String(result.error)));
     else reservation.commit({ tx: TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined });
     return result;
   }
 
   async function x402(data) {
-    const offered = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0
-      ? data.paymentRequirements
-      : await findRequirements(data);
+    // Requirements the caller hands over are passed to the wallet as they are, and it pays one of them.
+    const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
+    const offered = handed ? data.paymentRequirements : await findRequirements(data);
     const url = requestUrl(data).href.slice(0, 1024);
     if (offered === null) {
       // The endpoint asked for nothing. Let the request through with the wallet's smallest
@@ -140,11 +162,13 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       try {
         result = await request('make-x402-request', { ...data, maxAmountPerRequest: 1 });
       } catch (error) {
-        failed(reservation, error, { counts: 'window' });
+        failed(reservation, error);
         throw error;
       }
-      if (paymentResponseOf(result) === null) reservation.release();
-      else reservation.commit({ outcome: 'unknown' });
+      const answer = paymentResponseOf(result);
+      if (answer === null) reservation.release();
+      else if (answer.success === true && TX_HASH.test(answer.transaction ?? '')) reservation.commit({ tx: answer.transaction });
+      else reservation.annotate({ outcome: answer.success === false ? 'refused' : 'unknown' });
       return result;
     }
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
@@ -162,8 +186,8 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
       throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
     }
-    // walletcap can't see when the authorization the wallet signs expires, so a payment that
-    // isn't confirmed settled keeps counting until its owner releases it (npx walletcap release).
+    // An unconfirmed payment counts until its owner releases it (npx walletcap release), unless
+    // walletcap can tell when it can no longer settle (settlesByOf).
     const reservation = budget.reserve(micros, {
       rail: 'awal-x402', to: choice.payTo, note: url,
       details: { network: choice.network, asset: choice.asset, scheme: choice.scheme, maxTimeoutSeconds: choice.maxTimeoutSeconds },
@@ -172,12 +196,18 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     try {
       result = await request('make-x402-request', { ...data, maxAmountPerRequest: Number(atomicOf(choice)) });
     } catch (error) {
-      failed(reservation, error, { counts: 'until-released' });
+      // The wallet may not have answered yet, and may still sign: it counts until released.
+      failed(reservation, error);
       throw error;
     }
     const answer = paymentResponseOf(result);
-    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) reservation.commit({ tx: answer.transaction });
-    else reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
+    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) {
+      reservation.commit({ tx: answer.transaction });
+      return result;
+    }
+    reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
+    const settlesBy = settlesByOf(candidates, handed);
+    if (settlesBy !== null) reservation[SETTLES_BY](settlesBy);
     return result;
   }
 

@@ -127,6 +127,56 @@ test("the wallet's own refusal before signing gives the amount back; a payee's r
   assert.equal(budget.status().inFlight, 100_000n);
 });
 
+test('a send whose outcome is unknown keeps counting until its owner releases it', async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const timedOut = guardAgenticWallet(budget, { request: wallet(() => { throw new Error('IPC request timed out'); }).request });
+  await assert.rejects(timedOut.request('send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia' }), /timed out/);
+  const reported = guardAgenticWallet(budget, { request: wallet(() => ({ error: 'transaction underpriced' })).request });
+  await reported.request('send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia' });
+  // Either transaction can still be mined, however long ago it was sent.
+  clock.now += 30 * DAY;
+  assert.deepEqual([budget.status().spent, budget.status().inFlight], [0n, 100_000n]);
+  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown']);
+});
+
+test('a free endpoint that charges after all keeps an unconfirmed payment counting', async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const w = wallet(() => ({ status: 200, headers: { 'PAYMENT-RESPONSE': b64({ success: false }) } }));
+  await guardAgenticWallet(budget, { request: w.request }).request('make-x402-request', { baseURL: base, path: '/free', method: 'GET' });
+  clock.now += 30 * DAY;
+  assert.equal(budget.status().inFlight, 1n);
+  assert.equal(budget.history()[0].status, 'refused');
+});
+
+test('an unconfirmed x402 payment on terms handed to the wallet counts until they expire, plus a window', async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const w = wallet(() => ({ status: 200, headers: {} })); // no PAYMENT-RESPONSE: the outcome is unknown
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  const terms = [requirement('50000', 300)];
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: terms });
+  assert.deepEqual(w.calls[0].data.paymentRequirements, terms);
+  // The wallet signed before it answered; the authorization expires 300 s after that.
+  clock.now += 300_000 + DAY;
+  assert.equal(budget.status().inFlight, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().inFlight, 0n);
+  assert.equal(budget.history()[0].status, 'expired');
+
+  // Terms walletcap discovered itself, or that aren't x402's exact scheme on EVM, or a wallet that
+  // never answered: walletcap can't tell when the payment can no longer settle.
+  const solana = { ...requirement('50000', 300), network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', payTo: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' };
+  await guard.request('make-x402-request', x402('?ttl=300'));
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [solana] });
+  const silent = guardAgenticWallet(budget, { request: wallet(() => { throw new Error('IPC request timed out'); }).request });
+  await assert.rejects(silent.request('make-x402-request', { ...x402(), paymentRequirements: terms }), /timed out/);
+  clock.now += 30 * DAY;
+  assert.equal(budget.status().inFlight, 150_000n);
+  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'unknown', 'expired']);
+});
+
 test('assets walletcap cannot price are refused before the wallet is asked', async () => {
   const { budget } = newBudget();
   const w = wallet();

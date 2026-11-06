@@ -12,7 +12,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { SharedBudgetStore } from './cdp.mjs';
 import { BudgetError, BudgetRefused, isNotSent, notSent } from './errors.mjs';
-import { checkKeys, Ledger, SCHEMA_VERSION } from './ledger.mjs';
+import { checkKeys, Ledger, SCHEMA_VERSION, SETTLES_BY } from './ledger.mjs';
 import {
   defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
   normalizeWallet, parseLimits, shortWallet, toMicros,
@@ -115,11 +115,16 @@ export class Reservation {
     this.#state = 'released';
   }
 
-  /** Note what is known about an open payment; it keeps counting. */
+  /** Note what is known about an open payment; it keeps counting, as before. */
   annotate(fields) {
     if (!this.open) return;
     this.#info = { ...this.#info, ...fields };
     this.#ledger.annotate(this.#id, JSON.stringify(this.#info));
+  }
+
+  // Internal (the key is not exported): an open payment learns, once, the last moment it could settle.
+  [SETTLES_BY](settlesByMs) {
+    if (this.open) this.#ledger.settlesBy(this.#id, settlesByMs);
   }
 }
 
@@ -210,8 +215,10 @@ export class Budget {
 
   /**
    * Reserve `amount`, run `fn` to make the payment, then record it. If `fn`
-   * throws, the payment still counts (it may have left), unless the error is
-   * tagged with notSent(). `fn` receives the reservation; its id makes a good
+   * throws, the payment may still have left, so it stays in flight, marked
+   * unknown: it counts until one window past `settlesBy`, or, without one,
+   * until its owner releases it. An error tagged with notSent() gives the
+   * amount back. `fn` receives the reservation; its id makes a good
    * idempotency key. Returns what `fn` returns.
    */
   async pay(amount, fn, options = {}) {
@@ -224,7 +231,7 @@ export class Budget {
       if (reservation.open) {
         try {
           if (isNotSent(error)) reservation.release();
-          else reservation.commit({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+          else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
         } catch {
           // Recording failed; the reservation stays open, and keeps counting.
         }

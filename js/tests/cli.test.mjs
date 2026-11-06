@@ -65,6 +65,17 @@ test('release gives back only an in-flight payment', () => {
   assert.match(refused.err, /recorded as settled/);
 });
 
+test('an owner can release a payment whose outcome is unknown, once the chain shows it never left', async () => {
+  const path = join(DIR, 'unknown.sqlite');
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
+  await assert.rejects(budget.pay('$4', async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
+  const [payment] = budget.history();
+  assert.match(cli(path, 'history').out, new RegExp(`unknown .*\\(${payment.id}\\)`));
+  const released = cli(path, 'release', payment.id);
+  assert.equal(released.code, 0, released.err);
+  assert.equal(budget.status().inFlight, 0n);
+});
+
 test('mistakes are reported, not guessed', () => {
   const path = join(DIR, 'mistakes.sqlite');
   assert.equal(cli(path, 'frobnicate').code, 2);

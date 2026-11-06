@@ -637,6 +637,17 @@ class Ledger:
                 (now, reference, spend_id),
             )
 
+    def annotate(self, spend_id: str, reference: str | None) -> None:
+        """Replace an open reservation's reference; it keeps counting."""
+
+        _identifier(spend_id, "spend_id")
+        _reference(reference)
+        with self._transaction() as connection:
+            connection.execute(
+                "UPDATE spend SET reference = ? WHERE spend_id = ? AND status = 'reserved'",
+                (reference, spend_id),
+            )
+
     def release(self, spend_id: str) -> None:
         """Give back a reservation whose payment was never sent."""
 

@@ -70,7 +70,11 @@ export interface PaymentDetails {
   details?: Record<string, unknown>;
   /** The rail, for the history. Defaults to 'js'. */
   rail?: string;
-  /** The last moment the payment could still settle. An open reservation stops counting one window after it. */
+  /**
+   * The last moment the payment could still settle. An open reservation, one whose outcome is
+   * unknown included, stops counting one window after it. Without it, an open reservation counts
+   * until it is committed or released.
+   */
   settlesBy?: Date | number | bigint;
 }
 
@@ -84,6 +88,7 @@ export declare class Reservation {
   commit(result?: { tx?: string; outcome?: string; error?: string }): void;
   /** The payment never left the wallet: give its amount back. */
   release(): void;
+  /** Note what is known about an open payment, like { outcome: 'unknown' }; it keeps counting. */
   annotate(fields: Record<string, unknown>): void;
 }
 
@@ -147,8 +152,9 @@ export declare class Budget {
   /** Take `amount` before paying, or throw BudgetRefused. */
   reserve(amount: Dollars, details?: PaymentDetails): Reservation;
   /**
-   * Reserve `amount`, run `fn` to pay, then record it. If `fn` throws, the
-   * payment still counts unless the error is tagged with notSent().
+   * Reserve `amount`, run `fn` to pay, then record it. If `fn` throws, the payment stays in
+   * flight, marked unknown, until one window past `settlesBy` or, without one, until its owner
+   * releases it, unless the error is tagged with notSent().
    */
   pay<T>(amount: Dollars, fn: (reservation: Reservation) => T | Promise<T>, details?: PaymentDetails): Promise<T>;
   status(): Status;
