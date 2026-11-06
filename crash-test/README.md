@@ -6,7 +6,7 @@ This puts Coinbase CDP's x402 spend controls through the events that hand an AI 
 It runs offline in under ten seconds and sends nothing.
 
 ```console
-$ cd crash-test && npm install && npm start
+$ npx walletcap-crash-test
 
 walletcap crash test: Coinbase CDP x402 spend controls
 @coinbase/cdp-sdk 1.61.0 · @x402/core 2.30.0 · walletcap 0.2.3
@@ -21,7 +21,9 @@ payee asks for EURC, not USDC         1,000 EURC signed, counted as $0   refused
 Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls; $0 with walletcap.
 ```
 
-Add `--json` for machine-readable results. The process exits 1 if walletcap lets anything past the cap.
+It needs Node 22.13 or later. Add `--json` for machine-readable results. The process exits 1 if walletcap lets anything past the cap.
+
+To run it from this repository instead: `cd crash-test && npm install && npm start`.
 
 ## What runs
 
