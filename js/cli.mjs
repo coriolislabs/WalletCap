@@ -24,7 +24,8 @@ Commands
   history              The newest payments first
   release <id>         Give back an in-flight payment you know never left the wallet
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget
-  awal-mcp [-- <cmd>]  Coinbase's payments-mcp server behind a proxy that counts its payments
+  awal-mcp [-- <cmd>]  Coinbase's Agentic Wallet MCP server (~/.payments-mcp) behind a proxy that
+                       counts its payments and refuses tools it can't count (--allow-tool <name>)
 
 Options
   --wallet <address>   The wallet the money leaves from (optional when the file holds one budget)
