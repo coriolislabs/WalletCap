@@ -1,6 +1,25 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## 0.2.4 — 2026-11-06
+
+### Added
+
+- `mcpName` in the npm package and a `server.json`, so `walletcap awal-mcp` can be listed in the
+  official MCP Registry as `io.github.coriolislabs/walletcap`. `glama.json` names the maintainer
+  for Glama.
+- A docs site, https://coriolislabs.github.io/WalletCap/, with one page per integration, and
+  `llms.txt`.
+
+### Fixed
+
+- The `create` doc comment in `index.d.ts` said it defaulted to true. It defaults to false.
+
+### Changed
+
+- Package descriptions and search keywords on npm and PyPI, and a README that leads with the
+  crash test.
+
 ## 0.2.3 — 2026-11-06
 
 ### Changed
