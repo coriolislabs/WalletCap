@@ -1,6 +1,6 @@
 {
   "name": "walletcap-crash-test",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Crash-test an AI agent's spend limits: restart it, scale it, change the asset, and count the dollars that get past the cap. Offline: nothing is sent.",
   "license": "Apache-2.0",
   "author": "Coriolis Labs Inc.",
@@ -10,6 +10,7 @@
   },
   "files": [
     "agent.mjs",
+    "agentkit-agent.mjs",
     "cli.mjs",
     "spend-store.mjs",
     "README.md"
@@ -29,6 +30,14 @@
     "@x402/svm": "2.30.0",
     "viem": "2.57.16",
     "walletcap": "0.2.3"
+  },
+  "peerDependencies": {
+    "@coinbase/agentkit": "0.10.4"
+  },
+  "peerDependenciesMeta": {
+    "@coinbase/agentkit": {
+      "optional": true
+    }
   },
   "repository": {
     "type": "git",

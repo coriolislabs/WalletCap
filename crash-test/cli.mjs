@@ -14,6 +14,8 @@ import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { openBudget } from 'walletcap';
 
 const AGENT = fileURLToPath(new URL('./agent.mjs', import.meta.url));
+const AGENTKIT_AGENT = fileURLToPath(new URL('./agentkit-agent.mjs', import.meta.url));
+const AGENTKIT_INSTALL = 'npx -p walletcap-crash-test -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit';
 // How long the shared store takes to answer each call: a network database a millisecond away.
 const STORE_LATENCY_MS = 1;
 const CAP = 150_000_000n; // $150, in USDC's six decimals
@@ -36,8 +38,8 @@ const versionOf = name => {
   return 'not installed';
 };
 
-const runAgent = config => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', AGENT, JSON.stringify(config)], { stdio: ['ignore', 'pipe', 'pipe'] });
+const runScript = (script, args) => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   child.stdout.on('data', chunk => { stdout += chunk; });
@@ -49,6 +51,14 @@ const runAgent = config => new Promise((resolve, reject) => {
     else reject(new Error(`an agent exited ${code}: ${stderr.trim().split('\n').slice(-3).join(' ')}`));
   });
 });
+const runAgent = config => runScript(AGENT, [JSON.stringify(config)]);
+
+/** The AgentKit row, or null when @coinbase/agentkit is not installed next to the crash test. */
+export async function agentkitRow() {
+  const version = versionOf('@coinbase/agentkit');
+  if (version === 'not installed') return null;
+  return { version, agentkit: await runScript(AGENTKIT_AGENT, ['agentkit']), walletcap: await runScript(AGENTKIT_AGENT, ['walletcap']) };
+}
 
 // Replicas start together: each waits for the go file, so their payments overlap.
 async function runAgents(configs, together, dir) {
@@ -94,7 +104,7 @@ async function runControl(scenario, control, payTo) {
   }
 }
 
-export async function crashTest() {
+export async function crashTest({ agentkit = false } = {}) {
   const started = Date.now();
   const payTo = privateKeyToAccount(generatePrivateKey()).address;
   const scenarios = [];
@@ -106,12 +116,36 @@ export async function crashTest() {
       walletcap: await runControl(scenario, 'walletcap', payTo),
     });
   }
+  const agentkitResult = agentkit ? await agentkitRow() : undefined;
   return {
     versions: { '@coinbase/cdp-sdk': versionOf('@coinbase/cdp-sdk'), '@x402/core': versionOf('@x402/core'), walletcap: versionOf('walletcap') },
     policy: { perPayment: '$50', per24h: '$150', asset: 'USDC', network: 'Base' },
     scenarios,
+    ...(agentkit ? { agentkit: agentkitResult } : {}),
     seconds: (Date.now() - started) / 1000,
   };
+}
+
+const NETWORKS = { 'eip155:8453': 'Base mainnet', 'eip155:84532': 'Base Sepolia' };
+const where = payment => `$${(Number(payment.amount) / 1e6).toFixed(2)} on ${NETWORKS[payment.network] ?? payment.network}`;
+
+function agentkitReport(row) {
+  if (row === null) {
+    return ['AgentKit row skipped: @coinbase/agentkit is not installed next to the crash test. Run it with:', `  ${AGENTKIT_INSTALL}`];
+  }
+  const signed = row.agentkit.received.map(p => `signed ${where(p)} to ${p.toStranger ? 'the first-listed address' : 'the merchant'}, valid ${Math.round(p.validForSeconds / 86_400)} days`);
+  const reported = row.agentkit.reported ? `; reported ${where(row.agentkit.reported)}` : '';
+  const guarded = row.walletcap.received.length === 0 ? 'refused before signing' : row.walletcap.received.map(p => `signed ${where(p)}`).join(', ');
+  return [
+    `Coinbase AgentKit ${row.version}: the agent approves the merchant's 1¢ offer on Base Sepolia; the merchant`,
+    'lists $1.00 on Base mainnet, to another address, first.',
+    '',
+    `AgentKit                         ${signed.join(', ') || 'signed nothing'}${reported}`,
+    `walletcap, 2¢ a payment          ${guarded}`,
+    '',
+    "AgentKit's wallet providers send an analytics event with the wallet's address when they start;",
+    'the crash test turns that off, and blocks every request but the local merchant.',
+  ];
 }
 
 const dollars = atomic => `$${(Number(atomic) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
@@ -147,19 +181,26 @@ export function report(run) {
     'one budget file every agent opens.',
     'Nothing was sent. Each payment is an x402 authorization signed offline by a throwaway key that',
     'holds nothing; a payee holding one could settle it on Base until it expires.',
+    ...(run.agentkit === undefined
+      ? ['', `Add --agentkit for Coinbase AgentKit's row (it installs @coinbase/agentkit, about 1.3 GB):`, `  ${AGENTKIT_INSTALL}`]
+      : ['', ...agentkitReport(run.agentkit)]),
+    '',
     `Ran in ${run.seconds.toFixed(1)}s.`,
   ].join('\n');
 }
 
-const held = run => run.scenarios.every(s => s.walletcap.over === 0n && s.walletcap.eurc === 0n);
+const held = run => run.scenarios.every(s => s.walletcap.over === 0n && s.walletcap.eurc === 0n)
+  && (!run.agentkit || run.agentkit.walletcap.received.length === 0);
 
 const HELP = `walletcap-crash-test: put Coinbase CDP's x402 spend controls and walletcap through the same
 events (a restart, replicas, a shared store, a different asset) and count what gets past the cap.
 Offline: payments are signed by a throwaway key and nothing is sent.
 
-Usage: npx walletcap-crash-test [--json]
+Usage: npx walletcap-crash-test [--json] [--agentkit]
 
   --json      Machine-readable results
+  --agentkit  Add Coinbase AgentKit's row. It needs @coinbase/agentkit installed alongside:
+              ${AGENTKIT_INSTALL}
   --version   Print the version
 
 Exits 1 if walletcap lets anything past the cap.`;
@@ -174,13 +215,13 @@ const isMain = () => {
 };
 
 if (process.argv[1] && isMain()) {
-  const { values } = parseArgs({ options: { json: { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
+  const { values } = parseArgs({ options: { json: { type: 'boolean' }, agentkit: { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
   if (values.help) {
     process.stdout.write(`${HELP}\n`);
   } else if (values.version) {
     process.stdout.write(`${JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version}\n`);
   } else {
-    const run = await crashTest();
+    const run = await crashTest({ agentkit: values.agentkit === true });
     process.stdout.write(values.json
       ? `${JSON.stringify(run, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2)}\n`
       : `${report(run)}\n`);

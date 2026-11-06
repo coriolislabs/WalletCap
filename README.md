@@ -54,7 +54,9 @@ payee asks for EURC, not USDC         1,000 EURC signed, counted as $0   refused
 ```
 
 Every agent is held to $50 a payment and $150 in any 24 hours. The shared-store row varies from
-run to run. [crash-test/README.md](crash-test/README.md) says exactly what runs.
+run to run. Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and
+AgentKit signs the merchant's first-listed $1.00 on Base mainnet. [crash-test/README.md](crash-test/README.md)
+says exactly what runs.
 
 ## Try it without a wallet
 

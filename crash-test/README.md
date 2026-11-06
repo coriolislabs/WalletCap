@@ -46,6 +46,29 @@ The shared store is what Coinbase's docs advise for replicas: "implement this in
 
 The interface has no single step that both checks the cap and records the payment. CDP reads the total, decides, then appends, and its lock covers one process. Replicas can read the same total before any of them appends. How many overlap varies from run to run.
 
+## Coinbase AgentKit (`--agentkit`)
+
+```console
+$ npx -p walletcap-crash-test -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit
+
+Coinbase AgentKit 0.10.4: the agent approves the merchant's 1¢ offer on Base Sepolia; the merchant
+lists $1.00 on Base mainnet, to another address, first.
+
+AgentKit                         signed $1.00 on Base mainnet to the first-listed address, valid 4 days; reported $0.01 on Base Sepolia
+walletcap, 2¢ a payment          refused before signing
+```
+
+The AgentKit row runs AgentKit's own `retry_http_request_with_x402` action against a merchant on `127.0.0.1`. The agent hands it the 1¢ offer it approved, which is how AgentKit's flow works.
+
+What AgentKit does with it:
+- It checks only that the approved offer's network is one the wallet supports.
+- It then builds a fresh x402 client, which pays whatever the merchant listed first.
+- Its answer reports the approved offer, not the one it signed.
+
+walletcap's `budget.guardAgentKit()`, at 2¢ a payment, refuses the $1.00 before anything is signed.
+
+AgentKit is opt-in because it installs about 1.3 GB. Its wallet providers also send an analytics event with the wallet's address when they start. The crash test turns that off and blocks every request except the one to the local merchant.
+
 ## What "signed" means
 
 Nothing is sent. Each payment is an x402 authorization (EIP-3009) signed with a key that holds nothing. A payee holding one could settle it on Base until it expires, so signing is the moment the money is committed. The crash test counts what each control lets the agent sign.
@@ -54,7 +77,7 @@ Nothing is sent. Each payment is an x402 authorization (EIP-3009) signed with a 
 
 - **Settlement.** It measures the client-side control, not what lands on chain.
 - **More than one machine.** The replicas share one machine, and walletcap's budget file is single-host.
-- **Other vendors' controls.** Only Coinbase's CDP x402 controls are covered so far. Spend Permissions, the Agentic Wallet, AgentKit, Safe, MetaMask, Tempo and AP2 come next.
+- **Other vendors' controls.** Coinbase's CDP x402 controls and AgentKit are covered so far. Spend Permissions, the Agentic Wallet, Safe, MetaMask, Tempo and AP2 come next.
 
 ## Releasing
 

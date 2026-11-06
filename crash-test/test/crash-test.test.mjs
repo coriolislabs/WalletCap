@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { crashTest, report } from '../cli.mjs';
+import { agentkitRow, crashTest, report } from '../cli.mjs';
 
 const USD = 1_000_000n;
 const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
@@ -51,4 +51,21 @@ test("CDP's controls let money past the cap on every event; walletcap holds each
   for (const s of run.scenarios) assert.equal(s.walletcap.over, 0n, `${s.id}: walletcap let money past the cap`);
   assert.match(report(run), /with walletcap\./);
   assert.ok(run.seconds < 60, `the crash test took ${run.seconds}s`);
+});
+
+const agentkitInstalled = (() => {
+  try {
+    import.meta.resolve('@coinbase/agentkit');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("AgentKit signs the merchant's first-listed $1.00 on mainnet and reports the 1¢ it was given; walletcap refuses", { skip: !agentkitInstalled && '@coinbase/agentkit is not installed alongside' }, async () => {
+  const row = await agentkitRow();
+  assert.deepEqual(row.agentkit.received.map(p => [p.network, p.amount, p.toStranger]), [['eip155:8453', '1000000', true]]);
+  assert.deepEqual([row.agentkit.reported.network, row.agentkit.reported.amount], ['eip155:84532', '10000']);
+  assert.deepEqual(row.walletcap.received, []);
+  assert.equal(row.walletcap.refused, true);
 });
