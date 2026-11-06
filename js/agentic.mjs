@@ -3,9 +3,10 @@
 //
 // Every send and every x402 payment that goes through here is counted in the wallet's budget,
 // whichever process or session on this host makes it. An x402 payment is priced before the wallet
-// signs it, and the wallet is capped at that amount. A confirmed settlement counts for one
-// window. A payment that isn't confirmed keeps counting until it can no longer settle, when
-// walletcap can tell, or else until its owner releases it.
+// signs it, and the wallet is handed the terms walletcap priced and capped at that amount. Once
+// the wallet answers, the payment counts until one window past the time its authorization
+// expires, whatever the payee says; if the wallet never answers, until its owner releases it. A
+// send counts for one window, or, if its outcome is unknown, until its owner releases it.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -100,7 +101,10 @@ const requestUrl = data => {
   return url;
 };
 
-/** Ask the endpoint what it charges: its 402 answer's accepted payment requirements, or null if it asks for none. */
+/**
+ * Ask the endpoint what it charges: its 402 answer, with the payment requirements it accepts
+ * (`accepts`) and any `extensions`, or null if it asks for none.
+ */
 export async function discoverRequirements(data, { fetch: fetchImpl = globalThis.fetch } = {}) {
   const method = String(data.method ?? 'GET').toUpperCase();
   const init = { method, headers: { Accept: 'application/json', ...(data.headers ?? {}) }, redirect: 'follow' };
@@ -115,7 +119,7 @@ export async function discoverRequirements(data, { fetch: fetchImpl = globalThis
   if (!Array.isArray(required?.accepts) || required.accepts.length === 0) {
     throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
   }
-  return required.accepts;
+  return required;
 }
 
 /**
@@ -183,11 +187,13 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   }
 
   async function x402(data) {
-    // Requirements the caller hands over are passed to the wallet as they are, and it pays one of them.
+    // The wallet is handed the terms walletcap checks: the caller's, as they are, or the ones
+    // walletcap discovers. Handed terms, awal skips its own 402 discovery and signs only a term
+    // equal to one of them, maxTimeoutSeconds included, so the payee can't show it others.
     const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
-    const offered = handed ? data.paymentRequirements : await findRequirements(data);
+    const required = handed ? null : await findRequirements(data);
     const url = requestUrl(data).href.slice(0, 1024);
-    if (offered === null) {
+    if (!handed && required === null) {
       // The endpoint asked for nothing. Let the request through with the wallet's smallest
       // possible payment cap, one atomic unit, counted, in case the payee asks for money after
       // all. Nothing was signed for value, so unless the payee confirms a payment the hold is
@@ -205,6 +211,13 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       else recorded(reservation, () => reservation.release());
       return result;
     }
+    const offered = handed ? data.paymentRequirements : required.accepts;
+    const extensions = required?.extensions;
+    const terms = handed ? {} : {
+      paymentRequirements: offered,
+      // The wallet uses the 402's extensions only when it discovers the terms itself.
+      ...(data.extensions === undefined && extensions !== null && typeof extensions === 'object' && !Array.isArray(extensions) ? { extensions } : {}),
+    };
     const settlesWithin = settlesWithinMs(offered);
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
     const candidates = offered.filter(requirement => (preferred === undefined || networkOf(requirement) === preferred)
@@ -229,16 +242,16 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     });
     let result;
     try {
-      result = await request('make-x402-request', { ...data, maxAmountPerRequest: Number(atomicOf(choice)) });
+      result = await request('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) });
     } catch (error) {
       // The wallet may not have answered yet, and may still sign: it counts until released.
       failed(reservation, error);
       throw error;
     }
-    // The wallet has answered, so it has signed if it ever will. With the terms handed to it, the
-    // hold learns when the authorization expires, before anything else: a commit never shortens
-    // a hold, so the payee's own word that the payment settled can't free the budget early.
-    if (handed) recorded(reservation, () => reservation[SETTLES_BY](BigInt(now()) + settlesWithin));
+    // The wallet has answered, so it has signed if it ever will. The hold learns when that
+    // authorization expires before anything else: a commit never shortens a hold, so the payee's
+    // own word that the payment settled can't free the budget early.
+    recorded(reservation, () => reservation[SETTLES_BY](BigInt(now()) + settlesWithin));
     const answer = paymentResponseOf(result);
     if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
     else recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));

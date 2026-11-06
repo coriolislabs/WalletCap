@@ -28,6 +28,8 @@ const requirement = (amount = '50000', ttl = 300, asset = USDC) => ({
   scheme: 'exact', network: 'eip155:84532', asset, amount, payTo: PAY_TO, maxTimeoutSeconds: ttl, extra: { name: 'USDC', version: '2' },
 });
 
+const EXTENSIONS = { bazaar: { discoverable: true } };
+
 // A payee: GET /pay?amount=&ttl=&asset= answers 402 with those terms; /free answers 200.
 let server;
 let base;
@@ -36,7 +38,7 @@ before(async () => {
     const url = new URL(req.url, 'http://x');
     if (url.pathname === '/free') { res.end('{}'); return; }
     const offered = requirement(url.searchParams.get('amount') ?? '50000', Number(url.searchParams.get('ttl') ?? 300), url.searchParams.get('asset') ?? USDC);
-    res.writeHead(402, { 'PAYMENT-REQUIRED': b64({ x402Version: 2, resource: { url: req.url }, accepts: [offered] }) });
+    res.writeHead(402, { 'PAYMENT-REQUIRED': b64({ x402Version: 2, resource: { url: req.url }, accepts: [offered], extensions: EXTENSIONS }) });
     res.end('{}');
   });
   await new Promise(done => server.listen(0, '127.0.0.1', done));
@@ -84,7 +86,7 @@ test('the wallet is capped at exactly the price walletcap checked', async () => 
   await guard.request('make-x402-request', x402('?ttl=300'));
   const [{ channel, data }] = w.calls;
   assert.equal(channel, 'make-x402-request');
-  assert.equal(data.paymentRequirements, undefined);
+  assert.deepEqual(data.paymentRequirements, [requirement('50000', 300)]);
   assert.equal(data.maxAmountPerRequest, 50_000);
   assert.equal(budget.status().spent, 50_000n);
   assert.deepEqual([budget.history()[0].status, budget.history()[0].tx, budget.history()[0].rail], ['settled', TX, 'awal-x402']);
@@ -107,10 +109,12 @@ test('a payee that holds its authorizations collects at most the cap, restarts i
   assert.equal(signed, 3);
   const { budget } = newBudget(clock, path);
   assert.equal(budget.status().inFlight, 150_000n);
-  // Unconfirmed, on terms the wallet discovers again itself, they count until the owner releases them.
-  clock.now += 30 * DAY;
+  // Unconfirmed, they count until one window past the time the authorizations expire.
+  clock.now += 3_600_000 + 60_000 + DAY;
   assert.equal(budget.status().inFlight, 150_000n);
-  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'unknown']);
+  clock.now += 1;
+  assert.equal(budget.status().inFlight, 0n);
+  assert.deepEqual(budget.history().map(row => row.status), ['expired', 'expired', 'expired']);
 });
 
 test("the wallet's own refusal before signing gives the amount back; a payee's refusal after it does not", async () => {
@@ -177,14 +181,13 @@ test('an unconfirmed x402 payment on terms handed to the wallet counts until the
   assert.equal(budget.status().inFlight, 0n);
   assert.equal(budget.history()[0].status, 'expired');
 
-  // Terms walletcap discovered itself, or a wallet that never answered: walletcap can't tell when
-  // the payment can no longer settle.
-  await guard.request('make-x402-request', x402('?ttl=300'));
+  // A wallet that never answered may sign yet: walletcap can't tell when the payment can no
+  // longer settle.
   const silent = guardAgenticWallet(budget, { request: wallet(() => { throw new Error('IPC request timed out'); }).request });
   await assert.rejects(silent.request('make-x402-request', { ...x402(), paymentRequirements: terms }), /timed out/);
   clock.now += 30 * DAY;
-  assert.equal(budget.status().inFlight, 100_000n);
-  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'expired']);
+  assert.equal(budget.status().inFlight, 50_000n);
+  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'expired']);
 });
 
 test("the payee's word that a payment on handed-in terms settled doesn't end its hold early", async () => {
@@ -200,6 +203,28 @@ test("the payee's word that a payment on handed-in terms settled doesn't end its
   assert.equal(budget.status().spent, 50_000n);
   clock.now += 1;
   assert.equal(budget.status().spent, 0n);
+});
+
+test("the wallet is handed the terms walletcap discovered, so the payee's word can't end the hold early", async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const w = wallet(); // the payee answers "settled" with a made-up hash and keeps the authorization
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  // 0.3.0 left the wallet to ask the payee again, so walletcap couldn't tell what it signed, and the
+  // payee's "settled" ended the count after one window.
+  await guard.request('make-x402-request', x402('?ttl=3600'));
+  assert.deepEqual(w.calls[0].data.paymentRequirements, [requirement('50000', 3600)]);
+  assert.deepEqual(w.calls[0].data.extensions, EXTENSIONS);
+  assert.equal(budget.history()[0].status, 'settled');
+  clock.now += DAY + 1;
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 3_600_000 + 60_000 - 1; // an hour and a minute after the wallet answered, plus one window
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+  // The caller's own extensions win, as they do in the wallet.
+  await guard.request('make-x402-request', { ...x402('?ttl=300'), extensions: { mine: {} } });
+  assert.deepEqual(w.calls[1].data.extensions, { mine: {} });
 });
 
 test("a term walletcap can't read doesn't switch off the hold's expiry, and terms it can't bound are refused", async () => {
@@ -362,8 +387,10 @@ test('npx walletcap awal: payments are counted, everything else is awal', async 
   assert.match(JSON.parse(send.stdout).error.message, /walletcap refused/);
   const passthrough = await awal(path, log, 'settle', 'status', '--json');
   assert.equal(passthrough.stdout.trim(), 'awal status --json');
-  const asked = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).channel);
-  assert.deepEqual(asked, ['get-wallet-address', 'make-x402-request', 'get-wallet-address', 'make-x402-request', 'get-wallet-address', 'make-x402-request', 'get-wallet-address', 'get-wallet-address']);
+  const asked = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(asked.map(line => line.channel), ['get-wallet-address', 'make-x402-request', 'get-wallet-address', 'make-x402-request', 'get-wallet-address', 'make-x402-request', 'get-wallet-address', 'get-wallet-address']);
+  // The wallet pays the terms walletcap discovered and priced: it is handed them.
+  for (const line of asked.filter(line => line.channel === 'make-x402-request')) assert.deepEqual(line.paymentRequirements, [requirement('50000', 300)]);
 });
 
 test('npx walletcap awal-mcp: the MCP server answers, and payments past the cap never reach it', async () => {
@@ -407,6 +434,7 @@ test('npx walletcap awal-mcp: the MCP server answers, and payments past the cap 
   const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(calls.map(c => c.name), ['make_http_request_with_x402', 'make_http_request_with_x402', 'make_http_request_with_x402', 'get_wallet_balance']);
   assert.equal(calls[0].arguments.maxAmountPerRequest, 50_000);
+  assert.deepEqual(calls[0].arguments.paymentRequirements, [requirement('50000', 300)]);
   const budget = openBudget({ wallet: WALLET, path, create: false });
   assert.equal(budget.status().spent, 150_000n);
   budget.close();
