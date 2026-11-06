@@ -2,7 +2,7 @@
 
 This policy covers findings about **vendor products** in the Agent Payment
 Benchmark. It is separate from walletcap's own 90-day policy in
-[SECURITY.md](../SECURITY.md).
+[SECURITY.md](https://github.com/coriolislabs/WalletCap/blob/main/SECURITY.md).
 
 ## The notice
 

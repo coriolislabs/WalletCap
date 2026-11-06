@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# The docs site. GitHub Pages builds it from this folder: Settings → Pages → Deploy from a
+# branch → main, /docs. It is served at https://coriolislabs.github.io/WalletCap/.
+title: walletcap
+tagline: Spend limits for AI agent wallets
+description: >-
+  Per-payment and rolling 24-hour spend limits for AI agent wallets that pay in USDC, held
+  across restarts and replicas. For x402, Coinbase CDP, AgentKit, the Agentic Wallet and its
+  MCP server, and Spend Permissions.
+theme: jekyll-theme-primer
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+permalink: pretty
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /social-preview.png
