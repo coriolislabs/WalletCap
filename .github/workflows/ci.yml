@@ -52,10 +52,10 @@ jobs:
     container: node:22-bookworm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      # One install, so the walletcap the crash test depends on comes from this checkout and is
+      # never looked up on npm (a release's walletcap isn't published until the PR merges).
       - name: Install the crash test, on this checkout's walletcap
-        run: |
-          npm install --no-audit --no-fund --no-package-lock
-          npm install --no-save --no-audit --no-fund --no-package-lock ../js
+        run: npm install --no-save --no-audit --no-fund --no-package-lock ../js
         working-directory: crash-test
       - name: Check the shipped contracts match their sources
         run: node contracts/build.mjs --check
@@ -70,11 +70,14 @@ jobs:
     container: node:22-bookworm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - name: Pack the crash test
-        run: npm pack --pack-destination "$RUNNER_TEMP"
+      - name: Pack the crash test and this checkout's walletcap
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          (cd ../js && npm pack --pack-destination "$RUNNER_TEMP")
         working-directory: crash-test
-      # As users run it: AgentKit installed alongside, walletcap from npm.
+      # As users run it, from the packed tarballs, with AgentKit installed alongside. walletcap is
+      # this checkout's: the version the crash test depends on isn't on npm until it is released.
       - name: Run it with Coinbase AgentKit alongside
-        run: npx -y -p "$RUNNER_TEMP"/walletcap-crash-test-*.tgz -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit --json > "$RUNNER_TEMP/agentkit.json"
+        run: npx -y -p "$RUNNER_TEMP"/walletcap-crash-test-*.tgz -p "$RUNNER_TEMP"/walletcap-[0-9]*.tgz -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit --json > "$RUNNER_TEMP/agentkit.json"
       - name: Check the AgentKit row
         run: node crash-test/ci/check-agentkit.mjs "$RUNNER_TEMP/agentkit.json"
