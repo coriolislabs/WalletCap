@@ -3,6 +3,7 @@
 // client's public payment hooks. It works under @x402/fetch, @x402/axios and
 // Coinbase's CDP spend controls alike: whatever else is configured, every
 // payment the client creates is counted in the shared budget before it is sent.
+import { now } from './_clock.mjs';
 import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
 
 const GUARDED = Symbol.for('walletcap/x402-guard');
@@ -132,16 +133,26 @@ export const toMicros = (atomic, decimals) => {
   return (atomic + divisor - 1n) / divisor;
 };
 
-// An EIP-3009 authorization (x402's exact scheme on EVM) cannot settle once validBefore has passed.
-const settlesBy = payload => {
-  const validBefore = payload?.payload?.authorization?.validBefore;
-  if (!['string', 'number', 'bigint'].includes(typeof validBefore)) return null;
+// A Unix time in seconds as milliseconds, or null if it isn't a positive whole number.
+const unixMs = value => {
+  if (!['string', 'number', 'bigint'].includes(typeof value)) return null;
   try {
-    const seconds = BigInt(validBefore);
+    const seconds = BigInt(value);
     return seconds > 0n ? seconds * 1000n : null;
   } catch {
     return null;
   }
+};
+
+// When a payment just signed can no longer settle: the expiry it carries, an EIP-3009
+// authorization's validBefore or a Permit2 deadline (x402's exact and upto schemes, and the
+// escrow's), or else the time it was signed plus its terms' validity (settlesWithinSeconds).
+const settlesBy = (payload, requirements) => {
+  const signed = payload?.payload;
+  const expiries = [unixMs(signed?.authorization?.validBefore), unixMs(signed?.permit2Authorization?.deadline)].filter(ms => ms !== null);
+  if (expiries.length > 0) return expiries.reduce((latest, ms) => (ms > latest ? ms : latest));
+  const within = settlesWithinSeconds(payload?.accepted ?? requirements);
+  return within === null ? null : BigInt(now()) + BigInt(within) * 1000n;
 };
 
 // Transports may clone a payload before handing it back (a JSON round trip, a spread);
@@ -234,7 +245,7 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
       to: requirements.payTo,
       note: typeof url === 'string' ? url.slice(0, 1024) : undefined,
       details: { network: requirements.network, asset: requirements.asset, scheme: requirements.scheme },
-      settlesBy: settlesBy(context.paymentPayload),
+      settlesBy: settlesBy(context.paymentPayload, requirements),
     });
     slot.payload = context.paymentPayload;
     remember(context.paymentPayload, slot.reservation);

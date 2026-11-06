@@ -165,6 +165,34 @@ test("a payee's word that a payment settled can't free the budget while the auth
   assert.equal(budget.check('$0.15').ok, true);
 });
 
+test("a Permit2 payment, or one whose expiry walletcap can't read, counts until it can no longer settle", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { budget, client, clock } = setup({ perDay: '$0.15' });
+  const fake = { success: true, transaction: `0x${'ee'.repeat(32)}`, network: NETWORK };
+  // 0.3.0 read only EIP-3009's validBefore: a payee that asked for Permit2 and answered "settled"
+  // with a made-up hash freed the budget after one window, with the deadline still an hour away.
+  const permit2 = { maxTimeoutSeconds: MAX_PAYMENT_TIMEOUT_SECONDS, extra: { name: 'USDC', version: '2', assetTransferMethod: 'permit2' } };
+  const payload = await client.createPaymentPayload(kit.required(100_000, permit2));
+  await client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: fake });
+  const deadline = Number(payload.payload.permit2Authorization.deadline) * 1000;
+  clock.now = deadline + DAY;
+  assert.equal(budget.status().spent, 100_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+  // A scheme whose payload carries no expiry walletcap reads counts from the time it was signed,
+  // for as long as its terms allow.
+  const { x402Client } = await import('@x402/core/client');
+  const opaque = { scheme: 'opaque', createPaymentPayload: async version => ({ x402Version: version, payload: { signed: 'elsewhere' } }) };
+  const other = budget.guard(new x402Client().register(NETWORK, opaque));
+  other.setSpendControls(false);
+  const signedAt = clock.now;
+  const unread = await other.createPaymentPayload(kit.required(50_000, { scheme: 'opaque', maxTimeoutSeconds: 600 }));
+  await other.handlePaymentResponse({ paymentPayload: unread, requirements: unread.accepted, settleResponse: fake });
+  clock.now = signedAt + 600_000 + DAY;
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+});
+
 test('an authorization valid longer than an hour is refused before it is signed', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const { budget, client } = setup();
   // 0.2.x signed whatever validity the payee asked for: here, 30 days to redeem it.

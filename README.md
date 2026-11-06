@@ -372,9 +372,10 @@ wallet become one budget, with the tighter of every limit and every payment.
 - **It can't see a revoke that lands later in the same block,** and for x402 schemes that settle
   later (batch vouchers), a payment counts from when the server confirms it.
 - **Some x402 payments can't be confirmed.** `@x402/fetch` doesn't report v1 settlements
-  back, and only the exact EVM scheme carries an expiry the guard can read. An unconfirmed
-  payment keeps counting until its authorization expires plus one window, or, with no expiry,
-  until you `release` it.
+  back. An unconfirmed payment keeps counting until one window past the time it can no longer
+  settle: the expiry the signed payment carries (an EIP-3009 `validBefore` or a Permit2
+  `deadline`), or else the time it was signed plus its terms' `maxTimeoutSeconds`. On the
+  Agentic Wallet, a payment the wallet never answered keeps counting until you `release` it.
 - Amounts are micro-dollars. A budget, a limit or one payment is at most $1,000,000,000
   (10^15 micro-dollars), so no sum of payments can overflow.
 - The ledger reads the system clock; there is no option to set it.
