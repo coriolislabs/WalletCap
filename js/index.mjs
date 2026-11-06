@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { SharedBudgetStore } from './cdp.mjs';
-import { BudgetError, BudgetRefused, isNotSent, notSent } from './errors.mjs';
+import { BudgetError, BudgetRefused, isNotSent, notSent, PaymentNotRecorded } from './errors.mjs';
 import { checkKeys, Ledger, SCHEMA_VERSION, SETTLES_BY } from './ledger.mjs';
 import {
   defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
@@ -20,8 +20,8 @@ import {
 import { guardX402ActionProvider, guardX402Client, USD_ASSETS } from './x402.mjs';
 
 export {
-  BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, notSent, SCHEMA_VERSION,
-  SharedBudgetStore, toMicros, USD_ASSETS,
+  BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, notSent, PaymentNotRecorded,
+  SCHEMA_VERSION, SharedBudgetStore, toMicros, USD_ASSETS,
 };
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
@@ -219,8 +219,10 @@ export class Budget {
    * throws, the payment may still have left, so it stays in flight, marked
    * unknown: it counts until one window past `settlesBy`, or, without one,
    * until its owner releases it. An error tagged with notSent() gives the
-   * amount back. `fn` receives the reservation; its id makes a good
-   * idempotency key. Returns what `fn` returns.
+   * amount back. If the payment went through but can't be recorded, it throws
+   * PaymentNotRecorded, which is not a BudgetError: don't pay again. `fn`
+   * receives the reservation; its id makes a good idempotency key. Returns what
+   * `fn` returns.
    */
   async pay(amount, fn, options = {}) {
     if (typeof fn !== 'function') throw new BudgetError('pay(amount, fn) calls fn to make the payment, and fn is missing');
@@ -243,7 +245,7 @@ export class Budget {
       try {
         reservation.commit({ tx: transactionOf(result) });
       } catch (error) {
-        throw new BudgetError(`the payment went through but could not be recorded as settled; it still counts as in flight (${reservation.id})`, { cause: error });
+        throw new PaymentNotRecorded(reservation.id, { cause: error });
       }
     }
     return result;

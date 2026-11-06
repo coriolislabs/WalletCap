@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
-import { BudgetRefused, openBudget } from '../index.mjs';
+import { BudgetError, BudgetRefused, openBudget, PaymentNotRecorded } from '../index.mjs';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-x402-'));
@@ -123,4 +123,28 @@ test('a client is guarded once, and only an x402 client can be', { skip: kit ===
   const { budget, client } = setup();
   assert.throws(() => budget.guard(client), /already has a budget guard/);
   assert.throws(() => budget.guard({}), /x402Client from @x402\/core/);
+});
+
+const DAI = '0x00000000000000000000000000000000000000da';
+
+test('an asset override adds a USD stablecoin, and cannot reprice a built-in one', { skip: kit === null && 'the x402 devDependencies are not installed' }, () => {
+  const { budget } = setup();
+  // 0.2.x took any decimals up to 36, for any asset: USDC at 18 decimals counted $1 as 0.000001 of a cent.
+  assert.throws(() => budget.guard(kit.client(), { assets: [{ network: NETWORK, asset: USDC, decimals: 18 }] }), /already priced with 6 decimals/);
+  assert.throws(() => budget.guard(kit.client(), { assets: [{ network: 'base-sepolia', asset: USDC.toLowerCase(), decimals: 0 }] }), /already priced with 6 decimals/);
+  for (const decimals of [19, 36, -1, 1.5, '6', undefined]) {
+    assert.throws(() => budget.guard(kit.client(), { assets: [{ network: NETWORK, asset: DAI, decimals }] }), /decimals from 0 to 18/, String(decimals));
+  }
+  budget.guard(kit.client(), { assets: [{ network: NETWORK, asset: USDC, decimals: 6 }, { network: NETWORK, asset: DAI, decimals: 18 }] });
+});
+
+test('a settlement the guard cannot record throws PaymentNotRecorded, and the payment keeps counting', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { budget, client, path } = setup();
+  const payload = await client.createPaymentPayload(kit.required(50_000));
+  budget.close();
+  await assert.rejects(
+    client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: settled }),
+    error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError),
+  );
+  assert.equal(openBudget({ wallet: kit.account.address, path }).status().inFlight, 50_000n);
 });

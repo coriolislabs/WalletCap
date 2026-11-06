@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
-import { BudgetRefused, MAX_AMOUNT, notSent, openBudget, SharedBudgetStore } from '../index.mjs';
+import { BudgetError, BudgetRefused, MAX_AMOUNT, notSent, openBudget, PaymentNotRecorded, SharedBudgetStore } from '../index.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
@@ -149,6 +149,20 @@ test('pay() returns what the payment returns and keeps its transaction hash', as
   assert.equal(seen.open, false);
   const [entry] = budget.history();
   assert.deepEqual([entry.status, entry.amount, entry.tx, entry.to, entry.note], ['settled', 5_000_000n, TX, '0x4165cb72De51A67aac32DC33197d779552205efD', 'one API call']);
+});
+
+test('a payment that went through but cannot be recorded throws PaymentNotRecorded, not a BudgetError', async () => {
+  const { path, budget } = fixture({ perDay: '$150' });
+  let id;
+  // The ledger becomes unusable between the payment and its record (here, it is closed).
+  const error = await budget.pay('$5', async reservation => { id = reservation.id; budget.close(); return TX; }).catch(caught => caught);
+  assert.ok(error instanceof PaymentNotRecorded, error);
+  assert.equal(error instanceof BudgetError, false); // code that retries on a BudgetError must not pay twice
+  assert.equal(error.name, 'PaymentNotRecorded');
+  assert.equal(error.reservationId, id);
+  assert.ok(error.cause instanceof BudgetError);
+  assert.ok(error.message.endsWith(`still counts as in flight (${id})`), error.message);
+  assert.equal(openBudget({ wallet: WALLET, path }).status().inFlight, 5_000_000n);
 });
 
 test('a reservation counts while the payment is in flight, and once only', async () => {

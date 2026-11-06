@@ -28,7 +28,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from walletcap.errors import BudgetError, BudgetWarning, NotSent
+from walletcap.errors import BudgetError, BudgetWarning, NotSent, PaymentNotRecorded
 from walletcap.ledger import UNSET, BudgetLimits, Ledger
 from walletcap.money import (
     DAY_MS,
@@ -266,11 +266,12 @@ class Reservation:
 class Paying:
     """``with budget.pay(amount):`` reserves on entry and records the payment on exit.
 
-    A clean exit commits it. An exception never settles it: the payment may
-    have left the wallet, so it stays in flight, marked unknown, and counts
-    until one window past ``settles_by``, or, without one, until its owner
-    releases it. ``NotSent`` gives the amount back. Works with ``async with``
-    too.
+    A clean exit commits it; if that fails, it raises ``PaymentNotRecorded``,
+    which is not a ``BudgetError``: don't pay again. An exception never settles
+    it: the payment may have left the wallet, so it stays in flight, marked
+    unknown, and counts until one window past ``settles_by``, or, without one,
+    until its owner releases it. ``NotSent`` gives the amount back. Works with
+    ``async with`` too.
     """
 
     def __init__(
@@ -307,10 +308,7 @@ class Paying:
             try:
                 reservation.commit()
             except BudgetError as error:
-                raise BudgetError(
-                    "the payment went through but could not be recorded as settled; "
-                    f"it still counts as in flight ({reservation.id})"
-                ) from error
+                raise PaymentNotRecorded(reservation.id, error) from error
             return
         try:
             if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:

@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, afterEach, before, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
-import { BudgetRefused, openBudget } from '../index.mjs';
+import { BudgetError, BudgetRefused, openBudget, PaymentNotRecorded } from '../index.mjs';
 import { guardAgenticWallet, usdcAtomic } from '../agentic.mjs';
 
 const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
@@ -175,6 +175,17 @@ test('an unconfirmed x402 payment on terms handed to the wallet counts until the
   clock.now += 30 * DAY;
   assert.equal(budget.status().inFlight, 150_000n);
   assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'unknown', 'expired']);
+});
+
+test('a send that went through but cannot be recorded throws PaymentNotRecorded', async () => {
+  const { budget, path } = newBudget();
+  const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return { transactionHash: TX }; }).request });
+  await assert.rejects(
+    guard.request('send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia' }),
+    error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError),
+  );
+  assert.equal(newBudget(undefined, path).budget.status().inFlight, 50_000n);
+  assert.throws(() => guardAgenticWallet(budget, { request: wallet().request, assets: [{ network: 'eip155:84532', asset: USDC, decimals: 18 }] }), /already priced/);
 });
 
 test('assets walletcap cannot price are refused before the wallet is asked', async () => {

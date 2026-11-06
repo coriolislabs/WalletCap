@@ -16,7 +16,7 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { now } from './_clock.mjs';
-import { BudgetError, BudgetRefused } from './errors.mjs';
+import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { SETTLES_BY } from './ledger.mjs';
 import { formatUsd, normalizeWallet } from './money.mjs';
@@ -42,6 +42,15 @@ const NOT_SIGNED = [
   /^(?:UI bridge error: )?(?:Not authenticated|Authentication required|Please sign in)/i,
 ];
 const notSigned = error => NOT_SIGNED.some(pattern => pattern.test(String(error?.message ?? error)));
+
+// The payment settled; record it, or say it went through but couldn't be recorded (not a BudgetError).
+const settled = (reservation, tx) => {
+  try {
+    reservation.commit({ tx });
+  } catch (error) {
+    throw new PaymentNotRecorded(reservation.id, { cause: error });
+  }
+};
 
 const decodeHeader = value => {
   try {
@@ -145,7 +154,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     }
     // A transaction the wallet reports as failed may still be mined: it keeps counting.
     if (result?.error) failed(reservation, new Error(String(result.error)));
-    else reservation.commit({ tx: TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined });
+    else settled(reservation, TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined);
     return result;
   }
 
@@ -167,7 +176,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       }
       const answer = paymentResponseOf(result);
       if (answer === null) reservation.release();
-      else if (answer.success === true && TX_HASH.test(answer.transaction ?? '')) reservation.commit({ tx: answer.transaction });
+      else if (answer.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
       else reservation.annotate({ outcome: answer.success === false ? 'refused' : 'unknown' });
       return result;
     }
@@ -202,7 +211,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     }
     const answer = paymentResponseOf(result);
     if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) {
-      reservation.commit({ tx: answer.transaction });
+      settled(reservation, answer.transaction);
       return result;
     }
     reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });

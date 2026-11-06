@@ -24,6 +24,20 @@ export class BudgetRefused extends BudgetError {
 }
 
 /**
+ * The payment went through, but the budget could not record it as settled. It
+ * still counts as in flight. This is not a BudgetError, so code that retries on
+ * a BudgetError does not pay twice. `reservationId` names the payment, and
+ * `cause` is why it could not be recorded.
+ */
+export class PaymentNotRecorded extends Error {
+  constructor(reservationId, options) {
+    super(`the payment went through but could not be recorded as settled; it still counts as in flight (${reservationId})`, options);
+    this.name = 'PaymentNotRecorded';
+    this.reservationId = reservationId;
+  }
+}
+
+/**
  * Tag an error to say the payment never left the wallet, so `pay()` gives its
  * amount back instead of counting it: `throw notSent(error)` or
  * `throw notSent('card declined')`. Untagged errors keep counting, because a

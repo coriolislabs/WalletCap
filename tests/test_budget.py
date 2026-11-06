@@ -28,6 +28,7 @@ from walletcap import (  # noqa: E402
     BudgetRefused,
     BudgetWarning,
     NotSent,
+    PaymentNotRecorded,
     _clock,
     default_budget_path,
     format_usd,
@@ -174,6 +175,26 @@ def test_an_unknown_outcome_with_a_settle_by_time_counts_one_window_past_it(
     assert budget.status().in_flight == 0
     assert budget.history()[0].status == "expired"
     _pay(budget, "$150")
+
+
+def test_a_payment_that_went_through_but_was_not_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
+
+    def locked(spend_id: str, *, reference: str | None = None) -> None:
+        raise BudgetError("the budget file is locked")
+
+    monkeypatch.setattr(budget._ledger, "commit", locked)
+    with pytest.raises(PaymentNotRecorded) as raised, budget.pay("$5") as payment:
+        payment.tx = TX
+    # Code that retries on BudgetError must not pay twice.
+    assert not isinstance(raised.value, BudgetError)
+    assert raised.value.reservation_id == payment.id
+    assert isinstance(raised.value.cause, BudgetError)
+    assert raised.value.__cause__ is raised.value.cause
+    assert str(raised.value).endswith(f"still counts as in flight ({payment.id})")
+    assert budget.status().in_flight == 5_000_000
 
 
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:

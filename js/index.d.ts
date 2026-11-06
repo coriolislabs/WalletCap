@@ -27,6 +27,17 @@ export declare class BudgetRefused extends BudgetError {
   readonly code: `budget_${RefusalReason}`;
 }
 
+/**
+ * The payment went through, but the budget could not record it as settled; it still counts as
+ * in flight. Not a BudgetError, so code that retries on a BudgetError does not pay twice.
+ */
+export declare class PaymentNotRecorded extends Error {
+  /** The reservation whose payment went through. */
+  readonly reservationId: string;
+  /** Why it could not be recorded. */
+  readonly cause: unknown;
+}
+
 /** Tag an error to say the payment never left the wallet, so pay() gives its amount back. */
 export declare function notSent<E>(error?: E): E extends Error ? E & { notSent: true } : Error & { notSent: true };
 
@@ -128,10 +139,15 @@ export interface Payment {
   tx?: string;
 }
 
+/**
+ * A USD-pegged stablecoin the budget counts at $1 a token. List only USD-pegged stablecoins:
+ * nothing else is priced. An entry can add an asset but can't change a built-in one's decimals.
+ */
 export interface AssetEntry {
   /** CAIP-2, like 'eip155:8453'. */
   network: string;
   asset: string;
+  /** An integer from 0 to 18. */
   decimals: number;
 }
 
@@ -157,7 +173,8 @@ export declare class Budget {
   /**
    * Reserve `amount`, run `fn` to pay, then record it. If `fn` throws, the payment stays in
    * flight, marked unknown, until one window past `settlesBy` or, without one, until its owner
-   * releases it, unless the error is tagged with notSent().
+   * releases it, unless the error is tagged with notSent(). If the payment went through but
+   * can't be recorded, it throws PaymentNotRecorded: don't pay again.
    */
   pay<T>(amount: Dollars, fn: (reservation: Reservation) => T | Promise<T>, details?: PaymentDetails): Promise<T>;
   status(): Status;
@@ -167,7 +184,10 @@ export declare class Budget {
   freeze(): void;
   unfreeze(): void;
   history(options?: { limit?: number }): Payment[];
-  /** Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client. */
+  /**
+   * Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client.
+   * `assets` adds USD-pegged stablecoins to the built-in table; it can't change a built-in's decimals.
+   */
   guard<C extends X402HookedClient>(client: C, options?: { assets?: AssetEntry[] }): C;
   /**
    * Count every payment a Coinbase AgentKit X402ActionProvider makes in this budget: each x402

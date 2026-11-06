@@ -3,7 +3,7 @@
 // client's public payment hooks. It works under @x402/fetch, @x402/axios and
 // Coinbase's CDP spend controls alike: whatever else is configured, every
 // payment the client creates is counted in the shared budget before it is sent.
-import { BudgetError, BudgetRefused } from './errors.mjs';
+import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
 
 const GUARDED = Symbol.for('walletcap/x402-guard');
 // Set by @coinbase/cdp-sdk/x402's applySpendControls. The CDP store and this
@@ -20,7 +20,8 @@ const FINGERPRINTS_KEPT = 10_000;
 /**
  * USD stablecoins the budget counts at face value, by CAIP-2 network. The EVM
  * entries are from x402 2.28.0's own DEFAULT_ASSETS, plus Circle's native USDC
- * on Optimism and Solana. Add others with guard(client, { assets }).
+ * on Optimism and Solana. Add other USD-pegged stablecoins with
+ * guard(client, { assets }); their decimals can't be changed.
  */
 export const USD_ASSETS = Object.freeze([
   { network: 'eip155:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
@@ -51,15 +52,27 @@ export const assetKey = (network, asset) => {
   return `${caip2} ${id}`;
 };
 
+const BUILT_IN = new Map(USD_ASSETS.map(({ network, asset, decimals }) => [assetKey(network, asset), decimals]));
+
+/**
+ * The assets a guard prices: the built-in table plus `extra`. Each extra entry
+ * must be a USD-pegged stablecoin, counted at $1 a token, with integer decimals
+ * from 0 to 18. It can add an asset, but can't change a built-in one's decimals.
+ */
 export function assetTable(extra) {
   if (!Array.isArray(extra)) throw new BudgetError('assets must be a list of { network, asset, decimals }');
-  const table = new Map();
-  for (const entry of [...USD_ASSETS, ...extra]) {
+  const table = new Map(BUILT_IN);
+  for (const entry of extra) {
     const { network, asset, decimals } = entry ?? {};
-    if (typeof network !== 'string' || typeof asset !== 'string' || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
-      throw new BudgetError('each asset is { network, asset, decimals }: a USD stablecoin the budget counts at face value');
+    if (typeof network !== 'string' || typeof asset !== 'string' || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+      throw new BudgetError('each asset is { network, asset, decimals }: a USD-pegged stablecoin, counted at $1 a token, with decimals from 0 to 18');
     }
-    table.set(assetKey(network, asset), decimals);
+    const key = assetKey(network, asset);
+    const builtIn = BUILT_IN.get(key);
+    if (builtIn !== undefined && builtIn !== decimals) {
+      throw new BudgetError(`${asset} on ${network} is already priced with ${builtIn} decimals; an asset override can't change them`);
+    }
+    table.set(key, decimals);
   }
   return table;
 }
@@ -202,7 +215,12 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     forget(context.paymentPayload);
     if (!reservation.open) return undefined;
     if (context.settleResponse?.success === true) {
-      reservation.commit({ tx: context.settleResponse.transaction });
+      try {
+        reservation.commit({ tx: context.settleResponse.transaction });
+      } catch (error) {
+        // Settled but not recorded: the reservation stays open and keeps counting.
+        throw new PaymentNotRecorded(reservation.id, { cause: error });
+      }
     } else {
       // No settlement confirmed. The payee still holds the signed authorization
       // and could settle it until it expires, so the payment keeps counting until

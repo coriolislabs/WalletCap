@@ -27,6 +27,7 @@ from walletcap.errors import (
     OverBudget,
     OverPerPayment,
     OverUses,
+    PaymentNotRecorded,
 )
 from walletcap.ledger import (
     MAX_AMOUNT,
@@ -63,6 +64,7 @@ __all__ = [
     "OverPerPayment",
     "OverUses",
     "Payment",
+    "PaymentNotRecorded",
     "Paying",
     "Reservation",
     "Spend",
