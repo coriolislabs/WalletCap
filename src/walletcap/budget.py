@@ -23,7 +23,7 @@ import shlex
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -172,6 +172,25 @@ def _positive(micros: int) -> int:
     if micros == 0:
         raise BudgetError("the amount must be more than $0")
     return micros
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MILLISECOND = timedelta(milliseconds=1)
+
+
+def _settles_by_ms(settles_by: object) -> int:
+    """A timezone-aware datetime as milliseconds since the epoch, rounded up.
+
+    A naive datetime would be read as this machine's local time, hours from what
+    the caller meant, so it is refused.
+    """
+
+    if not isinstance(settles_by, datetime) or settles_by.utcoffset() is None:
+        raise BudgetError(
+            "settles_by must be a timezone-aware datetime, "
+            "like datetime.now(UTC) + timedelta(minutes=5)"
+        )
+    return -((_EPOCH - settles_by) // _MILLISECOND)
 
 
 def _info(reference: str | None) -> dict[str, Any]:
@@ -419,8 +438,9 @@ class Budget:
 
         Commit the reservation when the payment settles; release it only if the
         payment never left the wallet. ``settles_by`` is the last moment the
-        payment could still settle, if known: an open reservation stops counting
-        one window after it.
+        payment could still settle, if known, as a timezone-aware datetime: an
+        open reservation stops counting one window after it. A moment already
+        past counts as now.
         """
 
         return self._reserve(amount, _describe(to, note, details), rail, settles_by)
@@ -429,7 +449,7 @@ class Budget:
         self, amount: object, info: dict[str, Any], rail: str, settles_by: datetime | None
     ) -> Reservation:
         micros = _positive(to_micros(amount))
-        settles_by_ms = None if settles_by is None else int(settles_by.timestamp() * 1000)
+        settles_by_ms = None if settles_by is None else _settles_by_ms(settles_by)
         spend_id = self._ledger.reserve(
             self._wallet,
             micros,

@@ -46,6 +46,7 @@ from walletcap.errors import (
 from walletcap.money import (
     DOLLAR_UNITS,
     MAX_AMOUNT,
+    MAX_INTEGER,
     format_amount,
     format_window,
     short_wallet,
@@ -180,10 +181,27 @@ def _identifier(value: object, label: str) -> str:
 
 
 def _amount(value: object, label: str, *, allow_zero: bool = False) -> int:
+    """An amount in the budget's own unit, at most MAX_AMOUNT, so no sum of them overflows."""
+
     if type(value) is not int or value > MAX_AMOUNT or value < (0 if allow_zero else 1):
+        floor = "nonnegative" if allow_zero else "positive"
+        raise BudgetError(f"{label} must be a {floor} integer of at most {MAX_AMOUNT}")
+    return value
+
+
+def _integer(value: object, label: str, *, allow_zero: bool = False) -> int:
+    """A time in milliseconds, or a count, that fits in 64 bits."""
+
+    if type(value) is not int or value > MAX_INTEGER or value < (0 if allow_zero else 1):
         floor = "nonnegative" if allow_zero else "positive"
         raise BudgetError(f"{label} must be a {floor} integer that fits in 64 bits")
     return value
+
+
+def _expiry(settles_by_ms: int, now: int, window_ms: int) -> int:
+    """Counted as a payment settled at the later of settles_by_ms and now: through it plus a window."""
+
+    return min(max(settles_by_ms, now) + window_ms + 1, MAX_INTEGER)
 
 
 def _reference(reference: object) -> str | None:
@@ -348,13 +366,13 @@ class Ledger:
         _identifier(instrument, "instrument")
         _identifier(unit, "unit")
         _amount(cap, "cap", allow_zero=True)
-        _amount(window_seconds, "window_seconds")
-        if window_seconds * 1000 > MAX_AMOUNT:
+        _integer(window_seconds, "window_seconds")
+        if window_seconds * 1000 > MAX_INTEGER:
             raise BudgetError("window_seconds is too large")
         if per_payment is not None:
             _amount(per_payment, "per_payment")
         if max_uses is not None:
-            _amount(max_uses, "max_uses", allow_zero=True)
+            _integer(max_uses, "max_uses", allow_zero=True)
         budget = BudgetLimits(instrument, unit, cap, window_seconds * 1000, per_payment, max_uses)
         with self._transaction() as connection:
             row = connection.execute(
@@ -553,11 +571,11 @@ class Ledger:
         if cap is not None:
             _amount(cap, "cap", allow_zero=True)
         if window_ms is not None:
-            _amount(window_ms, "window_ms")
+            _integer(window_ms, "window_ms")
         if per_payment is not UNSET and per_payment is not None:
             _amount(per_payment, "per_payment")
         if max_uses is not UNSET and max_uses is not None:
-            _amount(max_uses, "max_uses", allow_zero=True)
+            _integer(max_uses, "max_uses", allow_zero=True)
 
     def check(self, instrument: str, amount: int) -> Checked:
         """Whether ``amount`` would be refused right now, without reserving it."""
@@ -585,7 +603,8 @@ class Ledger:
         Call it before the payment is made; commit the returned id once the
         payment settles, or release it if the payment was never sent. With
         ``settles_by_ms`` (the last moment the payment could still settle), an
-        open reservation stops counting one window after that moment.
+        open reservation stops counting one window after that moment; a moment
+        already past counts as now.
         """
 
         _identifier(instrument, "instrument")
@@ -593,7 +612,7 @@ class Ledger:
         _identifier(rail, "rail")
         _reference(reference)
         if settles_by_ms is not None:
-            _amount(settles_by_ms, "settles_by_ms", allow_zero=True)
+            _integer(settles_by_ms, "settles_by_ms", allow_zero=True)
         now = self._now_ms()
         with self._transaction() as connection:
             budget = self._budget_row(connection, instrument)
@@ -604,8 +623,7 @@ class Ledger:
             spend_id = f"spend-{uuid4().hex}"
             expires: int | None = None
             if settles_by_ms is not None:
-                # Counted exactly as a payment settled at settles_by_ms: through it plus a window.
-                expires = min(settles_by_ms + budget["window_ms"] + 1, MAX_AMOUNT)
+                expires = _expiry(settles_by_ms, now, budget["window_ms"])
             connection.execute(
                 "INSERT INTO spend VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?)",
                 (spend_id, instrument, amount, rail, reference, now, expires),
@@ -719,7 +737,7 @@ class Ledger:
         """The instrument's newest payments first, with whether each still counts."""
 
         _identifier(instrument, "instrument")
-        _amount(limit, "limit")
+        _integer(limit, "limit")
         now = self._now_ms()
         with self._read() as connection:
             window = self._budget_row(connection, instrument)["window_ms"]

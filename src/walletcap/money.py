@@ -21,7 +21,14 @@ from walletcap._keccak import keccak256
 from walletcap.errors import BudgetError
 
 MICROS: Final = 1_000_000
-MAX_AMOUNT: Final = 2**63 - 1
+MAX_AMOUNT: Final = 10**15
+"""The most a budget, a limit or one payment can be, in the budget's own unit.
+
+10^15 is a billion dollars in micro-dollars, far below 2^63, so no sum of payments
+can overflow SQLite's 64-bit integers.
+"""
+MAX_INTEGER: Final = 2**63 - 1
+"""Times and counts only have to fit in SQLite's 64-bit integers."""
 DOLLAR_UNITS: Final = frozenset({"usd", "usdc"})
 HOUR_MS: Final = 3_600_000
 DAY_MS: Final = 86_400_000
@@ -71,8 +78,12 @@ def to_micros(value: object, label: str = "amount") -> int:
         micros = int(match.group(1).replace(",", "")) * MICROS + int(fraction[:6].ljust(6, "0"))
     else:
         raise BudgetError(f"{label} must be {_EXAMPLES}")
-    if micros < 0 or micros > MAX_AMOUNT:
-        raise BudgetError(f"{label} must be a nonnegative amount that fits in 64 bits")
+    if micros < 0:
+        raise BudgetError(f"{label} must be a nonnegative amount")
+    if micros > MAX_AMOUNT:
+        raise BudgetError(
+            f"{label} is more than {format_usd(MAX_AMOUNT)}, the most a budget can hold"
+        )
     return micros
 
 
@@ -106,7 +117,7 @@ def to_window_ms(value: object, label: str = "window") -> int:
             ms = int(match.group(1)) * _DURATION_MS[match.group(2)]
         else:
             ms = _DURATION_WORDS.get(text)
-    if ms is None or ms <= 0 or ms > MAX_AMOUNT:
+    if ms is None or ms <= 0 or ms > MAX_INTEGER:
         raise BudgetError(
             f'{label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds'
         )

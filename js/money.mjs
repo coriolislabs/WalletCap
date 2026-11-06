@@ -8,7 +8,14 @@ import { BudgetError } from './errors.mjs';
 import { keccak256Hex } from './_keccak.mjs';
 
 export const MICROS = 1_000_000n;
-export const MAX_AMOUNT = (1n << 63n) - 1n;
+/**
+ * The most a budget, a limit or one payment can be, in the budget's own unit:
+ * 10^15, a billion dollars in micro-dollars. Kept far below 2^63 so that no sum
+ * of payments can overflow SQLite's 64-bit integers.
+ */
+export const MAX_AMOUNT = 10n ** 15n;
+/** Times and counts only have to fit in SQLite's 64-bit integers. */
+export const MAX_INTEGER = (1n << 63n) - 1n;
 export const DOLLAR_UNITS = new Set(['usd', 'usdc']);
 
 const DOLLARS = /^\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(?:usdc?)?$/i;
@@ -28,27 +35,29 @@ export const WINDOWS = { perHour: DURATION_WORDS.hour, perDay: DURATION_WORDS.da
  * micro-dollar; a bigint is already micro-dollars (1_000_000n is $1).
  */
 export function toMicros(value, label = 'amount') {
+  let micros;
   if (typeof value === 'bigint') {
-    if (value < 0n || value > MAX_AMOUNT) throw new BudgetError(`${label} must be a nonnegative bigint of micro-dollars that fits in 64 bits`);
-    return value;
-  }
-  if (typeof value === 'number') {
+    if (value < 0n) throw new BudgetError(`${label} must be a nonnegative bigint of micro-dollars`);
+    micros = value;
+  } else if (typeof value === 'number') {
     if (!Number.isFinite(value) || value < 0) throw new BudgetError(`${label} must be a nonnegative number of dollars`);
-    const micros = Math.round(value * 1e6);
-    if (!Number.isSafeInteger(micros)) throw new BudgetError(`${label} is too large for a number; pass it as a string, like "1000000000"`);
-    return BigInt(micros);
-  }
-  if (typeof value === 'string') {
+    const rounded = Math.round(value * 1e6);
+    if (!Number.isSafeInteger(rounded)) throw new BudgetError(tooLarge(label));
+    micros = BigInt(rounded);
+  } else if (typeof value === 'string') {
     const match = DOLLARS.exec(value.trim());
     if (match === null) throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"; got ${JSON.stringify(value)}`);
     const fraction = match[2] ?? '';
     if (/[^0]/.test(fraction.slice(6))) throw new BudgetError(`${label} is finer than a millionth of a dollar: ${JSON.stringify(value)}`);
-    const micros = BigInt(match[1].replaceAll(',', '')) * MICROS + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
-    if (micros > MAX_AMOUNT) throw new BudgetError(`${label} is too large`);
-    return micros;
+    micros = BigInt(match[1].replaceAll(',', '')) * MICROS + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
+  } else {
+    throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"`);
   }
-  throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"`);
+  if (micros > MAX_AMOUNT) throw new BudgetError(tooLarge(label));
+  return micros;
 }
+
+const tooLarge = label => `${label} is more than ${formatUsd(MAX_AMOUNT)}, the most a budget can hold`;
 
 /** "$1,234.50" for 1_234_500_000n micro-dollars; sub-cent amounts keep their digits. */
 export function formatUsd(micros) {
@@ -74,7 +83,7 @@ export function toWindowMs(value, label = 'window') {
     if (match) ms = BigInt(match[1]) * DURATION_MS[match[2]];
     else if (text in DURATION_WORDS) ms = DURATION_WORDS[text];
   }
-  if (ms === undefined || ms <= 0n || ms > MAX_AMOUNT) {
+  if (ms === undefined || ms <= 0n || ms > MAX_INTEGER) {
     throw new BudgetError(`${label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds`);
   }
   return ms;
@@ -153,8 +162,8 @@ export const expandHome = (path, home = homedir()) => (path === '~' || path.star
 
 const positiveCount = (value, label) => {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
-  if (typeof value === 'bigint' && value >= 0n && value <= MAX_AMOUNT) return value;
-  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return BigInt(value.trim());
+  if (typeof value === 'bigint' && value >= 0n && value <= MAX_INTEGER) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim()) && BigInt(value.trim()) <= MAX_INTEGER) return BigInt(value.trim());
   throw new BudgetError(`${label} must be a whole number of payments`);
 };
 

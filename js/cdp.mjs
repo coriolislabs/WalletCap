@@ -8,7 +8,7 @@
 // write transaction, so two processes that both pass the SDK's own in-memory
 // check cannot both record a payment past the cap.
 import { BudgetError } from './errors.mjs';
-import { checkKeys, identifier, Ledger, units } from './ledger.mjs';
+import { checkKeys, identifier, integer, Ledger } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
 
 // The CDP store is its own rail. The x402 guard also writes rail 'x402',
@@ -58,7 +58,7 @@ export class SharedBudgetStore {
     this.#instrument = identifier(instrument, 'instrument');
     if (typeof asset !== 'string' || asset.trim().length === 0) throw new BudgetError('asset is required');
     this.#asset = normalizeAsset(asset);
-    this.#scale = units(scale, 'scale');
+    this.#scale = integer(scale, 'scale');
     this.#ledger = new Ledger(path, { busyTimeoutMs });
   }
 
@@ -84,11 +84,12 @@ export class SharedBudgetStore {
       // row has no atomicAmount and falls through to the synthetic entry below.
       let atomic = null;
       if (own && own.atomicAmount !== undefined && normalizeAsset(own.asset) === this.#asset) {
-        try { atomic = units(own.atomicAmount, 'atomicAmount', { allowZero: true }); } catch { atomic = null; }
+        try { atomic = integer(own.atomicAmount, 'atomicAmount', { allowZero: true }); } catch { atomic = null; }
       }
       if (atomic !== null) {
-        // A payment the payee refused stays open, and counts as of now for as long as it does.
-        const at = row.status === 'reserved' ? Number(now) : (Number.isFinite(Number(own.at)) ? Number(own.at) : Number(row.at_ms));
+        // A payment the payee refused stays open, and counts as of now for as long as it does. A
+        // settled one is dated by the ledger, not by the time CDP put in its entry.
+        const at = row.status === 'reserved' ? Number(now) : Number(row.at_ms);
         return { atomicAmount: atomic, asset: this.#asset, network: own.network, payTo: own.payTo, at };
       }
       // Spend from another rail (or another asset) counts in this asset's units, rounded up.
@@ -109,17 +110,15 @@ export class SharedBudgetStore {
     if (asset !== this.#asset) {
       throw new BudgetError(`this CDP store counts ${this.#asset}, not ${asset}`);
     }
-    const atomic = units(entry.atomicAmount, 'atomicAmount', { allowZero: true });
+    const atomic = integer(entry.atomicAmount, 'atomicAmount', { allowZero: true });
     if (atomic === 0n) return;
     const spend = atomic * this.#scale;
     if (spend > MAX_AMOUNT) throw new BudgetError('payment does not fit in the budget unit');
     // The SDK records a payment when it creates it and removes it if settlement
     // fails, so the row counts at once, with no expiry: an unknown outcome keeps counting.
-    this.#ledger.record(this.#instrument, spend, {
-      rail: RAIL,
-      reference: reference(entry),
-      atMs: units(entry.at, 'at', { allowZero: true }),
-    });
+    // It counts from the ledger's own time; the entry's `at` is CDP's, so it is kept only
+    // in the reference, which is how removeEntry() finds the row again.
+    this.#ledger.record(this.#instrument, spend, { rail: RAIL, reference: reference(entry) });
   }
 
   async prune(olderThanMs) {

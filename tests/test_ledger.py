@@ -15,6 +15,7 @@ SOURCE = ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
 from walletcap import (  # noqa: E402
+    MAX_AMOUNT,
     BudgetError,
     BudgetRevoked,
     Ledger,
@@ -216,6 +217,45 @@ def test_a_hold_never_lapses_while_its_payment_can_still_settle(
     for spend_id in held:
         ledger.commit(spend_id)
     assert ledger.status("agent").spent == 150
+
+
+def test_a_settle_by_time_already_past_counts_as_now(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
+    # 0.2.x stored the past moment as given: the holds never counted, and more was reserved.
+    held = [ledger.reserve("agent", 50, settles_by_ms=0) for _ in range(3)]
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+    clock.at += DAY
+    assert ledger.status("agent").reserved == 150
+    clock.at += 0.001
+    assert ledger.status("agent").reserved == 0
+    for spend_id in held:
+        ledger.commit(spend_id)  # settled late after all: they count again, from now
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+
+
+def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
+    tmp_path: Path, clock: Clock
+) -> None:
+    assert MAX_AMOUNT == 10**15
+    ledger = Ledger(tmp_path / "budget.sqlite")
+    for too_much in (MAX_AMOUNT + 1, 2**63 - 1):
+        with pytest.raises(BudgetError, match="at most 1000000000000000"):
+            ledger.declare("big", unit="usd", cap=too_much, window_seconds=DAY)
+    ledger.declare("agent", unit="usd", cap=MAX_AMOUNT, window_seconds=DAY)
+    with pytest.raises(BudgetError, match="at most 1000000000000000"):
+        ledger.reserve("agent", MAX_AMOUNT + 1)
+    # Two holds of the most a budget can hold count at once: one lapsed, then settled late.
+    # 0.2.x took near-2^63 amounts, and two of them overflowed SQLite's SUM for good.
+    first = ledger.reserve("agent", MAX_AMOUNT, settles_by_ms=int(clock.at * 1000))
+    clock.at += DAY + 1
+    ledger.reserve("agent", MAX_AMOUNT)
+    ledger.commit(first)
+    status = ledger.status("agent")
+    assert (status.spent, status.reserved, status.remaining) == (MAX_AMOUNT, MAX_AMOUNT, 0)
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 1)
 
 
 def test_a_committed_reservation_cannot_be_committed_or_released_again(tmp_path: Path) -> None:

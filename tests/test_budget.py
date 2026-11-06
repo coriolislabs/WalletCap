@@ -209,6 +209,23 @@ def test_a_reservation_with_a_settle_by_time_counts_one_window_past_it(
     assert budget.history()[0].status == "expired"
 
 
+def test_a_naive_settle_by_time_is_refused(tmp_path: Path, clock: Clock) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
+    # 0.2.x read a naive datetime as this machine's local time: 9 hours early in Tokyo.
+    naive = datetime(2027, 1, 15, 8, 0)
+    with pytest.raises(BudgetError, match="timezone-aware"):
+        budget.reserve("$1", settles_by=naive)
+    with pytest.raises(BudgetError, match="timezone-aware"), budget.pay("$1", settles_by=naive):
+        pass
+    assert budget.status().in_flight == 0
+    # A time already past counts as now: the hold counts for one window from here.
+    budget.reserve("$150", settles_by=datetime(2000, 1, 1, tzinfo=UTC))
+    clock.at += DAY
+    assert budget.status().in_flight == 150_000_000
+    clock.at += 0.002
+    assert budget.status().in_flight == 0
+
+
 def test_freeze_check_and_mistakes(tmp_path: Path) -> None:
     path = tmp_path / "b.sqlite"
     budget = open_budget(WALLET, path=path, per_day="$150", max_payments=1, create=True)
@@ -258,6 +275,13 @@ def test_dollars_are_read_the_way_people_write_them(value: object, micros: int) 
 def test_amounts_that_are_not_dollars_are_refused(value: object) -> None:
     with pytest.raises(BudgetError):
         to_micros(value)
+
+
+def test_amounts_stop_at_a_billion_dollars() -> None:
+    assert to_micros("$1,000,000,000") == 10**15
+    for value in ("$1,000,000,000.000001", 1_000_000_001, 9_223_372_036_854):
+        with pytest.raises(BudgetError, match=r"more than \$1,000,000,000\.00"):
+            to_micros(value)
 
 
 def test_amounts_format_the_same_as_javascript() -> None:

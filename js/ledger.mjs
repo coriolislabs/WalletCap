@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { now as clockNow } from './_clock.mjs';
 import { BudgetError, BudgetRefused } from './errors.mjs';
-import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, shortWallet } from './money.mjs';
+import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, MAX_INTEGER, shortWallet } from './money.mjs';
 
 export const SCHEMA_VERSION = '1';
 export const REFERENCE_LIMIT = 4096;
@@ -88,15 +88,26 @@ export const checkKeys = (source, known, what) => {
   }
 };
 
-/** An integer in the budget's own unit that fits in 64 bits. */
-export const units = (value, label, { allowZero = false } = {}) => {
+const wholeNumber = (value, label, { allowZero, max, most }) => {
   let parsed;
   try { parsed = BigInt(value); } catch { throw new BudgetError(`${label} must be an integer`); }
   if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new BudgetError(`${label} must be an exact integer`);
-  if (parsed > MAX_AMOUNT || parsed < (allowZero ? 0n : 1n)) {
-    throw new BudgetError(`${label} must be a ${allowZero ? 'nonnegative' : 'positive'} integer that fits in 64 bits`);
+  if (parsed > max || parsed < (allowZero ? 0n : 1n)) {
+    throw new BudgetError(`${label} must be a ${allowZero ? 'nonnegative' : 'positive'} integer ${most}`);
   }
   return parsed;
+};
+
+/** An amount in the budget's own unit, at most MAX_AMOUNT, so no sum of them overflows 64 bits. */
+export const units = (value, label, { allowZero = false } = {}) => wholeNumber(value, label, { allowZero, max: MAX_AMOUNT, most: `of at most ${MAX_AMOUNT}` });
+
+/** A time in milliseconds, or a count, that fits in 64 bits. */
+export const integer = (value, label, { allowZero = false } = {}) => wholeNumber(value, label, { allowZero, max: MAX_INTEGER, most: 'that fits in 64 bits' });
+
+// Counted as a payment settled at `until` would be: through until + window. A time already past counts as now.
+const expiry = (settlesBy, now, windowMs) => {
+  const until = settlesBy > now ? settlesBy : now;
+  return until + windowMs >= MAX_INTEGER ? MAX_INTEGER : until + windowMs + 1n;
 };
 
 const referenceText = reference => {
@@ -166,7 +177,7 @@ export class Ledger {
   get path() { return this.#path; }
 
   /** The ledger's own time: the system clock, in milliseconds. Callers can't set it. */
-  now() { return units(clockNow(), 'clock', { allowZero: true }); }
+  now() { return integer(clockNow(), 'clock', { allowZero: true }); }
 
   statement(sql) {
     let statement = this.#statements.get(sql);
@@ -220,6 +231,16 @@ export class Ledger {
       .run(instrument, unit, cap, windowMs, perPayment, maxUses);
   }
 
+  // Limits from ensure() and setLimits(), checked here too: every stored cap is bounded.
+  static #limits({ cap, windowMs, perPayment, maxUses }) {
+    const limits = {};
+    if (cap !== undefined) limits.cap = units(cap, 'cap', { allowZero: true });
+    if (windowMs !== undefined) limits.windowMs = integer(windowMs, 'windowMs');
+    if (perPayment !== undefined) limits.perPayment = perPayment === null ? null : units(perPayment, 'perPayment');
+    if (maxUses !== undefined) limits.maxUses = maxUses === null ? null : integer(maxUses, 'maxUses', { allowZero: true });
+    return limits;
+  }
+
   budget(instrument) { return this.read(() => this.#row(instrument)); }
 
   budgets() { return this.read(() => this.statement('SELECT * FROM budgets ORDER BY instrument').all()); }
@@ -231,9 +252,9 @@ export class Ledger {
     const budget = {
       unit,
       cap: units(cap, 'cap', { allowZero: true }),
-      window_ms: units(windowMs, 'windowMs'),
+      window_ms: integer(windowMs, 'windowMs'),
       per_payment: perPayment === null ? null : units(perPayment, 'perPayment'),
-      max_uses: maxUses === null ? null : units(maxUses, 'maxUses', { allowZero: true }),
+      max_uses: maxUses === null ? null : integer(maxUses, 'maxUses', { allowZero: true }),
     };
     return this.transaction(() => {
       const row = this.#row(instrument);
@@ -253,8 +274,9 @@ export class Ledger {
    * a tighter limit is stored, a looser one is reported and left alone. A
    * restart can lower a limit; only setLimits() raises one.
    */
-  ensure(instrument, limits, { unit = 'usd', create = true } = {}) {
+  ensure(instrument, asked, { unit = 'usd', create = true } = {}) {
     identifier(instrument, 'instrument');
+    const limits = Ledger.#limits(asked);
     return this.transaction(() => {
       const row = this.#row(instrument);
       if (row === null) {
@@ -294,8 +316,9 @@ export class Ledger {
   }
 
   /** Change limits in either direction. What was spent keeps counting: nothing resets. */
-  setLimits(instrument, limits, { unit = 'usd', create = true } = {}) {
+  setLimits(instrument, asked, { unit = 'usd', create = true } = {}) {
     identifier(instrument, 'instrument');
+    const limits = Ledger.#limits(asked);
     return this.transaction(() => {
       const row = this.#row(instrument);
       if (row === null) {
@@ -350,34 +373,36 @@ export class Ledger {
    * Take `amount` from the budget, or throw the BudgetRefused that says why
    * not. A reservation counts until committed or released. With settlesByMs
    * (the last moment the payment could still settle) it stops counting one
-   * window after that moment, as if it had settled then.
+   * window after that moment, as if it had settled then; a moment already
+   * past counts as now.
    */
   reserve(instrument, amount, { rail = 'js', reference = null, settlesByMs = null } = {}) {
     identifier(instrument, 'instrument');
     const spend = units(amount, 'amount');
     identifier(rail, 'rail');
     const text = referenceText(reference);
-    const settlesBy = settlesByMs === null ? null : units(settlesByMs, 'settlesByMs', { allowZero: true });
+    const settlesBy = settlesByMs === null ? null : integer(settlesByMs, 'settlesByMs', { allowZero: true });
     const now = this.now();
     return this.transaction(() => {
       const row = this.#required(instrument);
       const refused = refusal(row, this.#counted(instrument, now), spend);
       if (refused !== null) throw refused;
       const spendId = `spend-${randomUUID().replaceAll('-', '')}`;
-      // Counted exactly as a payment settled at settlesBy would be: through settlesBy + window.
-      let expires = null;
-      if (settlesBy !== null) expires = settlesBy + row.window_ms >= MAX_AMOUNT ? MAX_AMOUNT : settlesBy + row.window_ms + 1n;
+      const expires = settlesBy === null ? null : expiry(settlesBy, now, row.window_ms);
       this.statement("INSERT INTO spend VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?)")
         .run(spendId, instrument, spend, rail, text, now, expires);
       return spendId;
     });
   }
 
-  /** Record a payment as settled at `atMs` after the same checks (Coinbase's SDK records at creation). */
-  record(instrument, amount, { rail, reference = null, atMs }) {
+  /**
+   * Record a payment as settled now, after the same checks. Coinbase's SDK
+   * records a payment when it creates it; the time is always the ledger's own.
+   */
+  record(instrument, amount, { rail, reference = null }) {
     const spend = units(amount, 'amount');
+    identifier(rail, 'rail');
     const text = referenceText(reference);
-    const at = units(atMs, 'at', { allowZero: true });
     const now = this.now();
     return this.transaction(() => {
       const row = this.#required(instrument);
@@ -385,7 +410,7 @@ export class Ledger {
       if (refused !== null) throw refused;
       const spendId = `${rail}-${randomUUID()}`;
       this.statement("INSERT INTO spend VALUES (?, ?, ?, 'committed', ?, ?, ?, NULL)")
-        .run(spendId, instrument, spend, rail, text, at);
+        .run(spendId, instrument, spend, rail, text, now);
       return spendId;
     });
   }
@@ -412,14 +437,14 @@ export class Ledger {
    */
   settlesBy(spendId, settlesByMs) {
     identifier(spendId, 'spend_id');
-    const settlesBy = units(settlesByMs, 'settlesByMs', { allowZero: true });
+    const settlesBy = integer(settlesByMs, 'settlesByMs', { allowZero: true });
+    const now = this.now();
     this.transaction(() => {
       const row = this.statement('SELECT spend.status, spend.expires_at_ms, budgets.window_ms FROM spend '
         + 'JOIN budgets ON budgets.instrument = spend.instrument WHERE spend.spend_id = ?').get(spendId);
       if (row === undefined || row.status !== 'reserved' || row.expires_at_ms !== null) return;
-      const expires = settlesBy + row.window_ms >= MAX_AMOUNT ? MAX_AMOUNT : settlesBy + row.window_ms + 1n;
       this.statement("UPDATE spend SET expires_at_ms = ? WHERE spend_id = ? AND status = 'reserved' AND expires_at_ms IS NULL")
-        .run(expires, spendId);
+        .run(expiry(settlesBy, now, row.window_ms), spendId);
     });
   }
 
@@ -512,7 +537,7 @@ export class Ledger {
 
   /** The newest payments first, with whether each still counts. */
   history(instrument, { limit = 20 } = {}) {
-    const rows = units(limit, 'limit');
+    const rows = integer(limit, 'limit');
     const now = this.now();
     return this.read(() => {
       const row = this.#required(instrument);
@@ -535,7 +560,7 @@ export class Ledger {
 
   /** Delete settled payments older than `cutoffMs` that no longer count. */
   prune(instrument, cutoffMs) {
-    const cutoff = units(cutoffMs, 'olderThanMs', { allowZero: true });
+    const cutoff = integer(cutoffMs, 'olderThanMs', { allowZero: true });
     const now = this.now();
     this.transaction(() => {
       const { window_ms: window } = this.#required(instrument);

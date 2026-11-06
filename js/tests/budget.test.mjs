@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
-import { BudgetRefused, notSent, openBudget, SharedBudgetStore } from '../index.mjs';
+import { BudgetRefused, MAX_AMOUNT, notSent, openBudget, SharedBudgetStore } from '../index.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
@@ -173,6 +173,38 @@ test('a reservation with a settle-by time stops counting a window after it', () 
   clock.now += 1;
   assert.equal(budget.status().inFlight, 0n);
   assert.equal(budget.history()[0].status, 'expired');
+});
+
+test('a settle-by time already past counts as now, so the reservation still holds the money', async () => {
+  const { budget, clock } = fixture({ perDay: '$150' });
+  // 0.2.x stored the past moment as given: the reservation never counted, and a second $150 passed.
+  const held = budget.reserve('$150', { settlesBy: new Date(0) });
+  await assert.rejects(paid(budget, '$150'), refusedFor('budget'));
+  clock.now += DAY;
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+  clock.now += 1;
+  assert.equal(budget.status().inFlight, 0n);
+  held.commit(); // settled late after all: it counts again, for a window from now
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+});
+
+test('amounts and limits stop at a billion dollars, so no sum of payments can overflow', async () => {
+  const { budget, clock } = fixture({ perDay: '$1,000,000,000' });
+  assert.equal(MAX_AMOUNT, 1_000_000_000_000_000n);
+  for (const tooMuch of ['$1,000,000,000.000001', MAX_AMOUNT + 1n, (1n << 63n) - 1n]) {
+    assert.throws(() => budget.reserve(tooMuch), /more than \$1,000,000,000\.00/);
+    assert.throws(() => budget.setLimits({ perDay: tooMuch }), /more than \$1,000,000,000\.00/);
+  }
+  // Two holds of the most a budget can hold count at once: one lapsed, then settled late.
+  const first = budget.reserve(MAX_AMOUNT, { settlesBy: new Date(clock.now) });
+  clock.now += DAY + 1;
+  const second = budget.reserve(MAX_AMOUNT);
+  first.commit();
+  // 0.2.x took near-2^63 amounts, and two of them overflowed SQLite's SUM: every payment failed.
+  const status = budget.status();
+  assert.deepEqual([status.spent, status.inFlight, status.remaining], [MAX_AMOUNT, MAX_AMOUNT, 0n]);
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+  second.release();
 });
 
 test('the per-payment limit and the payment count hold too', async () => {

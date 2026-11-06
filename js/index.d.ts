@@ -2,7 +2,10 @@
 // One spend budget per wallet, counted across every process, replica, key, permission and rail.
 
 export declare const SCHEMA_VERSION: string;
-/** The largest amount a budget holds, in its own unit (micro-dollars for openBudget). */
+/**
+ * The most a budget, a limit or one payment can be, in the budget's own unit: 10^15, a billion
+ * dollars in micro-dollars. It keeps every sum of payments inside SQLite's 64-bit integers.
+ */
 export declare const MAX_AMOUNT: bigint;
 
 /**
@@ -72,8 +75,8 @@ export interface PaymentDetails {
   rail?: string;
   /**
    * The last moment the payment could still settle. An open reservation, one whose outcome is
-   * unknown included, stops counting one window after it. Without it, an open reservation counts
-   * until it is committed or released.
+   * unknown included, stops counting one window after it; a moment already past counts as now.
+   * Without it, an open reservation counts until it is committed or released.
    */
   settlesBy?: Date | number | bigint;
 }

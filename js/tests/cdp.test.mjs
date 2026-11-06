@@ -100,7 +100,6 @@ test('a 0.2.0 CDP row on the x402 rail still loads after the rail split', async 
           payTo: '0xlegacy',
           at: Date.now(),
         }),
-        atMs: Date.now(),
       });
     } finally {
       ledger.close();
@@ -110,6 +109,23 @@ test('a 0.2.0 CDP row on the x402 rail still loads after the rail split', async 
     assert.ok(legacy, 'the legacy CDP row is visible');
     assert.equal(legacy.atomicAmount, 50_000n);
     assert.equal(legacy.network, NETWORK);
+  } finally {
+    store.close();
+    budget.close();
+  }
+});
+
+test("an entry CDP backdates still counts from the ledger's own time", async () => {
+  const { budget, store } = fixture();
+  try {
+    // CDP's entry carries its own `at`. 0.2.x recorded the payment then, so an entry dated
+    // 1970 had already aged out, and a second full $1 passed the $1 cap.
+    await store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 });
+    assert.equal(budget.status().spent, 1_000_000n);
+    const [row] = await store.load();
+    assert.ok(Math.abs(row.at - Date.now()) < 60_000, `the entry is dated ${row.at}`);
+    await assert.rejects(store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 }), { reason: 'budget' });
+    assert.equal(budget.status().spent, 1_000_000n);
   } finally {
     store.close();
     budget.close();
