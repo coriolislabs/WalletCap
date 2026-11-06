@@ -133,9 +133,12 @@ export class Reservation {
 }
 
 /**
- * Open the wallet's budget, creating it on first use. Limits are dollars:
- * strings ("$150", "12.50 USDC"), numbers (12.5) or bigint micro-dollars.
+ * Open the wallet's budget. Its owner creates it first with `walletcap set`;
+ * pass `create: true` only to create it on first use (a demo or a first-run
+ * setup). Limits are dollars: strings ("$150", "12.50 USDC"), numbers (12.5)
+ * or bigint micro-dollars.
  *
+ *   // The owner creates it once: npx walletcap set --wallet 0x… --per-payment 50 --per-day 150
  *   const budget = openBudget({ wallet: '0x…', perPayment: '$50', perDay: '$150' });
  *   await budget.pay('$12.50', () => sendUsdc(to, amount));
  */
@@ -152,7 +155,9 @@ export class Budget {
     checkKeys(options, OPTION_KEYS, 'openBudget');
     this.#wallet = normalizeWallet(options.wallet);
     this.#path = resolve(expandHome(options.path ?? defaultBudgetPath()));
-    const create = options.create ?? true;
+    // Fail closed: a missing budget file refuses every payment until its
+    // owner creates it. `create: true` is for a demo or a first-run setup.
+    const create = options.create ?? false;
     const limits = parseLimits(options);
     if (!create && !existsSync(this.#path)) {
       throw new BudgetError(`no budget file at ${this.#path}; its owner creates one with: npx walletcap set --wallet ${this.#wallet}${this.#pathFlag()} --per-day <dollars>`);

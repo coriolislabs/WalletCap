@@ -6,6 +6,12 @@ One spend budget per wallet for AI agents: counted across every process, replica
 key, permission and payment rail that pays from it. A restart, a second replica,
 one more key or the next calendar period cannot hand the agent a fresh budget.
 
+The owner creates the budget once; opening it never creates one:
+
+```console
+$ npx walletcap set --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
+```
+
 ```js
 import { openBudget } from 'walletcap';
 
@@ -18,7 +24,7 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50'));
 - **Per wallet, not per process.** Every payment from the wallet reserves against one number.
 - **Rolling window.** "$150 a day" means any 24 hours; there is no boundary to straddle.
 - **Edits never reset the count.** Raising $150 to $200 after spending $150 leaves $50.
-- **Fail closed.** If the count can't be read, nothing pays. Unknown outcomes keep counting.
+- **Fail closed.** If the count can't be read, nothing pays; a missing file is not a new budget. Unknown outcomes keep counting.
 - **One SQLite file, shared by every process and by Python.** Each payment reserves inside
   one write transaction, so replicas racing for the last dollar cannot both win.
 - **x402 guard, Coinbase CDP spend store, Agentic Wallet wrapper, AgentKit recipe,

@@ -18,7 +18,7 @@ const TX = `0x${'ab'.repeat(32)}`;
 const fixture = (limits = { perPayment: '$50', perDay: '$150' }) => {
   const path = join(DIR, `budget-${files++}.sqlite`);
   const clock = { now: 1_800_000_000_000 };
-  const open = (more = {}) => openBudget({ wallet: WALLET, path, clock: () => clock.now, ...more });
+  const open = (more = {}) => openBudget({ wallet: WALLET, path, clock: () => clock.now, create: true, ...more });
   return { path, clock, open, budget: open(limits) };
 };
 
@@ -177,7 +177,7 @@ test('checksummed, lowercase and CAIP-10 addresses spend from one budget', async
 
 test('a new wallet needs a cap, and a typo in an option is an error, not a missing limit', () => {
   const { path } = fixture();
-  assert.throws(() => openBudget({ wallet: '0x0000000000000000000000000000000000000001', path }), /give it a rolling limit/);
+  assert.throws(() => openBudget({ wallet: '0x0000000000000000000000000000000000000001', path, create: true }), /give it a rolling limit/);
   assert.throws(() => openBudget({ wallet: WALLET, path, perday: '$5' }), /unknown option perday; did you mean perDay\?/);
   assert.throws(() => openBudget({ wallet: WALLET, path, per_payment: '$5' }), /did you mean perPayment\?/);
 });
@@ -187,6 +187,14 @@ test('with create: false only an owner makes the budget; nothing falls back to d
   assert.throws(() => openBudget({ wallet: WALLET, path: missing, create: false, perDay: '$5' }), /no budget file/);
   const { path } = fixture();
   assert.throws(() => openBudget({ wallet: '0x0000000000000000000000000000000000000002', path, create: false, perDay: '$5' }), /has no budget/);
+});
+
+test('the default is fail-closed: a missing budget is not created', () => {
+  const missing = join(DIR, 'default-missing.sqlite');
+  assert.throws(() => openBudget({ wallet: WALLET, path: missing, perDay: '$5' }), /no budget file/);
+  const created = openBudget({ wallet: WALLET, path: missing, perDay: '$5', create: true });
+  assert.equal(created.status().cap, 5_000_000n);
+  created.close();
 });
 
 test('a file that is not a budget is refused, not replaced', () => {

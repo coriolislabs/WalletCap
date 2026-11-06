@@ -10,6 +10,13 @@ period. So a restart, a second replica, one more key, or the next period hands t
 fresh budget. walletcap counts **per wallet**: one budget that every process,
 replica, key, permission and payment rail spends from.
 
+The owner creates the budget once. Opening it never creates one; pass `create: true` only
+for a demo or first-run setup:
+
+```console
+$ npx walletcap set --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
+```
+
 ```js
 import { openBudget } from 'walletcap';
 
@@ -53,8 +60,9 @@ own code. Findings go to the vendors first; this package is the fix, not the fin
    leaves $50, not $200. A restart can lower a limit but never raise one: if the code comes
    back asking for looser limits (a kit's defaults, say), the stored limits stay and you get a
    warning with the command that raises them on purpose.
-4. **Fail closed.** If the count can't be read, nothing pays. A payment whose outcome is
-   unknown keeps counting, because a payment that failed halfway may still have moved money.
+4. **Fail closed.** If the count can't be read, nothing pays; a missing file is not a new
+   budget. A payment whose outcome is unknown keeps counting, because a payment that failed
+   halfway may still have moved money.
 
 The count lives in a SQLite file that every process on the machine shares, and each payment is
 reserved inside one write transaction, so replicas racing for the last dollar can't both win.
@@ -90,7 +98,7 @@ gives you a reservation to `commit()` or `release()` yourself.
 ### x402
 
 `guard()` puts the budget in front of any x402 v2 client from `@x402/core`, so it works under
-`@x402/fetch` and alongside Coinbase's CDP spend controls.
+`@x402/fetch`. Use it as the one counter when the client has no CDP spend store.
 
 ```js
 import { x402Client } from '@x402/core/client';
@@ -115,20 +123,21 @@ const fetchPaid = wrapFetchWithPayment(fetch, client);
 
 ### Coinbase CDP spend controls
 
-`applySpendControls` builds on an x402 client, so `budget.guard(client)` works alongside it, and
-it's the one to use:
+There are two ways to count a CDP payment in the budget; use **one** per client.
 
-- **It counts every token.** `guard()` prices the USD stablecoins it knows and refuses
-  anything else, whatever assets the client would otherwise accept.
-- **It reserves in one transaction.** Each payment is checked and reserved inside one write
-  transaction on the budget file, so processes and replicas sharing the file can't both take
-  the last dollar.
-- **It keeps counting what the payee calls failed** until the authorization expires, then frees
-  it on its own.
+- `budget.guard(client)` — the budget prices every asset, refuses anything it cannot price,
+  and reserves in one write transaction. Use it when the budget is the counter.
+- `applySpendControls(client, { ..., store: budget.cdpStore({ asset: USDC }) })` — keep
+  CDP's controls, and make its count durable and shared. The store re-checks the budget inside
+  the write transaction, so replicas sharing the file cannot both take the last dollar.
 
-To keep CDP's own count durable and shared as well, swap its in-memory store for walletcap's,
-set `maxCumulativeSpend` (CDP only records through its store when a cumulative cap is set), and
-set `allowedAssets`: CDP never consults its store for a token outside the cap.
+Do **not** call both on one client: the CDP store and the guard each record the payment, so
+the budget would count it twice. `budget.guard()` refuses a client that already has CDP
+controls, and a client guarded first refuses CDP controls before signing.
+
+To use the store, swap CDP's in-memory store for walletcap's, set `maxCumulativeSpend` (CDP
+only records through its store when a cumulative cap is set), and set `allowedAssets`: CDP
+never consults its store for a token outside the cap.
 
 ```js
 applySpendControls(client, {
@@ -138,13 +147,15 @@ applySpendControls(client, {
   allowedAssets: [USDC],
   store: budget.cdpStore({ asset: USDC }),
 });
-budget.guard(client);
 ```
+
+`guard()` is the other choice, and the one that prices every token: it refuses a USD stablecoin
+it cannot value instead of letting CDP count only the asset named in the cap.
 
 walletcap's store re-checks the budget when CDP records a payment, so it holds across replicas
 on its own. When CDP removes a payment from its store, the store can't tell why, so the payment
 stays counted as in-flight until you check the chain and run `npx walletcap release <id>`. Use
-CDP 1.56.0 or later.
+CDP 1.56.0 or later; the store is tested against the published 1.60.0.
 
 ### Coinbase Agentic Wallet (awal CLI and MCP server)
 
@@ -233,9 +244,9 @@ The default file is per user: `~/.local/state/walletcap/budget.sqlite` on Linux,
 compute the same default.
 
 The budget is as durable as that file. In a container, put it on a volume that outlives the
-container, or a redeploy starts a new file. For agents that can touch the filesystem, open the
-budget with `create: false` and create it once, as the owner, with `npx walletcap set`:
-then a missing file refuses every payment instead of starting a new budget.
+container, or a redeploy starts a new file. Opening a budget does not create one: a missing file
+refuses every payment. The owner creates it once with `npx walletcap set`; pass `create: true`
+only for a demo or a first-run setup.
 
 ## What it doesn't do
 
@@ -263,8 +274,8 @@ then a missing file refuses every payment instead of starting a new budget.
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
 
 ```console
-$ cd js && npm install && node --test            # 50 tests
-$ uv run --with pytest pytest -q                 # 53 tests, from the repository root
+$ cd js && npm install && node --test            # 57 tests
+$ uv run --with pytest pytest -q                 # 54 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
 ```

@@ -20,7 +20,7 @@ let files = 0;
 const setup = (limits = { perPayment: '$0.05', perDay: '$0.15' }) => {
   const clock = { now: Date.now() };
   const path = join(DIR, `x402-${files++}.sqlite`);
-  const budget = openBudget({ wallet: kit.account.address, path, clock: () => clock.now, ...limits });
+  const budget = openBudget({ wallet: kit.account.address, path, clock: () => clock.now, create: true, ...limits });
   return { budget, clock, path, client: budget.guard(kit.client()) };
 };
 const settled = { success: true, transaction: TX, network: NETWORK };
@@ -94,7 +94,7 @@ test('an asset the budget cannot price is refused, and a priced one is chosen wh
 test('a stablecoin added with its decimals is counted in dollars, rounded up', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const dai = '0x00000000000000000000000000000000000000da';
   const clock = { now: Date.now() };
-  const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'decimals.sqlite'), clock: () => clock.now, perDay: '$1' });
+  const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'decimals.sqlite'), clock: () => clock.now, perDay: '$1', create: true });
   const client = budget.guard(kit.client(), { assets: [{ network: NETWORK, asset: dai, decimals: 18 }] });
   await client.createPaymentPayload(kit.required('100000000000000001', { asset: dai })); // $0.100000000000000001
   assert.equal(budget.status().inFlight, 100_001n);

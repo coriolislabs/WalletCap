@@ -49,7 +49,7 @@ after(() => {
 
 let files = 0;
 const newBudget = (clock = { now: Date.now() }, path = join(DIR, `b${files++}.sqlite`)) => {
-  const budget = openBudget({ wallet: WALLET, path, clock: () => clock.now, perPayment: '$0.05', perDay: '$0.15' });
+  const budget = openBudget({ wallet: WALLET, path, clock: () => clock.now, perPayment: '$0.05', perDay: '$0.15', create: true });
   return { budget, clock, path };
 };
 
@@ -188,7 +188,7 @@ test('npx walletcap awal-mcp: the MCP server answers, and payments past the cap 
   const path = join(DIR, 'mcp.sqlite');
   const log = join(DIR, 'mcp.log');
   writeFileSync(log, '');
-  openBudget({ wallet: WALLET, path, perPayment: '$0.05', perDay: '$0.15' }).close();
+  openBudget({ wallet: WALLET, path, perPayment: '$0.05', perDay: '$0.15', create: true }).close();
   const proxy = spawn(process.execPath, [CLI, 'awal-mcp', '--wallet', WALLET, '--path', path, '--', process.execPath, FAKE_MCP], {
     env: { ...process.env, FAKE_MCP_LOG: log }, stdio: ['pipe', 'pipe', 'inherit'],
   });

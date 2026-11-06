@@ -10,6 +10,7 @@ cannot be read, nothing is paid::
 
     from walletcap import open_budget
 
+    # The owner creates the budget once: walletcap set --wallet <address> --per-day 150
     budget = open_budget(agent_address, per_payment="$50", per_day="$150")
     with budget.pay("$12.50", to=payee) as payment:
         payment.tx = send_usdc(payee, "12.50")
@@ -301,7 +302,7 @@ class Budget:
         wallet: str,
         *,
         path: str | Path | None = None,
-        create: bool = True,
+        create: bool = False,
         per_payment: object = UNSET,
         per_hour: object = None,
         per_day: object = None,
@@ -526,11 +527,13 @@ class Budget:
 
 
 def open_budget(wallet: str, **options: Any) -> Budget:
-    """Open the wallet's budget, creating it on first use.
+    """Open the wallet's budget. Its owner creates it first with ``walletcap set``.
 
-    Limits are dollars: strings (``"$150"``, ``"12.50 USDC"``), ints, floats or
-    Decimals. Give one rolling limit (``per_hour``, ``per_day``, ``per_week``,
-    or ``cap`` with ``window``) and optionally ``per_payment`` and ``max_payments``.
+    Pass ``create=True`` only to create it on first use (a demo or a first-run
+    setup); by default a missing file refuses every payment. Limits are dollars:
+    strings (``"$150"``, ``"12.50 USDC"``), ints, floats or Decimals. Give one
+    rolling limit (``per_hour``, ``per_day``, ``per_week``, or ``cap`` with
+    ``window``) and optionally ``per_payment`` and ``max_payments``.
     """
 
     return Budget(wallet, **options)

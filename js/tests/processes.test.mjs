@@ -19,6 +19,7 @@ const count = (results, outcome) => results.flatMap(result => result.results).fi
 
 test('a restarted agent finds the count where it left it, even with looser limits in its code', async () => {
   const path = join(DIR, 'restart.sqlite');
+  openBudget({ wallet: WALLET, path, ...LIMITS, create: true }).close();
   const first = await run('payer.mjs', { wallet: WALLET, path, limits: LIMITS, payments: ['$50', '$50', '$50'] });
   assert.deepEqual(first.results, ['paid', 'paid', 'paid']);
   const restarted = await run('payer.mjs', { wallet: WALLET, path, limits: { perPayment: '$100', perDay: '$5000' }, payments: ['$50', '$2'] });
@@ -29,7 +30,7 @@ test('a restarted agent finds the count where it left it, even with looser limit
 
 test('replicas racing for the last of the budget cannot both win', async () => {
   const path = join(DIR, 'race.sqlite');
-  openBudget({ wallet: WALLET, path, ...LIMITS }).close();
+  openBudget({ wallet: WALLET, path, ...LIMITS, create: true }).close();
   // Four replicas, three $50 payments each, against $150: exactly three may win.
   const results = await race('payer.mjs', DIR, Array.from({ length: 4 }, () => ({ wallet: WALLET, path, limits: LIMITS, payments: ['$50', '$50', '$50'] })));
   assert.equal(count(results, 'paid'), 3);
@@ -41,7 +42,7 @@ test('x402 replicas racing with guarded clients cannot pass the shared cap', asy
   const kit = await x402();
   if (kit === null) return t.skip('the x402 devDependencies are not installed');
   const path = join(DIR, 'x402-race.sqlite');
-  openBudget({ wallet: kit.account.address, path, ...LIMITS }).close();
+  openBudget({ wallet: kit.account.address, path, ...LIMITS, create: true }).close();
   const results = await race('x402-payer.mjs', DIR, Array.from({ length: 3 }, () => ({ path, limits: LIMITS, payments: [50_000_000, 50_000_000, 50_000_000] })));
   assert.equal(count(results, 'paid'), 3);
   assert.equal(openBudget({ wallet: kit.account.address, path }).status().spent, 150_000_000n);

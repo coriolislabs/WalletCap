@@ -6,6 +6,14 @@
 import { BudgetError, BudgetRefused } from './errors.mjs';
 
 const GUARDED = Symbol.for('walletcap/x402-guard');
+// Set by @coinbase/cdp-sdk/x402's applySpendControls. The CDP store and this
+// guard both count one payment, so a client may have one counter, not both.
+const CDP_APPLIED = '@coinbase/cdp-sdk/x402/spend-controls/applied';
+const hasCdpControls = client => Object.getOwnPropertySymbols(client)
+  .some(symbol => symbol.description === CDP_APPLIED);
+const oneCounter = () => new BudgetError(
+  'this x402 client already has Coinbase CDP spend controls; the CDP store and the budget guard both count the payment. Use one: budget.guard(client), or applySpendControls with budget.cdpStore(), not both.'
+);
 const SLOT = Symbol('walletcap/x402-payment');
 const FINGERPRINTS_KEPT = 10_000;
 
@@ -107,6 +115,7 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     }
   }
   if (client[GUARDED] !== undefined) throw new BudgetError('this x402 client already has a budget guard');
+  if (hasCdpControls(client)) throw oneCounter();
   const table = assetTable(assets);
   const byPayload = new WeakMap();
   const byFingerprint = new Map();
@@ -148,6 +157,7 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
   }
 
   client.onBeforePaymentCreation(async context => {
+    if (hasCdpControls(client)) throw oneCounter();
     const amount = price(context.selectedRequirements);
     context[SLOT] = { amount, reservation: null, payload: null };
     if (amount === 0n) return undefined;
@@ -158,6 +168,7 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
   });
 
   client.onAfterPaymentCreation(async context => {
+    if (hasCdpControls(client)) throw oneCounter();
     const slot = context[SLOT];
     if (slot === undefined || slot.amount === 0n) return;
     const requirements = context.selectedRequirements;

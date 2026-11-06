@@ -52,7 +52,7 @@ test('set creates the budget file and its folder on a fresh machine', () => {
 
 test('release gives back only an in-flight payment', () => {
   const path = join(DIR, 'release.sqlite');
-  const budget = openBudget({ wallet: WALLET, path, perDay: '$10' });
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
   const held = budget.reserve('$4');
   assert.match(cli(path, 'history').out, new RegExp(`in flight .*\\(${held.id}\\)`));
   const released = cli(path, 'release', held.id);
@@ -71,8 +71,8 @@ test('mistakes are reported, not guessed', () => {
   assert.equal(cli(path, 'set', '--per-dya', '5').code, 2);
   assert.match(cli(path, 'set', '--per-day', '5').err, /needs --wallet/);
   assert.match(cli(path, 'freeze').err, /no budget in/);
-  openBudget({ wallet: WALLET, path, perDay: '$5' }).close();
-  openBudget({ wallet: '0x0000000000000000000000000000000000000001', path, perDay: '$5' }).close();
+  openBudget({ wallet: WALLET, path, perDay: '$5', create: true }).close();
+  openBudget({ wallet: '0x0000000000000000000000000000000000000001', path, perDay: '$5', create: true }).close();
   const ambiguous = cli(path, 'freeze');
   assert.equal(ambiguous.code, 2);
   assert.match(ambiguous.err, /holds 2 budgets; pick one with --wallet/);

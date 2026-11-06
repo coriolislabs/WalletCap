@@ -3,6 +3,7 @@
 
     from walletcap import open_budget
 
+    # The owner creates the budget once: walletcap set --wallet <address> --per-day 150
     budget = open_budget(agent_address, per_payment="$50", per_day="$150")
     with budget.pay("$12.50", to=payee) as payment:
         payment.tx = send_usdc(payee, "12.50")
@@ -42,7 +43,7 @@ from walletcap.money import (
     to_micros,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "MAX_AMOUNT",

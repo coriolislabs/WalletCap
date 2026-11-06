@@ -42,7 +42,7 @@ test('a guarded @x402/fetch pays, keeps counting what the payee refused, and sto
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const url = `http://127.0.0.1:${server.address().port}/weather`;
-    const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'fetch.sqlite'), perPayment: '$0.05', perDay: '$0.15' });
+    const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'fetch.sqlite'), perPayment: '$0.05', perDay: '$0.15', create: true });
     const fetchPaid = fetchKit.wrapFetchWithPayment(fetch, budget.guard(kit.client()));
     for (const expected of [200, 200]) assert.equal((await fetchPaid(url)).status, expected);
     answer = 'refuse';

@@ -1,6 +1,6 @@
 {
   "name": "walletcap",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "One spend budget per wallet for AI agents: counted across every process, replica, key, permission and payment rail. Restarts don't reset it, limit changes don't zero it, and if it can't be read nothing is paid.",
   "license": "Apache-2.0",
   "author": "Coriolis Labs Inc.",
@@ -48,9 +48,12 @@
     "node": ">=22.13"
   },
   "devDependencies": {
+    "@coinbase/cdp-sdk": "1.60.0",
     "@x402/core": "2.28.0",
     "@x402/evm": "2.28.0",
+    "@x402/extensions": "2.28.0",
     "@x402/fetch": "2.28.0",
+    "@x402/svm": "2.28.0",
     "viem": "2.37.13"
   },
   "repository": {

@@ -70,7 +70,7 @@ def _pay(budget: object, amount: str) -> None:
 
 def test_the_cap_holds_and_a_restart_cannot_raise_the_limits_it_finds(tmp_path: Path) -> None:
     path = tmp_path / "budget.sqlite"
-    budget = open_budget(CHECKSUMMED, path=path, per_payment="$0.05", per_day="$0.15")
+    budget = open_budget(CHECKSUMMED, path=path, per_payment="$0.05", per_day="$0.15", create=True)
     for _ in range(3):
         _pay(budget, "$0.05")
     with pytest.raises(BudgetRefused) as refused:
@@ -88,7 +88,7 @@ def test_the_cap_holds_and_a_restart_cannot_raise_the_limits_it_finds(tmp_path: 
 
 
 def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
-    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_payment="$0.05", per_day="$0.15")
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_payment="$0.05", per_day="$0.15", create=True)
     for _ in range(3):
         _pay(budget, "0.05")
     status = budget.set_limits(per_day="$0.20")
@@ -101,7 +101,7 @@ def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
 def test_code_can_lower_a_limit_for_everyone_and_the_window_rolls(tmp_path: Path) -> None:
     clock = Clock()
     path = tmp_path / "b.sqlite"
-    budget = open_budget(WALLET, path=path, per_day="$150", clock=clock)
+    budget = open_budget(WALLET, path=path, per_day="$150", clock=clock, create=True)
     open_budget(WALLET, path=path, per_day="$100", clock=clock)
     assert budget.status().cap == 100_000_000
     _pay(budget, "$100")
@@ -113,7 +113,7 @@ def test_code_can_lower_a_limit_for_everyone_and_the_window_rolls(tmp_path: Path
 
 
 def test_a_failed_payment_keeps_counting_unless_it_never_left(tmp_path: Path) -> None:
-    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150")
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
     with pytest.raises(TimeoutError), budget.pay("$50"):
         raise TimeoutError("rpc timeout")
     with pytest.raises(NotSent), budget.pay("$50"):
@@ -124,7 +124,7 @@ def test_a_failed_payment_keeps_counting_unless_it_never_left(tmp_path: Path) ->
 
 
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
-    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150")
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
 
     async def pay() -> str:
         async with budget.pay("$5", to="0x4165cb72De51A67aac32DC33197d779552205efD") as payment:
@@ -145,7 +145,7 @@ def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
 
 def test_a_reservation_with_a_settle_by_time_counts_one_window_past_it(tmp_path: Path) -> None:
     clock = Clock()
-    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", clock=clock)
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", clock=clock, create=True)
     settles_by = datetime.fromtimestamp(clock.at, tz=UTC) + timedelta(minutes=5)
     budget.reserve("$100", settles_by=settles_by)
     clock.at += 300 + DAY
@@ -157,7 +157,7 @@ def test_a_reservation_with_a_settle_by_time_counts_one_window_past_it(tmp_path:
 
 def test_freeze_check_and_mistakes(tmp_path: Path) -> None:
     path = tmp_path / "b.sqlite"
-    budget = open_budget(WALLET, path=path, per_day="$150", max_payments=1)
+    budget = open_budget(WALLET, path=path, per_day="$150", max_payments=1, create=True)
     assert budget.check("$150").ok
     budget.freeze()
     check = budget.check("$1")
@@ -167,10 +167,19 @@ def test_freeze_check_and_mistakes(tmp_path: Path) -> None:
     assert budget.check("$1").reason == "uses"
     with pytest.raises(BudgetError, match="not 40 hex digits"):
         open_budget(WALLET[:-1], path=path, per_day="$1")
-    with pytest.raises(BudgetError, match="rolling limit"):
+    with pytest.raises(BudgetError, match="has no declared budget"):
         open_budget("0x" + "0" * 39 + "1", path=path)
     with pytest.raises(BudgetError, match="no budget file"):
         open_budget(WALLET, path=tmp_path / "missing.sqlite", create=False)
+
+
+def test_the_default_is_fail_closed(tmp_path: Path) -> None:
+    path = tmp_path / "default-missing.sqlite"
+    with pytest.raises(BudgetError, match="no budget file"):
+        open_budget(WALLET, path=path, per_day="$5")
+    budget = open_budget(WALLET, path=path, per_day="$5", create=True)
+    assert budget.status().cap == 5_000_000
+    budget.close()
     corrupt = tmp_path / "corrupt.sqlite"
     corrupt.write_text("not a database " * 100)
     with pytest.raises(BudgetError, match="cannot be used"):
@@ -244,7 +253,7 @@ def test_the_python_cli_sets_reads_and_freezes(tmp_path: Path) -> None:
 def test_python_and_javascript_spend_from_one_budget(tmp_path: Path) -> None:
     assert NODE is not None
     path = tmp_path / "shared.sqlite"
-    budget = open_budget(CHECKSUMMED, path=path, per_payment="$50", per_day="$150")
+    budget = open_budget(CHECKSUMMED, path=path, per_payment="$50", per_day="$150", create=True)
     _pay(budget, "$50")
     _pay(budget, "$50")
     script = (
@@ -303,7 +312,7 @@ def test_both_languages_find_the_same_default_file(env: dict[str, str], platform
 
 def test_a_warning_names_the_command_that_raises_the_limit(tmp_path: Path) -> None:
     path = tmp_path / "b.sqlite"
-    open_budget(WALLET, path=path, per_day="$10")
+    open_budget(WALLET, path=path, per_day="$10", create=True)
     messages: list[str] = []
     with warnings.catch_warnings():
         warnings.simplefilter("error")

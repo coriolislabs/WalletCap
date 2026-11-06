@@ -11,12 +11,19 @@ import { BudgetError } from './errors.mjs';
 import { identifier, Ledger, units } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
 
-const RAIL = 'x402';
+// The CDP store is its own rail. The x402 guard also writes rail 'x402',
+// and a shared rail let a guard row reach the CDP loader with the wrong
+// reference shape.
+const RAIL = 'cdp';
 
 // CDP compares assets after this normalization (EVM addresses lowercased).
 const normalizeAsset = asset => {
   const trimmed = String(asset).trim();
   return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+};
+
+const parseReference = text => {
+  try { return text ? JSON.parse(text) : null; } catch { return null; }
 };
 
 const reference = entry => JSON.stringify({
@@ -68,11 +75,18 @@ export class SharedBudgetStore {
   async load() {
     const now = this.#ledger.now();
     return this.#ledger.countedRows(this.#instrument, now).map(row => {
-      const own = row.rail === RAIL && row.reference ? JSON.parse(row.reference) : null;
-      if (own && own.asset === this.#asset) {
+      const own = parseReference(row.reference);
+      // A CDP entry carries atomicAmount. 0.2.0 wrote those on rail 'x402'; accept
+      // both so an existing budget keeps counting after the rail split. A guard
+      // row has no atomicAmount and falls through to the synthetic entry below.
+      let atomic = null;
+      if (own && own.atomicAmount !== undefined && normalizeAsset(own.asset) === this.#asset) {
+        try { atomic = units(own.atomicAmount, 'atomicAmount', { allowZero: true }); } catch { atomic = null; }
+      }
+      if (atomic !== null) {
         // A payment the payee refused stays open, and counts as of now for as long as it does.
-        const at = row.status === 'reserved' ? Number(now) : own.at;
-        return { atomicAmount: BigInt(own.atomicAmount), asset: own.asset, network: own.network, payTo: own.payTo, at };
+        const at = row.status === 'reserved' ? Number(now) : (Number.isFinite(Number(own.at)) ? Number(own.at) : Number(row.at_ms));
+        return { atomicAmount: atomic, asset: this.#asset, network: own.network, payTo: own.payTo, at };
       }
       // Spend from another rail (or another asset) counts in this asset's units, rounded up.
       return {
@@ -111,7 +125,11 @@ export class SharedBudgetStore {
     // a signed authorization may still be out there. So the payment keeps counting,
     // as an open reservation marked refused, until someone who has checked the chain
     // releases it.
-    this.#ledger.reopenByReference(this.#instrument, RAIL, reference(entry), { outcome: 'refused' });
+    const ref = reference(entry);
+    this.#ledger.reopenByReference(this.#instrument, RAIL, ref, { outcome: 'refused' });
+    // 0.2.0 wrote CDP entries on the x402 rail; try the old rail too. A guard
+    // entry has a different reference, so it cannot match this one.
+    this.#ledger.reopenByReference(this.#instrument, 'x402', ref, { outcome: 'refused' });
   }
 
   // --- Budget -----------------------------------------------------------------
