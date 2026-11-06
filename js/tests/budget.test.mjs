@@ -342,6 +342,49 @@ test('the clock is not an option: no process can move its own time to empty the 
   await assert.rejects(paid(openBudget({ wallet: WALLET, path }), '$150'), refusedFor('budget'));
 });
 
+test('the upgrade says what it did: declare() names the merged limits, and a wallet in two units is frozen, not the file', async () => {
+  fixture();
+  const path = join(DIR, `budget-${files++}.sqlite`);
+  const APP = '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed';
+  const CHECKSUMMED = '0xd797ead28C38575FDf4fC523866287372340Ca02';
+  const old = new Ledger(path);
+  old.statement("UPDATE budget_meta SET value = '1' WHERE key = 'schema'").run();
+  const budgetRow = old.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)');
+  // A CDP app declared $150 a day under the checksummed address; its owner set $100 under the
+  // lowercase one. Another wallet kept a budget in wei beside its dollar one.
+  budgetRow.run(APP, 'usd', 150_000_000n, 86_400_000n, null, null);
+  budgetRow.run(APP.toLowerCase(), 'usd', 100_000_000n, 86_400_000n, null, null);
+  budgetRow.run(CHECKSUMMED, 'wei', 10n ** 15n, 86_400_000n, null, null);
+  budgetRow.run(WALLET, 'usd', 150_000_000n, 86_400_000n, null, null);
+  old.close();
+
+  // 0.3.0 said only "instrument budget is already declared with other limits".
+  const store = new SharedBudgetStore({ path, instrument: APP, asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' });
+  const declared = () => store.declare({ unit: 'usd', cap: 150_000_000n, windowMs: 86_400_000n });
+  assert.throws(declared, {
+    message: "0x5aae…eaed's budget is already declared with other limits: $100.00 per 24h, not $150.00 per 24h. The 0.3.0 upgrade "
+      + "merged the budget 0.2.x kept under 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed into this one, with the tighter of each limit; "
+      + "its owner can change them with 'walletcap set'",
+  });
+  const owner = new Ledger(path);
+  owner.setLimits(APP, { cap: 150_000_000n });
+  owner.close();
+  declared();
+  store.close();
+
+  // 0.3.0 refused to open the file at all. Now that wallet alone is refused, and says why.
+  const frozen = openBudget({ wallet: WALLET, path });
+  await assert.rejects(paid(frozen, '$1'), error => refusedFor('revoked')(error) && error.message.endsWith(
+    'The 0.3.0 upgrade froze it: 0.2.x also kept a budget in wei under 0xd797ead28C38575FDf4fC523866287372340Ca02 for this wallet, '
+      + "which can't be merged with this one in usd, so that budget no longer counts",
+  ));
+  await paid(openBudget({ wallet: APP, path }), '$1');
+  frozen.unfreeze();
+  await paid(frozen, '$1');
+  frozen.freeze();
+  await assert.rejects(paid(frozen, '$1'), error => refusedFor('revoked')(error) && !/0\.3\.0 upgrade/.test(error.message));
+});
+
 test('a 0.2.x file is upgraded on open: every spelling of a wallet becomes one budget, and every payment still counts', async () => {
   const { clock } = fixture();
   const path = join(DIR, `budget-${files++}.sqlite`);

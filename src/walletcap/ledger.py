@@ -33,7 +33,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 from uuid import uuid4
 
 from walletcap import _clock
@@ -284,16 +284,61 @@ def _held_note(held_uses: int, open_ids: Callable[[], list[str]]) -> str:
     )
 
 
+def _limits_text(
+    unit: str, cap: int, window_ms: int, per_payment: int | None, max_uses: int | None
+) -> str:
+    """``"$100.00 per 24h, at most $50.00 a payment"`` in the budget's own unit."""
+
+    parts = [f"{format_amount(cap, unit)} per {format_window(window_ms)}"]
+    if per_payment is not None:
+        parts.append(f"at most {format_amount(per_payment, unit)} a payment")
+    if max_uses is not None:
+        parts.append(f"{max_uses} payments per {format_window(window_ms)}")
+    return ", ".join(parts)
+
+
+# What the 0.3.0 upgrade did to a wallet's budget, kept in budget_meta as JSON so either language
+# can say it: ``merged <name>`` lists the 0.2.x names merged into it; ``unmerged <name>`` the
+# budgets in another unit it couldn't merge, which froze the wallet.
+def _merged_key(name: str) -> str:
+    return f"merged {name}"
+
+
+def _unmerged_key(name: str) -> str:
+    return f"unmerged {name}"
+
+
+def _merged_note(names: list[str]) -> str:
+    plural = "" if len(names) == 1 else "s"
+    return (
+        f"The 0.3.0 upgrade merged the budget{plural} 0.2.x kept under {', '.join(names)} "
+        "into this one, with the tighter of each limit; its owner can change them with "
+        "'walletcap set'"
+    )
+
+
+def _unmerged_note(unmerged: dict[str, Any]) -> str:
+    aside = unmerged["aside"]
+    budgets = " and ".join(f"a budget in {item['unit']} under {item['name']}" for item in aside)
+    which = "that budget no longer counts" if len(aside) == 1 else "those budgets no longer count"
+    return (
+        f"The 0.3.0 upgrade froze it: 0.2.x also kept {budgets} for this wallet, which can't be "
+        f"merged with this one in {unmerged['kept']}, so {which}"
+    )
+
+
 def _refusal(
     row: sqlite3.Row,
     counted: _Counted,
     amount: int,
     open_ids: Callable[[], list[str]] = list,
+    frozen_note: Callable[[], str | None] = lambda: None,
 ) -> BudgetRefused | None:
     """Why the budget in ``row`` refuses ``amount`` on top of what already counts, or None.
 
     A refusal names the open payments that take part of the room, oldest first,
-    from ``open_ids()``. The JavaScript ledger words it the same way.
+    from ``open_ids()``, and ``frozen_note()`` says why a frozen budget was
+    frozen, if the ledger knows. The JavaScript ledger words it the same way.
     """
 
     name = short_wallet(row["instrument"])
@@ -305,8 +350,10 @@ def _refusal(
         return "" if count == 1 else "s"
 
     if row["revoked_at_ms"] is not None:
+        note = frozen_note()
         return BudgetRevoked(
             f"{name}'s budget is frozen: nothing can be paid until its owner unfreezes it"
+            + ("" if note is None else f". {note}")
         )
     if row["per_payment"] is not None and amount > row["per_payment"]:
         return OverPerPayment(
@@ -379,12 +426,23 @@ class Ledger:
         ``SharedBudgetStore`` was given, so a checksummed or CAIP-10 address
         could hold a budget beside the lowercase one. Each is merged into any
         budget already under the canonical name: the tighter of every limit,
-        and every payment, so nothing stops counting. The JavaScript ledger
-        upgrades a file the same way.
+        and every payment, so nothing stops counting. A budget in another unit
+        can't be merged: it stays under its 0.2.x name, and the wallet is
+        frozen until its owner has looked. The JavaScript ledger upgrades a
+        file the same way.
         """
 
         def least(a: int | None, b: int | None) -> int | None:
             return b if a is None else a if b is None else min(a, b)
+
+        def note(key: str, value: object) -> None:
+            connection.execute(
+                "INSERT OR REPLACE INTO budget_meta VALUES (?, ?)", (key, json.dumps(value))
+            )
+
+        def noted(key: str) -> Any:
+            stored = self._meta(connection, key)
+            return None if stored is None else json.loads(stored)
 
         rows = connection.execute("SELECT * FROM budgets ORDER BY instrument").fetchall()
         for row in rows:
@@ -407,15 +465,20 @@ class Ledger:
                         row["revoked_at_ms"],
                     ),
                 )
-            else:
-                same_unit = kept["unit"] == row["unit"] or (
-                    kept["unit"] in DOLLAR_UNITS and row["unit"] in DOLLAR_UNITS
+            elif not (
+                kept["unit"] == row["unit"]
+                or (kept["unit"] in DOLLAR_UNITS and row["unit"] in DOLLAR_UNITS)
+            ):
+                connection.execute(
+                    "UPDATE budgets SET revoked_at_ms = COALESCE(revoked_at_ms, ?) "
+                    "WHERE instrument = ?",
+                    (self._now_ms(), name),
                 )
-                if not same_unit:
-                    raise BudgetError(
-                        f"{self._path} holds two budgets for {short_wallet(name)}, counted in "
-                        f"{kept['unit']} and {row['unit']}; they can't be merged into one"
-                    )
+                aside = (noted(_unmerged_key(name)) or {}).get("aside", [])
+                aside.append({"name": row["instrument"], "unit": row["unit"]})
+                note(_unmerged_key(name), {"kept": kept["unit"], "aside": aside})
+                continue
+            else:
                 # A longer window with a smaller cap is tighter than either budget was.
                 connection.execute(
                     "UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ?, "
@@ -429,6 +492,7 @@ class Ledger:
                         name,
                     ),
                 )
+                note(_merged_key(name), [*(noted(_merged_key(name)) or []), row["instrument"]])
             connection.execute(
                 "UPDATE spend SET instrument = ? WHERE instrument = ?", (name, row["instrument"])
             )
@@ -480,6 +544,22 @@ class Ledger:
         """The ledger's own time: the system clock. Callers can't set it."""
 
         return _clock.now_ms()
+
+    @staticmethod
+    def _meta(connection: sqlite3.Connection, key: str) -> str | None:
+        row = connection.execute("SELECT value FROM budget_meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row[0])
+
+    def _frozen_note(
+        self, connection: sqlite3.Connection, instrument: str
+    ) -> Callable[[], str | None]:
+        """Why the 0.3.0 upgrade froze the wallet's budget, or None, when asked."""
+
+        def note() -> str | None:
+            unmerged = self._meta(connection, _unmerged_key(instrument))
+            return None if unmerged is None else _unmerged_note(json.loads(unmerged))
+
+        return note
 
     def _budget_row(self, connection: sqlite3.Connection, instrument: str) -> sqlite3.Row:
         row: sqlite3.Row | None = connection.execute(
@@ -552,7 +632,23 @@ class Ledger:
                     (instrument, unit, cap, budget.window_ms, per_payment, max_uses),
                 )
             elif _limits(row) != budget:
-                raise BudgetError("instrument budget is already declared with other limits")
+
+                def text(limits: BudgetLimits) -> str:
+                    words = _limits_text(
+                        limits.unit,
+                        limits.cap,
+                        limits.window_ms,
+                        limits.per_payment,
+                        limits.max_uses,
+                    )
+                    return words if row["unit"] == unit else f"{words} in {limits.unit}"
+
+                merged = self._meta(connection, _merged_key(instrument))
+                raise BudgetError(
+                    f"{short_wallet(instrument)}'s budget is already declared with other limits: "
+                    f"{text(_limits(row))}, not {text(budget)}"
+                    + ("" if merged is None else f". {_merged_note(json.loads(merged))}")
+                )
         return budget
 
     def budget(self, instrument: str) -> BudgetLimits | None:
@@ -724,6 +820,10 @@ class Ledger:
                         instrument,
                     ),
                 )
+                # The owner's limits now, not the ones the 0.3.0 upgrade merged.
+                connection.execute(
+                    "DELETE FROM budget_meta WHERE key = ?", (_merged_key(instrument),)
+                )
             current = self._budget_row(connection, instrument)
         return _limits(current)
 
@@ -754,7 +854,13 @@ class Ledger:
             now = self._now_ms()
             row = self._budget_row(connection, instrument)
             counted = self._counted(connection, instrument, now)
-            refusal = _refusal(row, counted, amount, self._open_ids(connection, instrument, now))
+            refusal = _refusal(
+                row,
+                counted,
+                amount,
+                self._open_ids(connection, instrument, now),
+                self._frozen_note(connection, instrument),
+            )
         left = 0 if row["revoked_at_ms"] is not None else max(row["cap"] - counted.total, 0)
         return Checked(refusal, left)
 
@@ -785,7 +891,13 @@ class Ledger:
             now = self._now_ms()
             budget = self._budget_row(connection, instrument)
             counted = self._counted(connection, instrument, now)
-            refusal = _refusal(budget, counted, amount, self._open_ids(connection, instrument, now))
+            refusal = _refusal(
+                budget,
+                counted,
+                amount,
+                self._open_ids(connection, instrument, now),
+                self._frozen_note(connection, instrument),
+            )
             if refusal is not None:
                 raise refusal
             spend_id = f"spend-{uuid4().hex}"
@@ -866,13 +978,16 @@ class Ledger:
             )
 
     def unrevoke(self, instrument: str) -> None:
-        """Allow reservations again after ``revoke``."""
+        """Allow reservations again after ``revoke``, or after the 0.3.0 upgrade froze them."""
 
         instrument = _instrument(instrument)
         with self._transaction() as connection:
             self._budget_row(connection, instrument)
             connection.execute(
                 "UPDATE budgets SET revoked_at_ms = NULL WHERE instrument = ?", (instrument,)
+            )
+            connection.execute(
+                "DELETE FROM budget_meta WHERE key = ?", (_unmerged_key(instrument),)
             )
 
     def status(self, instrument: str) -> BudgetStatus:

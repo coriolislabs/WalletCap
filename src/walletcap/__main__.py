@@ -27,6 +27,7 @@ from walletcap.money import (
     format_window,
     normalize_wallet,
     short_wallet,
+    stored_wallet_name,
     strip_ascii,
     to_window_ms,
 )
@@ -109,7 +110,9 @@ def _json(value: Any) -> str:
 def _wallets(path: Path) -> list[str]:
     if not path.exists():
         return []
-    return [budget.instrument for budget in Ledger(path).budgets()]
+    # A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
+    names = [stored_wallet_name(budget.instrument) for budget in Ledger(path).budgets()]
+    return list(dict.fromkeys(names))
 
 
 def _wallet(args: argparse.Namespace, path: Path) -> str:

@@ -10,7 +10,7 @@ import { openBudget } from './index.mjs';
 import { Ledger } from './ledger.mjs';
 import {
   defaultBudgetPath, describeLimits, expandHome, formatAge, formatUsd, formatWindow, normalizeWallet, parseLimits, shortWallet,
-  toWindowMs, trimAscii,
+  storedWalletName, toWindowMs, trimAscii,
 } from './money.mjs';
 
 const { version } = createRequire(import.meta.url)('./package.json');
@@ -87,7 +87,8 @@ const wallets = path => {
   if (!existsSync(path)) return [];
   const ledger = new Ledger(path);
   try {
-    return ledger.budgets().map(row => row.instrument);
+    // A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
+    return [...new Set(ledger.budgets().map(row => storedWalletName(row.instrument)))];
   } finally {
     ledger.close();
   }

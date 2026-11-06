@@ -193,6 +193,21 @@ test("a Permit2 payment, or one whose expiry walletcap can't read, counts until 
   assert.equal(budget.status().spent, 0n);
 });
 
+test('terms valid longer than an hour are passed over for shorter ones on offer', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { budget, client } = setup();
+  // 0.3.0 refused the payment when the first terms asked for two hours, though the payee also
+  // offered five minutes.
+  const required = kit.required(10_000, { maxTimeoutSeconds: 7200 });
+  required.accepts.push({ ...required.accepts[0], maxTimeoutSeconds: 300 });
+  const payload = await client.createPaymentPayload(required);
+  assert.equal(payload.accepted.maxTimeoutSeconds, 300);
+  assert.equal(budget.status().inFlight, 10_000n);
+  // Terms in an asset the budget can't price don't stand in for them.
+  const unpriced = kit.required(10_000, { maxTimeoutSeconds: 7200 });
+  unpriced.accepts.push({ ...unpriced.accepts[0], asset: '0x1111111111111111111111111111111111111111', maxTimeoutSeconds: 300 });
+  await assert.rejects(client.createPaymentPayload(unpriced), refusedFor('timeout'));
+});
+
 test('an authorization valid longer than an hour is refused before it is signed', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const { budget, client } = setup();
   // 0.2.x signed whatever validity the payee asked for: here, 30 days to redeem it.

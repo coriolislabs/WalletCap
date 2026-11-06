@@ -603,4 +603,53 @@ def test_a_0_2_file_is_upgraded_on_open(tmp_path: Path, clock: Clock) -> None:
     assert {"spend-a", "spend-b", "spend-c"} <= {payment.id for payment in upgraded.history()}
     assert [budget.instrument for budget in Ledger(path).budgets()] == [WALLET]
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("SELECT value FROM budget_meta").fetchone() == ("2",)
+        schema = connection.execute("SELECT value FROM budget_meta WHERE key = 'schema'")
+        assert schema.fetchone() == ("2",)
+
+
+def test_the_upgrade_says_what_it_did(tmp_path: Path, clock: Clock) -> None:
+    path = tmp_path / "old.sqlite"
+    app = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+    Ledger(path)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE budget_meta SET value = '1' WHERE key = 'schema'")
+        budget_row = "INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)"
+        # A CDP app declared $150 a day under the checksummed address; its owner set $100 under
+        # the lowercase one. Another wallet kept a budget in wei beside its dollar one.
+        connection.execute(budget_row, (app, "usd", 150_000_000, 86_400_000, None, None))
+        connection.execute(budget_row, (app.lower(), "usd", 100_000_000, 86_400_000, None, None))
+        connection.execute(budget_row, (CHECKSUMMED, "wei", 10**15, 86_400_000, None, None))
+        connection.execute(budget_row, (WALLET, "usd", 150_000_000, 86_400_000, None, None))
+
+    # 0.3.0 said only "instrument budget is already declared with other limits".
+    ledger = Ledger(path)
+    with pytest.raises(BudgetError) as declared:
+        ledger.declare(app, unit="usd", cap=150_000_000, window_seconds=DAY)
+    assert str(declared.value) == (
+        "0x5aae…eaed's budget is already declared with other limits: $100.00 per 24h, not "
+        "$150.00 per 24h. The 0.3.0 upgrade merged the budget 0.2.x kept under "
+        "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed into this one, with the tighter of each "
+        "limit; its owner can change them with 'walletcap set'"
+    )
+    ledger.set_limits(app, cap=150_000_000, window_ms=86_400_000)
+    ledger.declare(app, unit="usd", cap=150_000_000, window_seconds=DAY)
+
+    # 0.3.0 refused to open the file at all. Now that wallet alone is refused, and says why.
+    frozen = open_budget(WALLET, path=path)
+    with pytest.raises(BudgetRefused) as refused:
+        _pay(frozen, "$1")
+    assert refused.value.reason == "revoked"
+    assert str(refused.value).endswith(
+        f"The 0.3.0 upgrade froze it: 0.2.x also kept a budget in wei under {CHECKSUMMED} for "
+        "this wallet, which can't be merged with this one in usd, so that budget no longer counts"
+    )
+    _pay(open_budget(app, path=path), "$1")
+    status = _cli(path, "status")
+    assert status.returncode == 0, status.stderr
+    assert status.stdout.count("0xd797") == 1
+    frozen.unfreeze()
+    _pay(frozen, "$1")
+    frozen.freeze()
+    with pytest.raises(BudgetRefused) as again:
+        _pay(frozen, "$1")
+    assert "0.3.0 upgrade" not in str(again.value)

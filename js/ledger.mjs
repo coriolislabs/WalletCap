@@ -148,7 +148,6 @@ const referenceText = reference => {
 
 const unreadable = (path, error) => new BudgetError(`the budget file ${path} cannot be used: ${error.message}`, { cause: error });
 
-/** Why `row`'s budget refuses `spend` on top of what already counts, or null. */
 // Open payments named in a refusal, so its owner can see which holds take the room: the oldest few.
 const SHOWN_HOLDS = 3;
 const heldNote = (heldUses, openIds) => {
@@ -161,14 +160,16 @@ const heldNote = (heldUses, openIds) => {
  * Why `row`'s budget refuses `spend` on top of what already counts, or null.
  * `heldTotal` and `heldUses` are the part of the count that is open payments,
  * and `openIds()` gives the oldest of their ids, so the refusal can name them.
+ * `frozenNote()` says why a frozen budget was frozen, if the ledger knows.
  */
-export function refusal(row, { total, uses, heldTotal = 0n, heldUses = 0n }, spend, openIds = () => []) {
+export function refusal(row, { total, uses, heldTotal = 0n, heldUses = 0n }, spend, openIds = () => [], frozenNote = () => null) {
   const name = shortWallet(row.instrument);
   const money = value => formatAmount(value, row.unit);
   const window = formatWindow(row.window_ms);
   const plural = count => (count === 1n ? '' : 's');
   if (row.revoked_at_ms !== null) {
-    return new BudgetRefused('revoked', `${name}'s budget is frozen: nothing can be paid until its owner unfreezes it`);
+    const note = frozenNote();
+    return new BudgetRefused('revoked', `${name}'s budget is frozen: nothing can be paid until its owner unfreezes it${note === null ? '' : `. ${note}`}`);
   }
   if (row.per_payment !== null && spend > row.per_payment) {
     return new BudgetRefused('per_payment', `${money(spend)} is over ${name}'s ${money(row.per_payment)} limit per payment`);
@@ -189,6 +190,23 @@ export function refusal(row, { total, uses, heldTotal = 0n, heldUses = 0n }, spe
 }
 
 const unitsMatch = (stored, wanted) => (DOLLAR_UNITS.has(wanted) ? DOLLAR_UNITS.has(stored) : stored === wanted);
+
+// "$100.00 per 24h, at most $50.00 a payment" in the budget's own unit.
+const limitsText = ({ unit, cap, window_ms: window, per_payment: perPayment, max_uses: maxUses }) => [
+  `${formatAmount(cap, unit)} per ${formatWindow(window)}`,
+  ...(perPayment === null ? [] : [`at most ${formatAmount(perPayment, unit)} a payment`]),
+  ...(maxUses === null ? [] : [`${maxUses} payments per ${formatWindow(window)}`]),
+].join(', ');
+
+// What the 0.3.0 upgrade did to a wallet's budget, kept in budget_meta as JSON so either language
+// can say it: `merged <name>` lists the 0.2.x names merged into it; `unmerged <name>` the budgets
+// in another unit it couldn't merge, which froze the wallet.
+const mergedKey = name => `merged ${name}`;
+const unmergedKey = name => `unmerged ${name}`;
+const mergedNote = names => `The 0.3.0 upgrade merged the budget${names.length === 1 ? '' : 's'} 0.2.x kept under ${names.join(', ')} `
+  + "into this one, with the tighter of each limit; its owner can change them with 'walletcap set'";
+const unmergedNote = ({ kept, aside }) => `The 0.3.0 upgrade froze it: 0.2.x also kept ${aside.map(({ name, unit }) => `a budget in ${unit} under ${name}`).join(' and ')} `
+  + `for this wallet, which can't be merged with this one in ${kept}, so ${aside.length === 1 ? 'that budget no longer counts' : 'those budgets no longer count'}`;
 
 export class Ledger {
   #db;
@@ -227,10 +245,16 @@ export class Ledger {
   // 0.2.x kept a budget under the name SharedBudgetStore or Python's Ledger was given, so a
   // checksummed or CAIP-10 address could hold a budget beside the lowercase one. Each moves to its
   // canonical name, merged with any budget already there: the tighter of every limit, and every
-  // payment, so nothing stops counting. The Python ledger upgrades a file the same way.
+  // payment, so nothing stops counting. A budget in another unit can't be merged: it stays under
+  // its 0.2.x name, and the wallet is frozen until its owner has looked. The Python ledger
+  // upgrades a file the same way.
   #upgradeFromSchema1() {
     const sameUnit = (a, b) => a === b || (DOLLAR_UNITS.has(a) && DOLLAR_UNITS.has(b));
     const least = (a, b) => (a === null ? b : b === null || a < b ? a : b);
+    const note = (key, add) => {
+      const stored = this.#meta(key);
+      this.statement('INSERT OR REPLACE INTO budget_meta VALUES (?, ?)').run(key, JSON.stringify(add(stored === null ? null : JSON.parse(stored))));
+    };
     for (const row of this.statement('SELECT * FROM budgets ORDER BY instrument').all()) {
       const name = storedWalletName(row.instrument);
       if (name === row.instrument) continue;
@@ -238,15 +262,17 @@ export class Ledger {
       if (kept === null) {
         this.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, ?)')
           .run(name, row.unit, row.cap, row.window_ms, row.per_payment, row.max_uses, row.revoked_at_ms);
+      } else if (!sameUnit(kept.unit, row.unit)) {
+        this.statement('UPDATE budgets SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE instrument = ?').run(this.now(), name);
+        note(unmergedKey(name), stored => ({ kept: kept.unit, aside: [...(stored?.aside ?? []), { name: row.instrument, unit: row.unit }] }));
+        continue;
       } else {
-        if (!sameUnit(kept.unit, row.unit)) {
-          throw new BudgetError(`${this.#path} holds two budgets for ${shortWallet(name)}, counted in ${kept.unit} and ${row.unit}; they can't be merged into one`);
-        }
         // A longer window with a smaller cap is tighter than either budget was.
         this.statement('UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ?, revoked_at_ms = ? WHERE instrument = ?').run(
           least(kept.cap, row.cap), kept.window_ms > row.window_ms ? kept.window_ms : row.window_ms,
           least(kept.per_payment, row.per_payment), least(kept.max_uses, row.max_uses), least(kept.revoked_at_ms, row.revoked_at_ms), name,
         );
+        note(mergedKey(name), stored => [...(stored ?? []), row.instrument]);
       }
       this.statement('UPDATE spend SET instrument = ? WHERE instrument = ?').run(name, row.instrument);
       this.statement('DELETE FROM budgets WHERE instrument = ?').run(row.instrument);
@@ -291,6 +317,18 @@ export class Ledger {
 
   #row(instrument) {
     return this.statement('SELECT * FROM budgets WHERE instrument = ?').get(instrument) ?? null;
+  }
+
+  #meta(key) {
+    return this.statement('SELECT value FROM budget_meta WHERE key = ?').get(key)?.value ?? null;
+  }
+
+  // Why the 0.3.0 upgrade froze the wallet's budget, or null.
+  #frozenNote(instrument) {
+    return () => {
+      const unmerged = this.#meta(unmergedKey(instrument));
+      return unmerged === null ? null : unmergedNote(JSON.parse(unmerged));
+    };
   }
 
   #required(instrument) {
@@ -352,7 +390,10 @@ export class Ledger {
         return this.#row(instrument);
       }
       if (Object.keys(budget).some(key => row[key] !== budget[key])) {
-        throw new BudgetError('instrument budget is already declared with other limits');
+        const text = limits => limitsText(limits) + (row.unit === budget.unit ? '' : ` in ${limits.unit}`);
+        const merged = this.#meta(mergedKey(instrument));
+        throw new BudgetError(`${shortWallet(instrument)}'s budget is already declared with other limits: ${text(row)}, not ${text(budget)}`
+          + (merged === null ? '' : `. ${mergedNote(JSON.parse(merged))}`));
       }
       return row;
     });
@@ -432,6 +473,7 @@ export class Ledger {
         limits.maxUses === undefined ? row.max_uses : limits.maxUses,
         instrument,
       );
+      this.statement('DELETE FROM budget_meta WHERE key = ?').run(mergedKey(instrument)); // the owner's limits now
       return this.#row(instrument);
     });
   }
@@ -462,7 +504,7 @@ export class Ledger {
       const now = this.now();
       const row = this.#required(instrument);
       const counted = this.#counted(instrument, now);
-      const refused = refusal(row, counted, spend, this.#openIds(instrument, now));
+      const refused = refusal(row, counted, spend, this.#openIds(instrument, now), this.#frozenNote(instrument));
       const left = row.cap - counted.total;
       return { refusal: refused, total: counted.total, uses: counted.uses, remaining: row.revoked_at_ms !== null || left < 0n ? 0n : left };
     });
@@ -484,7 +526,7 @@ export class Ledger {
       // Read once the write lock is held: a wait for another process can't leave it stale.
       const now = this.now();
       const row = this.#required(instrument);
-      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now));
+      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now), this.#frozenNote(instrument));
       if (refused !== null) throw refused;
       const spendId = `spend-${randomUUID().replaceAll('-', '')}`;
       const expires = settlesBy === null ? null : expiry(settlesBy, now, row.window_ms);
@@ -509,7 +551,7 @@ export class Ledger {
     return this.transaction(() => {
       const now = this.now();
       const row = this.#required(instrument);
-      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now));
+      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now), this.#frozenNote(instrument));
       if (refused !== null) throw refused;
       const spendId = `${rail}-${randomUUID()}`;
       const expires = within === null ? null : expiry(now + within, now, row.window_ms);
@@ -603,12 +645,13 @@ export class Ledger {
     });
   }
 
-  /** Allow payments again after revoke(). */
+  /** Allow payments again after revoke(), or after the 0.3.0 upgrade froze the budget. */
   unrevoke(name) {
     const instrument = instrumentName(name);
     this.transaction(() => {
       this.#required(instrument);
       this.statement('UPDATE budgets SET revoked_at_ms = NULL WHERE instrument = ?').run(instrument);
+      this.statement('DELETE FROM budget_meta WHERE key = ?').run(unmergedKey(instrument));
     });
   }
 

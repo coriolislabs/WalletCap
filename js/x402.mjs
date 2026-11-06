@@ -23,8 +23,8 @@ const FINGERPRINTS_KEPT = 10_000;
  * ceiling Coinbase's CDP spend controls enforce too (MAX_PAYMENT_TIMEOUT_SECONDS
  * in @coinbase/cdp-sdk). x402's clients sign an authorization that can be
  * redeemed until maxTimeoutSeconds after signing, so a payee asking for days
- * could hold authorizations and redeem them all later. A requirement asking for
- * more is refused before anything is signed.
+ * could hold authorizations and redeem them all later. Terms asking for more are
+ * passed over for shorter ones on offer, or refused before anything is signed.
  */
 export const MAX_PAYMENT_TIMEOUT_SECONDS = 3600;
 
@@ -210,11 +210,16 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     if (print !== null) byFingerprint.delete(print);
   };
 
-  // Pay only in assets the budget can count, when the server offers a choice.
+  // Pay only in assets the budget can count, on terms valid an hour or less, when the server
+  // offers a choice: a payee that also offers longer terms is paid on the shorter ones.
   if (typeof client.registerPolicy === 'function') {
     client.registerPolicy((_version, requirements) => {
-      const kept = requirements.filter(priced);
-      if (kept.length === 0 && requirements.length > 0) price(requirements[0]); // throws the explanation
+      const kept = requirements.filter(requirement => priced(requirement) && timeoutRefusal(requirement) === null);
+      if (kept.length === 0 && requirements.length > 0) {
+        const countable = requirements.find(priced);
+        if (countable === undefined) price(requirements[0]); // throws the explanation
+        throw timeoutRefusal(countable);
+      }
       return kept;
     });
   }
@@ -227,6 +232,7 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     // An early refusal, before anything is signed. The reservation that binds comes after.
     const check = budget.check(amount);
     if (!check.ok) throw new BudgetRefused(check.reason, check.message);
+    // The policy above has already set aside longer terms; this holds for a client without one.
     const tooLong = timeoutRefusal(context.selectedRequirements);
     if (tooLong !== null) throw tooLong;
     return undefined;

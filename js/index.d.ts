@@ -22,7 +22,8 @@ export type RefusalReason = 'budget' | 'per_payment' | 'uses' | 'revoked' | 'ass
 
 /**
  * The longest validity, in seconds, guard() lets a payee ask for (3600, an hour, as CDP's spend
- * controls allow). A requirement asking for more is refused with reason 'timeout' before signing.
+ * controls allow). Terms asking for more are passed over for shorter ones on offer, or refused
+ * with reason 'timeout' before signing.
  */
 export declare const MAX_PAYMENT_TIMEOUT_SECONDS: number;
 
