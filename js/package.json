@@ -1,6 +1,6 @@
 {
   "name": "walletcap",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "One spend budget per wallet for AI agents: counted across every process, replica, key, permission and payment rail. Restarts don't reset it, limit changes don't zero it, and if it can't be read nothing is paid.",
   "license": "Apache-2.0",
   "author": "Coriolis Labs Inc.",

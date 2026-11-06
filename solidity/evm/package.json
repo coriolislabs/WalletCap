@@ -1,6 +1,6 @@
 {
   "name": "walletcap-solidity-check",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Runs AccountCapSpender's behaviour on an EVM without Foundry, so the on-chain cap is covered anywhere Node runs.",
   "license": "Apache-2.0",
   "private": true,

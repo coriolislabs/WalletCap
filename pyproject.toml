@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [project]
 name = "walletcap"
-version = "0.2.2"
+version = "0.2.3"
 description = "One spend budget per wallet for AI agents: counted across every process, replica, key, permission and payment rail."
 readme = "README.md"
 requires-python = ">=3.11"

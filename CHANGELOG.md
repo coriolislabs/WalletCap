@@ -1,7 +1,13 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
-## Unreleased
+## 0.2.3 — 2026-11-06
+
+### Changed
+
+- Releases are published from GitHub Actions with trusted publishing: npm with provenance,
+  PyPI with PEP 740 attestations. No token is stored. A GitHub Release whose tag doesn't
+  match the package version is refused.
 
 ### Fixed
 
