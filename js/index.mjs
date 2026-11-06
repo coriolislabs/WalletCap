@@ -203,8 +203,7 @@ export class Budget {
    * Take `amount` before paying, or throw BudgetRefused. Commit the reservation
    * when the payment settles; release it only if the payment never left.
    * `settlesBy` is the last moment the payment could still settle, if known: an
-   * open reservation stops counting one window after it. A moment already past
-   * counts as now.
+   * open reservation stops counting one window after it. It must be after now.
    */
   reserve(amount, { to, note, details, rail = 'js', settlesBy } = {}) {
     const micros = positive(toMicros(amount));

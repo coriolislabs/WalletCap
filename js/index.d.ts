@@ -91,9 +91,9 @@ export interface PaymentDetails {
   /** The rail, for the history. Defaults to 'js'. */
   rail?: string;
   /**
-   * The last moment the payment could still settle. An open reservation, one whose outcome is
-   * unknown included, stops counting one window after it; a moment already past counts as now.
-   * Without it, an open reservation counts until it is committed or released.
+   * The last moment the payment could still settle, after now (a moment that isn't is refused).
+   * An open reservation, one whose outcome is unknown included, stops counting one window after
+   * it. Without it, an open reservation counts until it is committed or released.
    */
   settlesBy?: Date | number | bigint;
 }

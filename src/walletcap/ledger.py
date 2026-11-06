@@ -224,12 +224,18 @@ def _integer(value: object, label: str, *, allow_zero: bool = False) -> int:
 
 
 def _expiry(settles_by_ms: int, now: int, window_ms: int) -> int:
-    """Counted as a payment settled at the later of settles_by_ms and now would be.
+    """Counted as a payment settled at ``settles_by_ms`` would be: through it plus a window.
 
-    That is, through that moment plus one window.
+    A payment is made after it is reserved, so a settle-by time that isn't after
+    now is a mistake, and refused.
     """
 
-    return min(max(settles_by_ms, now) + window_ms + 1, MAX_INTEGER)
+    if settles_by_ms <= now:
+        raise BudgetError(
+            f"settles_by_ms {settles_by_ms} is not after now ({now}): "
+            "a payment can't settle before it is made"
+        )
+    return min(settles_by_ms + window_ms + 1, MAX_INTEGER)
 
 
 def _reference(reference: object) -> str | None:
@@ -765,9 +771,8 @@ class Ledger:
 
         Call it before the payment is made; commit the returned id once the
         payment settles, or release it if the payment was never sent. With
-        ``settles_by_ms`` (the last moment the payment could still settle), an
-        open reservation stops counting one window after that moment; a moment
-        already past counts as now.
+        ``settles_by_ms`` (the last moment the payment could still settle, after
+        now), an open reservation stops counting one window after that moment.
         """
 
         instrument = _instrument(instrument)

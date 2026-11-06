@@ -466,9 +466,8 @@ class Budget:
 
         Commit the reservation when the payment settles; release it only if the
         payment never left the wallet. ``settles_by`` is the last moment the
-        payment could still settle, if known, as a timezone-aware datetime: an
-        open reservation stops counting one window after it. A moment already
-        past counts as now.
+        payment could still settle, if known, as a timezone-aware datetime after
+        now: an open reservation stops counting one window after it.
         """
 
         return self._reserve(amount, _describe(to, note, details), rail, settles_by)

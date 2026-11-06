@@ -313,11 +313,9 @@ def test_a_naive_settle_by_time_is_refused(tmp_path: Path, clock: Clock) -> None
     with pytest.raises(BudgetError, match="timezone-aware"), budget.pay("$1", settles_by=naive):
         pass
     assert budget.status().in_flight == 0
-    # A time already past counts as now: the hold counts for one window from here.
-    budget.reserve("$150", settles_by=datetime(2000, 1, 1, tzinfo=UTC))
-    clock.at += DAY
-    assert budget.status().in_flight == 150_000_000
-    clock.at += 0.002
+    # An aware time that isn't after now is refused too: the payment is made after it is reserved.
+    with pytest.raises(BudgetError, match="is not after now"):
+        budget.reserve("$150", settles_by=datetime(2000, 1, 1, tzinfo=UTC))
     assert budget.status().in_flight == 0
 
 

@@ -226,14 +226,17 @@ test('a reservation with a settle-by time stops counting a window after it', () 
   assert.equal(budget.history()[0].status, 'expired');
 });
 
-test('a settle-by time already past counts as now, so the reservation still holds the money', async () => {
+test("a settle-by time that isn't after now is refused: a payment can't settle before it is made", async () => {
   const { budget, clock } = fixture({ perDay: '$150' });
-  // 0.2.x stored the past moment as given: the reservation never counted, and a second $150 passed.
-  const held = budget.reserve('$150', { settlesBy: new Date(0) });
-  await assert.rejects(paid(budget, '$150'), refusedFor('budget'));
-  clock.now += DAY;
+  // 0.2.x stored a past moment as given, so the reservation never counted and a second $150 passed.
+  for (const settlesBy of [new Date(0), clock.now - 1, new Date(clock.now)]) {
+    assert.throws(() => budget.reserve('$150', { settlesBy }), /is not after now/);
+    await assert.rejects(budget.pay('$150', async () => TX, { settlesBy }), /is not after now/);
+  }
+  assert.equal(budget.status().payments, 0n);
+  const held = budget.reserve('$150', { settlesBy: new Date(clock.now + 1) });
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
-  clock.now += 1;
+  clock.now += DAY + 2;
   assert.equal(budget.status().inFlight, 0n);
   held.commit(); // settled late after all: it counts again, for a window from now
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
@@ -247,8 +250,8 @@ test('amounts and limits stop at a billion dollars, so no sum of payments can ov
     assert.throws(() => budget.setLimits({ perDay: tooMuch }), /more than \$1,000,000,000\.00/);
   }
   // Two holds of the most a budget can hold count at once: one lapsed, then settled late.
-  const first = budget.reserve(MAX_AMOUNT, { settlesBy: new Date(clock.now) });
-  clock.now += DAY + 1;
+  const first = budget.reserve(MAX_AMOUNT, { settlesBy: new Date(clock.now + 1) });
+  clock.now += DAY + 2;
   const second = budget.reserve(MAX_AMOUNT);
   first.commit();
   // 0.2.x took near-2^63 amounts, and two of them overflowed SQLite's SUM: every payment failed.

@@ -128,10 +128,14 @@ export const units = (value, label, { allowZero = false } = {}) => wholeNumber(v
 /** A time in milliseconds, or a count, that fits in 64 bits. */
 export const integer = (value, label, { allowZero = false } = {}) => wholeNumber(value, label, { allowZero, max: MAX_INTEGER, most: 'that fits in 64 bits' });
 
-// Counted as a payment settled at `until` would be: through until + window. A time already past counts as now.
+// Counted as a payment settled at `settlesBy` would be: through settlesBy + window. A payment is
+// made after it is reserved, so a settle-by time that isn't after now is a mistake, and refused.
 const expiry = (settlesBy, now, windowMs) => {
-  const until = settlesBy > now ? settlesBy : now;
-  return until + windowMs >= MAX_INTEGER ? MAX_INTEGER : until + windowMs + 1n;
+  if (settlesBy <= now) {
+    const iso = ms => new Date(Number(ms)).toISOString();
+    throw new BudgetError(`settlesBy ${iso(settlesBy)} is not after now (${iso(now)}): a payment can't settle before it is made`);
+  }
+  return settlesBy + windowMs >= MAX_INTEGER ? MAX_INTEGER : settlesBy + windowMs + 1n;
 };
 
 const referenceText = reference => {
@@ -467,9 +471,8 @@ export class Ledger {
   /**
    * Take `amount` from the budget, or throw the BudgetRefused that says why
    * not. A reservation counts until committed or released. With settlesByMs
-   * (the last moment the payment could still settle) it stops counting one
-   * window after that moment, as if it had settled then; a moment already
-   * past counts as now.
+   * (the last moment the payment could still settle, after now) it stops
+   * counting one window after that moment, as if it had settled then.
    */
   reserve(name, amount, { rail = 'js', reference = null, settlesByMs = null } = {}) {
     const instrument = instrumentName(name);

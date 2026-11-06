@@ -219,15 +219,18 @@ def test_a_hold_never_lapses_while_its_payment_can_still_settle(
     assert ledger.status("agent").spent == 150
 
 
-def test_a_settle_by_time_already_past_counts_as_now(tmp_path: Path, clock: Clock) -> None:
+def test_a_settle_by_time_that_isnt_after_now_is_refused(tmp_path: Path, clock: Clock) -> None:
     ledger = _ledger(tmp_path / "budget.sqlite")
-    # 0.2.x stored the past moment as given: the holds never counted, and more was reserved.
-    held = [ledger.reserve("agent", 50, settles_by_ms=0) for _ in range(3)]
+    now_ms = int(clock.at * 1000)
+    # 0.2.x stored a past moment as given: the holds never counted, and more was reserved.
+    for settles_by_ms in (0, now_ms - 1, now_ms):
+        with pytest.raises(BudgetError, match="is not after now"):
+            ledger.reserve("agent", 50, settles_by_ms=settles_by_ms)
+    assert ledger.status("agent").uses == 0
+    held = [ledger.reserve("agent", 50, settles_by_ms=now_ms + 1) for _ in range(3)]
     with pytest.raises(OverBudget):
         ledger.reserve("agent", 50)
-    clock.at += DAY
-    assert ledger.status("agent").reserved == 150
-    clock.at += 0.001
+    clock.at += DAY + 0.002
     assert ledger.status("agent").reserved == 0
     for spend_id in held:
         ledger.commit(spend_id)  # settled late after all: they count again, from now
@@ -248,7 +251,7 @@ def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
         ledger.reserve("agent", MAX_AMOUNT + 1)
     # Two holds of the most a budget can hold count at once: one lapsed, then settled late.
     # 0.2.x took near-2^63 amounts, and two of them overflowed SQLite's SUM for good.
-    first = ledger.reserve("agent", MAX_AMOUNT, settles_by_ms=int(clock.at * 1000))
+    first = ledger.reserve("agent", MAX_AMOUNT, settles_by_ms=int(clock.at * 1000) + 1)
     clock.at += DAY + 1
     ledger.reserve("agent", MAX_AMOUNT)
     ledger.commit(first)
