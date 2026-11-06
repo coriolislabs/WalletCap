@@ -55,16 +55,19 @@ Then start the server behind walletcap from the MCP client, Claude Desktop for e
   exactly that amount, so it refuses to sign for more.
 - A payment the payee confirms as settled counts for one window. One it doesn't confirm keeps
   counting until you check the chain and run `npx walletcap release <id>`. When the caller hands
-  the wallet the payment requirements (x402's exact scheme on an EVM chain) and the wallet
-  answers, it counts until their `maxTimeoutSeconds` after that answer, plus one window.
+  the wallet the payment requirements (all x402's exact scheme on an EVM chain) and the wallet
+  answers, it counts until the longest of their `maxTimeoutSeconds`, plus a minute, after that
+  answer, plus one window, whatever the payee says about it.
 - A refusal from the wallet before it signs gives the amount back. Any other failure, a send
-  included, keeps counting as unknown until you release it.
+  included, keeps counting as unknown until you release it. `npx walletcap holds` lists them,
+  and `npx walletcap release --all-unknown --older-than 24h` gives back the ones you've checked.
+- A free endpoint's one-unit hold is given back unless the payee confirms a payment.
 - Only USDC is counted; a send in any other asset is refused. Amounts are read exactly.
 - The budget file serves one host. Machines can't share a budget through a shared volume:
   SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts.
 - It binds the payments that go through it, so keep the real `awal` out of the agent's reach.
 
-## What the tests check: 16 tests of `walletcap awal` and `walletcap awal-mcp`
+## What the tests check: 20 tests of `walletcap awal` and `walletcap awal-mcp`
 
 The test suite drives both commands against stand-ins for Coinbase's wallet and MCP server.
 Among them:

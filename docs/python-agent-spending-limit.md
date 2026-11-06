@@ -37,8 +37,10 @@ with budget.pay("$12.50", to=payee) as payment:
 - Use `async with budget.pay(...)` in async code.
 - `budget.check("$5")` answers without spending. `budget.status()`, `budget.freeze()`,
   `budget.unfreeze()` and `budget.history()` show and control the budget.
+- `budget.holds()` lists the open payments that still count, and why. A refusal names them.
 - The `walletcap` command (or `python -m walletcap`) has the same commands as `npx walletcap`:
-  `status`, `set`, `freeze`, `unfreeze`, `history` and `release`.
+  `status`, `set`, `freeze`, `unfreeze`, `history`, `holds` and `release`, including
+  `release --all-unknown --older-than 24h`.
 - The x402 guard, the CDP store, the AgentKit guard and the Agentic Wallet wrapper are in the npm
   package. A Python agent can still share their budget: it opens the same file.
 

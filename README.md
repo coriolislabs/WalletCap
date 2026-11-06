@@ -151,7 +151,7 @@ const tx = await budget.pay('$5', async reservation => {
 
 If the payment throws, it may still have left the wallet, so it stays in flight, marked
 unknown in the history. It counts until one window past `settlesBy`, the last moment it could
-still settle, if you pass one; otherwise until you check the chain and run
+still settle (after now), if you pass one; otherwise until you check the chain and run
 `npx walletcap release <id>`. If you know it didn't leave, say so and the amount comes back:
 
 ```js
@@ -187,9 +187,12 @@ const fetchPaid = wrapFetchWithPayment(fetch, client);
 
 - Each payment is checked before it is signed, and reserved once its payload exists and every
   other control has passed.
-- It counts as spent when the server confirms settlement. A payee that answers "payment
-  failed" still holds your signed authorization and could settle it until it expires, so the
-  payment keeps counting until then.
+- It counts as spent when the server confirms settlement, and at least until its authorization
+  expires, plus one window: the confirmation is the payee's own word, and a payee that answers
+  "payment failed" still holds the signed authorization too.
+- A payee may ask for an authorization valid up to an hour (`MAX_PAYMENT_TIMEOUT_SECONDS`, 3600),
+  as Coinbase's CDP spend controls allow. Anything longer is refused before signing, with the
+  reason `timeout`.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of
   the box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
   `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged
@@ -275,11 +278,13 @@ command after `--`.
 - A payment the payee confirms as settled counts for one window. One it doesn't confirm keeps
   counting until you release it: the wallet signs whatever validity the payee asks for, and
   walletcap can't see it. Check the chain, then `npx walletcap release <id>`. The exception: when
-  the caller hands the wallet the payment requirements (`paymentRequirements`, x402's exact
-  scheme on an EVM chain) and the wallet answers, the payment counts until their
-  `maxTimeoutSeconds` after that answer, plus one window.
+  the caller hands the wallet the payment requirements (`paymentRequirements`, all x402's exact
+  scheme on an EVM chain) and the wallet answers, the payment counts until the longest of their
+  `maxTimeoutSeconds`, plus a minute, after that answer, plus one window, whatever the payee
+  says about it.
 - The wallet's own refusal, before it signs, gives the amount back. Any other failure, a send
-  included, keeps counting as unknown until you release it.
+  included, keeps counting as unknown until you release it. A free endpoint's one-unit hold is
+  given back unless the payee confirms a payment.
 - Only USDC is counted; a send in any other asset is refused. Amounts are read exactly: `100.5abc`
   is refused, not read as $100.50.
 - It binds the payments that go through it. The wallet app takes requests from any process of
@@ -324,12 +329,15 @@ $ npx walletcap set --per-day 0.20     # what was spent still counts
 $ npx walletcap freeze                 # every process, every rail, now
 $ npx walletcap unfreeze
 $ npx walletcap history
+$ npx walletcap holds                  # open payments that still count, and why
 $ npx walletcap release <id>           # an in-flight payment you know never left
+$ npx walletcap release --all-unknown --older-than 24h   # every unknown one older than that
 ```
 
 Python ships the same commands as `walletcap`. Amounts are dollars; leave out the `$`
 sign, which your shell would expand. Add `--wallet` when the file holds more than one budget,
-and `--json` for scripts.
+and `--json` for scripts. A refusal names the open payments that take up the room, and
+`budget.holds()` lists them in code.
 
 ## Where the budget lives
 
@@ -347,6 +355,10 @@ The budget is as durable as that file. In a container, put it on a local volume 
 the container, or a redeploy starts a new file. Opening a budget does not create one: a missing
 file refuses every payment. The owner creates it once with `npx walletcap set`; pass
 `create: true` only for a demo or a first-run setup.
+
+0.3 upgrades a 0.2.x file the first time it opens it, and 0.2.x can't open it afterwards, so
+stop every 0.2.x process before upgrading. Budgets that 0.2.x kept under other spellings of one
+wallet become one budget, with the tighter of every limit and every payment.
 
 ## What it doesn't do
 
@@ -381,8 +393,8 @@ file refuses every payment. The owner creates it once with `npx walletcap set`; 
 | `llms.txt` | a summary of the package and links to the docs, for language models |
 
 ```console
-$ cd js && npm install && node --test            # 84 tests
-$ uv run --with pytest pytest -q                 # 130 tests, from the repository root
+$ cd js && npm install && node --test            # 96 tests
+$ uv run --with pytest pytest -q                 # 140 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
 ```

@@ -6,8 +6,9 @@ around its count, its reservations, or its failure modes, we want to know.
 ## Supported versions
 
 The latest **0.3.x** release is supported. The 0.3.0 release fixed ways past
-the cap through unknown outcomes, caller-supplied times and checksummed
-addresses; 0.2.x installs should upgrade before relying on the guard.
+the cap through unknown outcomes, a payee's word that a payment settled,
+caller-supplied times and checksummed addresses; 0.2.x installs should upgrade
+before relying on the guard.
 
 ## Reporting a vulnerability
 

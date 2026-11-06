@@ -26,7 +26,7 @@
 - [Coinbase Agentic Wallet](https://github.com/coriolislabs/WalletCap#coinbase-agentic-wallet-awal-cli-and-mcp-server): the CLI wrapper and the MCP proxy
 - [Coinbase AgentKit](https://github.com/coriolislabs/WalletCap#coinbase-agentkit): `guardAgentKit()`
 - [Coinbase Spend Permissions, on chain](https://github.com/coriolislabs/WalletCap#coinbase-spend-permissions-on-chain): `AccountCapSpender`
-- [The owner's controls](https://github.com/coriolislabs/WalletCap#the-owners-controls): `walletcap status`, `set`, `freeze`, `unfreeze`, `history` and `release`
+- [The owner's controls](https://github.com/coriolislabs/WalletCap#the-owners-controls): `walletcap status`, `set`, `freeze`, `unfreeze`, `history`, `holds` and `release`
 - [What it doesn't do](https://github.com/coriolislabs/WalletCap#what-it-doesnt-do): payments that don't go through it, one file per host, and payments it can't confirm
 
 ## Optional

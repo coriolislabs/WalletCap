@@ -3,45 +3,66 @@
 
 ## 0.3.0 — 2026-11-06
 
-This release fixes ways past walletcap's own cap that two reviewers reproduced, and ways its
-JavaScript and Python packages read the same input differently. It removes public options and
-changes what an error does to a payment, so it is a minor release, not a patch.
+This release fixes ways past walletcap's own cap that reviewers reproduced, and ways its
+JavaScript and Python packages read the same input differently. It removes public options,
+changes what an error does to a payment and upgrades the budget file, so it is a minor release,
+not a patch.
 
 ### Breaking
 
 - An error never settles a payment. When the payment function throws an error not tagged
   `notSent()` (Python: `NotSent`), the payment stays in flight, marked unknown, instead of being
   committed. It counts until one window past its `settlesBy`, or, without one, until its owner
-  releases it with `walletcap release <id>`. `status()` shows it as in flight, not spent. The
-  Agentic Wallet wrapper does the same for a send or x402 payment whose outcome is unknown.
+  releases it. `status()` shows it as in flight, not spent. The Agentic Wallet wrapper does the
+  same for a send or paid x402 payment whose outcome is unknown.
+- A commit never shortens a hold. A payment committed from a reservation with a settle-by time
+  counts until one window past the later of the commit and that time, so a payee's own word that
+  a payment settled can't free the budget while its authorization can still be redeemed.
+- The budget file is schema 2. 0.3 upgrades a 0.2.x file when it first opens it: a budget kept
+  under another spelling of a wallet (checksummed, uppercase, CAIP-10) moves to the lowercase
+  name, merged with any budget there with the tighter of every limit and every payment. 0.2.x
+  refuses a schema 2 file, so stop 0.2.x processes before upgrading.
 - The `clock` option is gone from `openBudget`, `cdpStore` and `SharedBudgetStore`, and from
   Python's `open_budget`, `Budget` and `Ledger`. The ledger reads the system clock. Passing a
   clock is an error.
 - Python's `Ledger` no longer takes `reservation_ttl_seconds`.
-- A payment that went through but couldn't be recorded raises `PaymentNotRecorded`, not
-  `BudgetError`. It is not a subclass of `BudgetError`, and it carries the reservation id
-  (`reservationId`, `reservation_id`) and the cause.
+- A `settlesBy` that isn't after now is refused with a `BudgetError`.
+- Python refuses a naive datetime for `settles_by`.
+- A payment that went through, or may have, but couldn't be recorded raises
+  `PaymentNotRecorded`, not `BudgetError`. It is not a subclass of `BudgetError`, and it carries
+  the reservation id (`reservationId`, `reservation_id`) and the cause.
 - `MAX_AMOUNT` is 10^15 micro-dollars ($1,000,000,000), not 2^63 − 1. A larger amount, cap or
   per-payment limit is refused.
-- Python refuses a naive datetime for `settles_by`.
+- The x402 guard refuses, before signing, a requirement whose `maxTimeoutSeconds` is over 3600
+  (`MAX_PAYMENT_TIMEOUT_SECONDS`), as Coinbase's CDP spend controls do. The refusal's reason is
+  `'timeout'`.
 - `guard(client, { assets })` and the Agentic Wallet wrapper's `assets` refuse an entry that
   changes a built-in asset's decimals, and decimals that aren't an integer from 0 to 18.
 - Amounts and windows take only the digits 0-9, and only ASCII whitespace is trimmed, in both
   languages. `walletcap awal send` refuses an amount with trailing text, an exponent or a
-  separator, and the wrapper refuses a send whose `amountAtomic` isn't plain digits.
-- The ledger names every budget the way `openBudget` does. A budget that 0.2.x stored under a
-  checksummed address through `SharedBudgetStore` or Python's `Ledger` isn't found under that
-  name any more.
+  separator. The wrapper refuses a send whose `amountAtomic` isn't plain digits or that has no
+  recipient, and passes the wallet only `recipient`, `amountAtomic`, `asset` and `chain`.
+- Every ledger method names a budget the way `openBudget` does: an EVM address, bare or CAIP-10,
+  is lowercased after its EIP-55 check.
 
 ### Fixed
 
 - A payment whose function threw was committed, so it counted for one window from the error. A
   transfer whose receipt wait timed out and that was mined a day later let $300 through a $150
   window.
+- A payee could answer "settled" with a made-up hash, keep the authorization and redeem it later:
+  the commit had ended the count after one window. With a 30-day validity, five $0.15
+  authorizations passed a $0.15-a-day cap.
+- The CDP store counted a payment for one window from when CDP recorded it, though CDP signs it
+  after and lets the authorization be redeemed for up to an hour. It now counts until an hour
+  and a minute after the record, plus one window.
 - A `settlesBy` already past was stored as given, so the reservation never counted and a second
-  full cap was reserved. It now counts as now.
+  full cap was reserved.
 - The CDP store recorded a payment at the time in CDP's entry, so a backdated entry had already
   aged out. It records at the ledger's own time.
+- A process that waited for another's write lock dated its payment as much as the wait earlier,
+  so the payment stopped counting that much early. Both ledgers read the time once the lock is
+  held.
 - A process whose clock ran a day ahead saw an empty budget and paid a second full cap.
 - Python's `reservation_ttl_seconds` let a hold lapse while its payment could still settle: $300
   on a $150 cap.
@@ -60,17 +81,28 @@ changes what an error does to a payment, so it is a minor release, not a patch.
 - A float of dollars converted differently in the two languages on about 0.5% of halfway values.
   Both now read the shortest decimal that gives the float back and round it half up.
 - Python rounded a `Decimal` amount at 28 digits before checking it was a whole number of
-  micro-dollars.
+  micro-dollars, and raised `ValueError`, not `BudgetError`, for an input over 4,300 digits.
 
 ### Changed
 
+- `budget.holds()` (Python: `budget.holds()`, returning `Hold`s) and `walletcap holds` list the
+  open payments that still count: id, amount, reason (in flight, refused, unknown), age, and
+  when each stops counting. `walletcap release --all-unknown --older-than <24h|7d|30m>` gives
+  back every payment of unknown outcome older than that, for an owner who has checked the chain.
+- A budget or payment-count refusal names the open payments that take up the room, oldest
+  first, and says how to list and release them.
 - Python's `pay()` takes `settles_by`, as JavaScript's `pay()` takes `settlesBy`. Python's
   `Reservation` and `Ledger` have `annotate()`.
-- The Agentic Wallet wrapper: when the caller hands the wallet the payment requirements (x402's
-  exact scheme on an EVM chain), an unconfirmed payment counts until their `maxTimeoutSeconds`
-  after the wallet answers, plus one window, instead of until it is released. A free endpoint's
-  payment is committed only on a confirmed settlement.
-- `cdpStore()` and `SharedBudgetStore` refuse options they don't take.
+- The Agentic Wallet wrapper:
+  - When the caller hands the wallet the payment requirements, all of them x402's exact scheme on
+    an EVM chain, a payment counts until the longest of their `maxTimeoutSeconds`, plus a minute,
+    after the wallet answers, plus one window, instead of until it is released. That holds for
+    one the payee calls settled too.
+  - A free endpoint's one-unit hold is released unless the payee confirms a payment, so a free
+    endpoint that fails can't use up `maxPayments`.
+  - Every ledger write after the wallet answers raises `PaymentNotRecorded` if it fails.
+- `cdpStore()` and `SharedBudgetStore` refuse options they don't take. The docs ask for CDP
+  1.60.0 or later, whose published source refuses a `maxTimeoutSeconds` over 3600.
 - The docs no longer say machines can share a budget through a shared volume. The budget file
   serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts,
   and multiple hosts need a shared service, which isn't shipped yet.

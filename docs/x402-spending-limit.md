@@ -35,9 +35,11 @@ const response = await fetchPaid('https://api.example.com/paid');
 
 - Each payment is checked before it is signed, and reserved once its payload exists and every
   other control has passed.
-- It counts as spent when the server confirms settlement. A payee that answers "payment failed"
-  still holds your signed authorization and could settle it until it expires, so the payment
-  keeps counting until then.
+- It counts as spent when the server confirms settlement, and at least until its authorization
+  expires, plus one window: the confirmation is the payee's own word, and a payee that answers
+  "payment failed" still holds the signed authorization too.
+- A payee may ask for an authorization valid up to an hour, as Coinbase's CDP spend controls
+  allow. Anything longer is refused before signing.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of the
   box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
   `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged
