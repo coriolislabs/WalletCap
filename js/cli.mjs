@@ -8,7 +8,9 @@ import { parseArgs } from 'node:util';
 import { BudgetError } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { Ledger } from './ledger.mjs';
-import { defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, normalizeWallet, parseLimits, shortWallet } from './money.mjs';
+import {
+  defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, normalizeWallet, parseLimits, shortWallet, trimAscii,
+} from './money.mjs';
 
 const { version } = createRequire(import.meta.url)('./package.json');
 
@@ -61,7 +63,7 @@ const json = value => JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v
 const pathOf = values => resolve(expandHome(values.path ?? defaultBudgetPath()));
 
 const limitsOf = values => {
-  const none = value => (value !== undefined && value.trim().toLowerCase() === 'none' ? null : value);
+  const none = value => (value !== undefined && trimAscii(value).toLowerCase() === 'none' ? null : value);
   return parseLimits({
     perPayment: none(values['per-payment']),
     perHour: values['per-hour'],
@@ -170,7 +172,7 @@ const commands = {
   history(values, path) {
     const budget = open(values, path);
     try {
-      const rows = budget.history({ limit: values.limit ?? 20 });
+      const rows = budget.history({ limit: values.limit === undefined ? 20 : trimAscii(values.limit) });
       if (values.json) return json(rows);
       if (rows.length === 0) return `No payments from ${shortWallet(budget.wallet)} yet.`;
       return rows.map(row => [

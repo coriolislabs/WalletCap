@@ -19,7 +19,7 @@ import { now } from './_clock.mjs';
 import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { SETTLES_BY } from './ledger.mjs';
-import { formatUsd, normalizeWallet } from './money.mjs';
+import { formatUsd, normalizeWallet, trimAscii } from './money.mjs';
 import { assetKey, assetTable, atomicOf, toMicros as atomicToMicros } from './x402.mjs';
 
 /** The wallet's chain names, as CAIP-2 networks. */
@@ -50,6 +50,16 @@ const settled = (reservation, tx) => {
   } catch (error) {
     throw new PaymentNotRecorded(reservation.id, { cause: error });
   }
+};
+
+// The amount the wallet sends is the amount counted: a whole number of atomic units in ASCII
+// digits, passed on to the wallet as walletcap read it ("0x10" or " 5" could read differently there).
+const sendAmount = value => {
+  const text = typeof value === 'bigint' || (typeof value === 'number' && Number.isSafeInteger(value)) ? String(value) : value;
+  if (typeof text !== 'string' || !/^[0-9]+$/.test(text)) {
+    throw new BudgetError(`the send amount ${String(value)} is not a whole number of atomic units`);
+  }
+  return BigInt(text);
 };
 
 const decodeHeader = value => {
@@ -139,15 +149,14 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     if (asset !== 'USDC' || network === undefined) {
       throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset} on ${chain}, so it refuses this send`);
     }
-    let atomic;
-    try { atomic = BigInt(data.amountAtomic); } catch { throw new BudgetError(`the send amount ${JSON.stringify(data?.amountAtomic)} is not an integer`); }
+    const atomic = sendAmount(data?.amountAtomic);
     if (atomic <= 0n) throw new BudgetError('the send amount must be more than $0');
     const reservation = budget.reserve(atomic, {
       rail: 'awal', to: String(data.recipient), note: `send on ${chain}`, details: { network, asset },
     });
     let result;
     try {
-      result = await request('send-transaction', { ...data, asset, chain });
+      result = await request('send-transaction', { ...data, amountAtomic: atomic.toString(), asset, chain });
     } catch (error) {
       failed(reservation, error);
       throw error;
@@ -271,13 +280,25 @@ async function openGuard(env, request, options = {}) {
   return guardAgenticWallet(budget, { request });
 }
 
-// awal's own amount rule for USDC: "$0.05" and "0.05" are dollars; a whole number above 100 is atomic units.
+const AWAL_AMOUNT = /^\$?[ \t\n\v\f\r]*([0-9]+)(?:\.([0-9]+))?$/;
+
+/**
+ * awal's own amount rule for USDC, read exactly: "$0.05" and "0.05" are dollars, and a whole
+ * number above 100 ("50000", "101.0") is atomic units. Anything else is refused: "100.5abc", "1e3",
+ * "1,000", digits other than 0-9, and amounts finer than one atomic unit (0.000001).
+ */
 export function usdcAtomic(amount) {
-  const cleaned = String(amount).replace(/^\$/, '').trim();
-  const value = parseFloat(cleaned);
-  if (Number.isNaN(value) || value <= 0) throw new BudgetError(`Invalid amount: ${amount}. Must be a positive number.`);
-  if (Number.isInteger(value) && value > 100) return Math.floor(value).toString();
-  return Math.floor(value * 1_000_000).toString();
+  const match = AWAL_AMOUNT.exec(trimAscii(String(amount)));
+  if (match === null) {
+    throw new BudgetError(`Invalid amount: ${amount}. Give USDC like 0.05 or $0.05, or a whole number of atomic units above 100.`);
+  }
+  const [, whole, fraction = ''] = match;
+  if (/[^0]/.test(fraction.slice(6))) throw new BudgetError(`Invalid amount: ${amount} is finer than one atomic unit of USDC (0.000001).`);
+  const atomic = !/[^0]/.test(fraction) && BigInt(whole) > 100n
+    ? BigInt(whole)
+    : BigInt(whole) * 1_000_000n + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
+  if (atomic === 0n) throw new BudgetError(`Invalid amount: ${amount}. Must be a positive number.`);
+  return atomic.toString();
 }
 
 const PAY_OPTIONS = {

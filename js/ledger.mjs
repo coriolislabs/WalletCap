@@ -96,10 +96,13 @@ export const checkKeys = (source, known, what) => {
   }
 };
 
+// A bigint, a safe integer, or a string of ASCII digits: nothing else, so '0x10', ' 7 ' and true are refused.
 const wholeNumber = (value, label, { allowZero, max, most }) => {
   let parsed;
-  try { parsed = BigInt(value); } catch { throw new BudgetError(`${label} must be an integer`); }
-  if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new BudgetError(`${label} must be an exact integer`);
+  if (typeof value === 'bigint') parsed = value;
+  else if (typeof value === 'number' && Number.isSafeInteger(value)) parsed = BigInt(value);
+  else if (typeof value === 'string' && /^[0-9]+$/.test(value)) parsed = BigInt(value);
+  else throw new BudgetError(`${label} must be an integer`);
   if (parsed > max || parsed < (allowZero ? 0n : 1n)) {
     throw new BudgetError(`${label} must be a ${allowZero ? 'nonnegative' : 'positive'} integer ${most}`);
   }

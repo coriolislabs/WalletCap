@@ -216,11 +216,27 @@ test("a free endpoint goes through with the wallet's smallest payment cap, and n
   assert.deepEqual([budget.status().spent, budget.status().inFlight], [0n, 0n]);
 });
 
-test("awal's amount rule: dollars, or atomic units above 100", () => {
-  assert.equal(usdcAtomic('$0.05'), '50000');
-  assert.equal(usdcAtomic('0.05'), '50000');
-  assert.equal(usdcAtomic('1'), '1000000');
-  assert.equal(usdcAtomic('50000'), '50000');
+test("awal's amount rule, read exactly: dollars, or a whole number of atomic units above 100", () => {
+  const read = [
+    ['$0.05', '50000'], ['0.05', '50000'], ['1', '1000000'], ['100', '100000000'], ['100.5', '100500000'],
+    ['50000', '50000'], ['101.0', '101'], ['$101', '101'], [' 0.29 ', '290000'], ['0.000001', '1'], ['$ 7', '7000000'],
+  ];
+  for (const [amount, atomic] of read) assert.equal(usdcAtomic(amount), atomic, amount);
+  // 0.2.x used parseFloat: "100.5abc" was $100.50, "1e3" 1000 units, and "0.29" 289999.
+  const refused = ['100.5abc', '1e3', '1,000', '0x10', '-5', '+5', '0', '0.0000001', '', '$', 'Infinity', '\u0661\u0662', '12\u0085', '\u00a05'];
+  for (const amount of refused) assert.throws(() => usdcAtomic(amount), { name: 'BudgetError' }, JSON.stringify(amount));
+});
+
+test('a send amount the wallet could read another way is refused, and the amount counted is the one sent', async () => {
+  const { budget } = newBudget();
+  const w = wallet(() => ({ transactionHash: TX }));
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  for (const amountAtomic of ['0x10', ' 50000', '5e4', '50000.0', 1.5, -1, '-1', '', null]) {
+    await assert.rejects(guard.request('send-transaction', { recipient: PAY_TO, amountAtomic, chain: 'base-sepolia' }), { name: 'BudgetError' }, String(amountAtomic));
+  }
+  await guard.request('send-transaction', { recipient: PAY_TO, amountAtomic: 50000, chain: 'base-sepolia' });
+  assert.deepEqual(w.calls.map(call => call.data.amountAtomic), ['50000']);
+  assert.equal(budget.status().spent, 50_000n);
 });
 
 // Async: the CLI asks this process's payee for its terms, so the test must keep serving meanwhile.

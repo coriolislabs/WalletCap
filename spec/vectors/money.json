@@ -1,0 +1,277 @@
+{
+  "about": "Dollars in, micro-dollars out: what toMicros (JavaScript) and to_micros (Python) must return for each input, or that they must refuse it. Both test suites load this file. A string is read exactly, with only ASCII digits and ASCII whitespace. A number is dollars: the shortest decimal that reads back as the number (String() in JavaScript, repr() in Python), rounded half up to a micro-dollar. The most is 10^15 micro-dollars.",
+  "cases": [
+    {
+      "input": "$12.50",
+      "micros": "12500000"
+    },
+    {
+      "input": "12.50 USDC",
+      "micros": "12500000"
+    },
+    {
+      "input": "12.50 usd",
+      "micros": "12500000"
+    },
+    {
+      "input": "12USDC",
+      "micros": "12000000"
+    },
+    {
+      "input": "$1,000",
+      "micros": "1000000000"
+    },
+    {
+      "input": "$ 12",
+      "micros": "12000000"
+    },
+    {
+      "input": " \t12.5\n",
+      "micros": "12500000",
+      "why": "ASCII whitespace around the amount is trimmed"
+    },
+    {
+      "input": "0.000001",
+      "micros": "1"
+    },
+    {
+      "input": "5.1000000",
+      "micros": "5100000",
+      "why": "zeros past the sixth decimal are fine"
+    },
+    {
+      "input": "$1,000,000,000",
+      "micros": "1000000000000000",
+      "why": "the most a budget can hold"
+    },
+    {
+      "input": "$1,000,000,000.000001",
+      "error": true,
+      "why": "more than the most a budget can hold"
+    },
+    {
+      "input": "100.5abc",
+      "error": true,
+      "why": "trailing text"
+    },
+    {
+      "input": "\u0661\u0662",
+      "error": true,
+      "why": "Arabic-Indic digits: only 0-9 are digits"
+    },
+    {
+      "input": "\uff11\uff12",
+      "error": true,
+      "why": "fullwidth digits"
+    },
+    {
+      "input": "12\u0085",
+      "error": true,
+      "why": "NEL is not ASCII whitespace"
+    },
+    {
+      "input": "\u00a012",
+      "error": true,
+      "why": "a no-break space is not ASCII whitespace"
+    },
+    {
+      "input": "12\u2028",
+      "error": true,
+      "why": "a line separator is not ASCII whitespace"
+    },
+    {
+      "input": "$\u200912",
+      "error": true,
+      "why": "a thin space is not ASCII whitespace"
+    },
+    {
+      "input": "12 u\u017fdc",
+      "error": true,
+      "why": "a long s is not an s"
+    },
+    {
+      "input": "1e3",
+      "error": true,
+      "why": "no exponents in strings"
+    },
+    {
+      "input": "0x10",
+      "error": true,
+      "why": "no hex"
+    },
+    {
+      "input": "-5",
+      "error": true,
+      "why": "no negative amounts"
+    },
+    {
+      "input": "+5",
+      "error": true,
+      "why": "no signs"
+    },
+    {
+      "input": "",
+      "error": true,
+      "why": "empty"
+    },
+    {
+      "input": "$",
+      "error": true,
+      "why": "no digits"
+    },
+    {
+      "input": "1,5",
+      "error": true,
+      "why": "a comma must group thousands"
+    },
+    {
+      "input": "0.0000001",
+      "error": true,
+      "why": "finer than a micro-dollar"
+    },
+    {
+      "input": "12.5 EUR",
+      "error": true,
+      "why": "not dollars"
+    },
+    {
+      "input": 12.5,
+      "micros": "12500000"
+    },
+    {
+      "input": 150,
+      "micros": "150000000"
+    },
+    {
+      "input": 0.30000000000000004,
+      "micros": "300000"
+    },
+    {
+      "input": 0,
+      "micros": "0"
+    },
+    {
+      "input": -0.0,
+      "micros": "0"
+    },
+    {
+      "input": 1000.0,
+      "micros": "1000000000"
+    },
+    {
+      "input": 5e-07,
+      "micros": "1"
+    },
+    {
+      "input": 4.9e-07,
+      "micros": "0"
+    },
+    {
+      "input": 1e-07,
+      "micros": "0"
+    },
+    {
+      "input": 999999999.9999995,
+      "micros": "1000000000000000"
+    },
+    {
+      "input": 1000000000.0,
+      "micros": "1000000000000000"
+    },
+    {
+      "input": 2.0065975,
+      "micros": "2006598",
+      "why": "the reviewers' example: 0.2.x JavaScript gave 2006597, Python 2006598"
+    },
+    {
+      "input": 0.5056605,
+      "micros": "505661",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 0.5193355,
+      "micros": "519336",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 1.0072545,
+      "micros": "1007255",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 8.0065745,
+      "micros": "8006575",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 65.7101405,
+      "micros": "65710141",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 523.9994085,
+      "micros": "523999409",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 8251.7121605,
+      "micros": "8251712161",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 68580.2250235,
+      "micros": "68580225024",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 266180.0986095,
+      "micros": "266180098610",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 8583224.2311835,
+      "micros": "8583224231184",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 16793571.6710145,
+      "micros": "16793571671015",
+      "why": "0.2.x JavaScript rounded this down"
+    },
+    {
+      "input": 1000000000.000001,
+      "error": true,
+      "why": "more than the most a budget can hold"
+    },
+    {
+      "input": 1e+21,
+      "error": true,
+      "why": "more than the most a budget can hold"
+    },
+    {
+      "input": -1,
+      "error": true,
+      "why": "no negative amounts"
+    },
+    {
+      "input": -0.5,
+      "error": true,
+      "why": "no negative amounts"
+    },
+    {
+      "input": true,
+      "error": true,
+      "why": "not an amount"
+    },
+    {
+      "input": null,
+      "error": true,
+      "why": "not an amount"
+    },
+    {
+      "input": {},
+      "error": true,
+      "why": "not an amount"
+    }
+  ]
+}

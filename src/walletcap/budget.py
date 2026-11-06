@@ -255,7 +255,10 @@ class Reservation:
         self._state = "released"
 
     def annotate(self, **fields: Any) -> None:
-        """Note what is known about an open payment, like ``outcome="unknown"``; it keeps counting."""
+        """Note what is known about an open payment, like ``outcome="unknown"``.
+
+        It keeps counting, as before.
+        """
 
         if not self.open:
             return

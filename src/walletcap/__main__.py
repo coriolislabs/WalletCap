@@ -26,6 +26,7 @@ from walletcap.money import (
     format_window,
     normalize_wallet,
     short_wallet,
+    strip_ascii,
 )
 
 _EPILOG = "Amounts are dollars: --per-day 150. Leave out the $ sign, which your shell would expand."
@@ -33,6 +34,15 @@ _EPILOG = "Amounts are dollars: --per-day 150. Leave out the $ sign, which your 
 
 class _Usage(Exception):
     pass
+
+
+def _whole(text: str) -> int:
+    """A whole number in ASCII digits, as the JavaScript CLI reads one."""
+
+    digits = strip_ascii(text)
+    if not digits.isascii() or not digits.isdigit():
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
+    return int(digits)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -58,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--cap")
     parser.add_argument("--window", help="24h, 7d, 30m")
     parser.add_argument("--max-payments", help="most payments in one window, or none")
-    parser.add_argument("--limit", type=int, default=20, help="how many payments history shows")
+    parser.add_argument("--limit", type=_whole, default=20, help="how many payments history shows")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
@@ -152,13 +162,14 @@ def _set(args: argparse.Namespace, path: Path) -> str:
     def none(value: str | None) -> object:
         if value is None:
             return UNSET
-        return None if value.strip().lower() == "none" else value
+        return None if strip_ascii(value).lower() == "none" else value
 
     max_payments = none(args.max_payments)
     if isinstance(max_payments, str):
-        if not max_payments.strip().isdigit():
+        count = strip_ascii(max_payments)
+        if not count.isascii() or not count.isdigit():
             raise BudgetError("--max-payments must be a whole number of payments, or none")
-        max_payments = int(max_payments)
+        max_payments = int(count)
     limits = _limits(
         per_payment=none(args.per_payment),
         per_hour=args.per_hour,

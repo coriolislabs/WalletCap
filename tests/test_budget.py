@@ -360,6 +360,18 @@ def test_an_owner_can_release_a_payment_whose_outcome_is_unknown(tmp_path: Path)
     assert budget.status().in_flight == 0
 
 
+def test_the_python_cli_reads_counts_in_ascii_digits_only(tmp_path: Path) -> None:
+    path = tmp_path / "counts.sqlite"
+    # 0.2.x read Arabic-Indic digits as a number: --max-payments ١٢ was 12.
+    refused = _cli(path, "set", "--wallet", WALLET, "--per-day", "150", "--max-payments", "١٢")
+    assert refused.returncode == 1
+    assert "whole number" in refused.stderr
+    created = _cli(path, "set", "--wallet", WALLET, "--per-day", "150", "--max-payments", " 12 ")
+    assert created.returncode == 0, created.stderr
+    assert _cli(path, "history", "--limit", "١٢").returncode == 2
+    assert _cli(path, "history", "--limit", "12").returncode == 0
+
+
 @needs_node
 def test_python_and_javascript_spend_from_one_budget(tmp_path: Path) -> None:
     assert NODE is not None

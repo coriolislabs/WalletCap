@@ -211,7 +211,10 @@ def _integer(value: object, label: str, *, allow_zero: bool = False) -> int:
 
 
 def _expiry(settles_by_ms: int, now: int, window_ms: int) -> int:
-    """Counted as a payment settled at the later of settles_by_ms and now: through it plus a window."""
+    """Counted as a payment settled at the later of settles_by_ms and now would be.
+
+    That is, through that moment plus one window.
+    """
 
     return min(max(settles_by_ms, now) + window_ms + 1, MAX_INTEGER)
 
