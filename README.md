@@ -37,6 +37,25 @@ with budget.pay("$12.50"):
 `npm install walletcap` (Node 22.13+) · `pip install walletcap` (Python 3.11+) ·
 no dependencies · Apache-2.0
 
+## Crash-test a spend limit
+
+`crash-test/` puts Coinbase CDP's x402 spend controls, set as Coinbase's README shows, through
+four events, then puts walletcap through the same ones. It runs offline in under ten seconds and
+sends nothing.
+
+```console
+$ cd crash-test && npm install && npm start
+
+                                      CDP's controls                     walletcap
+restart, then pay again               $300 signed · $150 over            $150 signed · $0 over
+10 replicas                           $1,500 signed · $1,350 over        $150 signed · $0 over
+10 replicas, shared store 1 ms away   $350 signed · $200 over            $150 signed · $0 over
+payee asks for EURC, not USDC         1,000 EURC signed, counted as $0   refused before signing
+```
+
+Every agent is held to $50 a payment and $150 in any 24 hours. The shared-store row varies from
+run to run. [crash-test/README.md](crash-test/README.md) says exactly what runs.
+
 ## Try it without a wallet
 
 Two runnable demos use a fake payee and a temporary file: no wallet, chain, keys or
@@ -298,6 +317,7 @@ only for a demo or a first-run setup.
 | `js/` | the npm package `walletcap`: the budget, the x402 guard, the CDP store, the CLI, and the Agentic Wallet CLI wrapper and MCP proxy |
 | `src/walletcap/` | the PyPI package `walletcap`, on the same file format |
 | `solidity/` | `AccountCapSpender`, the on-chain cap for Coinbase Spend Permissions |
+| `crash-test/` | the crash test: CDP's spend controls and walletcap through the same events, in dollars |
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
 
 ```console
