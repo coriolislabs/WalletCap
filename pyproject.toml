@@ -2,13 +2,25 @@
 [project]
 name = "walletcap"
 version = "0.2.3"
-description = "One spend budget per wallet for AI agents: counted across every process, replica, key, permission and payment rail."
+description = "Spend limits for AI agent wallets: a per-payment cap and rolling 24-hour budget that holds across restarts, kept in a SQLite file every process and the npm package share."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Coriolis Labs Inc." }]
-keywords = ["ai-agents", "agent-payments", "x402", "spend-limit", "budget", "usdc", "stablecoin", "guardrails"]
+keywords = [
+    "ai-agents",
+    "ai-agent",
+    "agent-wallet",
+    "agent-payments",
+    "spending-limit",
+    "spend-limit",
+    "budget",
+    "x402",
+    "usdc",
+    "stablecoin",
+    "guardrails",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
