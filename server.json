@@ -1,0 +1,53 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.coriolislabs/walletcap",
+  "title": "walletcap for Coinbase payments MCP",
+  "description": "Spend limits for Coinbase's payments MCP: a per-payment cap and rolling 24h USDC budget per wallet",
+  "websiteUrl": "https://coriolislabs.github.io/WalletCap/coinbase-agentic-wallet-budget/",
+  "repository": {
+    "url": "https://github.com/coriolislabs/WalletCap",
+    "source": "github",
+    "id": "1443260841",
+    "subfolder": "js"
+  },
+  "version": "0.2.4",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "walletcap",
+      "version": "0.2.4",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "awal-mcp"
+        },
+        {
+          "type": "named",
+          "name": "--wallet",
+          "description": "The agent wallet's address. Create its budget first: npx walletcap set --wallet <address> --per-payment <dollars> --per-day <dollars>",
+          "isRequired": true,
+          "format": "string",
+          "placeholder": "0xYourAgentWallet"
+        },
+        {
+          "type": "named",
+          "name": "--path",
+          "description": "The budget file, when it isn't the default per-user file",
+          "format": "filepath"
+        },
+        {
+          "type": "named",
+          "name": "--allow-tool",
+          "description": "Let one more of the server's tools through, uncounted",
+          "format": "string",
+          "isRepeated": true
+        }
+      ]
+    }
+  ]
+}
