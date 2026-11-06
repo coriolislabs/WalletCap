@@ -258,6 +258,24 @@ def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
         ledger.reserve("agent", 1)
 
 
+def test_a_commit_never_shortens_a_hold(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
+    # A payee can say a payment settled at once and keep an authorization valid two days.
+    settles_by_ms = int(clock.at * 1000) + 2 * DAY * 1000
+    for spend_id in [ledger.reserve("agent", 50, settles_by_ms=settles_by_ms) for _ in range(3)]:
+        ledger.commit(spend_id)
+    clock.at += DAY + 1
+    assert ledger.status("agent").spent == 150
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+    clock.at += 2 * DAY - 1  # the settle-by time plus one window
+    assert ledger.status("agent").spent == 150
+    assert [spend.counting for spend in ledger.history("agent")] == [True, True, True]
+    clock.at += 0.001
+    assert ledger.status("agent").spent == 0
+    _pay(ledger)
+
+
 def test_a_checksummed_address_names_the_one_lowercase_budget(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path / "budget.sqlite")
     lower = "0xd797ead28c38575fdf4fc523866287372340ca02"

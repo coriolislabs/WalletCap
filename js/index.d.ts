@@ -18,7 +18,13 @@ export type Dollars = string | number | bigint;
 /** A rolling window: "24h", "7d", "30m", "day", or milliseconds. */
 export type Window = string | number | bigint;
 
-export type RefusalReason = 'budget' | 'per_payment' | 'uses' | 'revoked' | 'asset';
+export type RefusalReason = 'budget' | 'per_payment' | 'uses' | 'revoked' | 'asset' | 'timeout';
+
+/**
+ * The longest validity, in seconds, guard() lets a payee ask for (3600, an hour, as CDP's spend
+ * controls allow). A requirement asking for more is refused with reason 'timeout' before signing.
+ */
+export declare const MAX_PAYMENT_TIMEOUT_SECONDS: number;
 
 export declare class BudgetError extends Error {}
 
@@ -98,7 +104,10 @@ export declare class Reservation {
   /** Micro-dollars. */
   readonly amount: bigint;
   readonly open: boolean;
-  /** The payment settled: it counts for one rolling window from now. */
+  /**
+   * The payment settled: it counts for one rolling window from now, and, with a settlesBy, at
+   * least until one window past it. A commit never shortens a hold.
+   */
   commit(result?: { tx?: string; outcome?: string; error?: string }): void;
   /** The payment never left the wallet: give its amount back. */
   release(): void;

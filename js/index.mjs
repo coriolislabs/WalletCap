@@ -17,11 +17,11 @@ import {
   defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
   normalizeWallet, parseLimits, shortWallet, toMicros,
 } from './money.mjs';
-import { guardX402ActionProvider, guardX402Client, USD_ASSETS } from './x402.mjs';
+import { guardX402ActionProvider, guardX402Client, MAX_PAYMENT_TIMEOUT_SECONDS, USD_ASSETS } from './x402.mjs';
 
 export {
-  BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, notSent, PaymentNotRecorded,
-  SCHEMA_VERSION, SharedBudgetStore, toMicros, USD_ASSETS,
+  BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, MAX_PAYMENT_TIMEOUT_SECONDS, notSent,
+  PaymentNotRecorded, SCHEMA_VERSION, SharedBudgetStore, toMicros, USD_ASSETS,
 };
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
@@ -100,7 +100,10 @@ export class Reservation {
 
   get open() { return this.#state === 'open'; }
 
-  /** The payment settled. It counts for one rolling window from now. */
+  /**
+   * The payment settled. It counts for one rolling window from now, and, with a
+   * settlesBy, at least until one window past it: a commit never shortens a hold.
+   */
   commit({ tx, outcome, error } = {}) {
     if (!this.open) throw new BudgetError(`reservation ${this.#id} is already ${this.#state}`);
     const info = { ...this.#info, ...(tx ? { tx } : {}), ...(outcome ? { outcome } : {}), ...(error ? { error } : {}) };

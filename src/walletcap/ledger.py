@@ -99,13 +99,17 @@ CREATE TABLE IF NOT EXISTS spend (
 );
 CREATE INDEX IF NOT EXISTS spend_by_instrument ON spend (instrument, at_ms);
 """
-# A settled payment counts while its settlement is inside the budget's rolling
-# window; a reservation counts until it is committed or released, or its expiry
-# passes, whatever the window. The JavaScript ledger uses the same rule.
+# The counting rule, the same in JavaScript. A settled payment counts while its
+# settlement is inside the budget's rolling window, and also until its expiry,
+# if the reservation it settled had one: a commit never shortens a hold, so a
+# payee's word that a payment settled can't free the budget while its signed
+# authorization can still be redeemed. A reservation counts until it is
+# committed or released, or its expiry passes, whatever the window.
 _COUNTED = (
     "FROM spend JOIN budgets ON budgets.instrument = spend.instrument "
     "WHERE spend.instrument = ? AND ("
-    "(spend.status = 'committed' AND spend.at_ms + budgets.window_ms >= ?) "
+    "(spend.status = 'committed' "
+    "AND (spend.at_ms + budgets.window_ms >= ? OR spend.expires_at_ms > ?)) "
     "OR (spend.status = 'reserved' "
     "AND (spend.expires_at_ms IS NULL OR spend.expires_at_ms > ?)))"
 )
@@ -359,7 +363,7 @@ class Ledger:
     def _counted(connection: sqlite3.Connection, instrument: str, now: int) -> tuple[int, int]:
         total, uses = connection.execute(
             f"SELECT COALESCE(SUM(spend.amount), 0), COUNT(spend.spend_id) {_COUNTED}",  # noqa: S608
-            (instrument, now, now),
+            (instrument, now, now, now),
         ).fetchone()
         return int(total), int(uses)
 
@@ -650,8 +654,12 @@ class Ledger:
         """Record a reservation's payment as settled, now.
 
         It counts for one rolling window from now, however long the payment
-        took. A reservation whose settle-by time has passed is still recorded:
-        the money moved, and leaving it out would under-count.
+        took, and, if the reservation had a settle-by time, at least until one
+        window past that time: a commit never shortens a hold, because the word
+        that a payment settled may come from the payee, who could still redeem
+        the authorization later. A reservation whose settle-by time has passed
+        is still recorded: the money moved, and leaving it out would
+        under-count.
         """
 
         _identifier(spend_id, "spend_id")
@@ -667,7 +675,7 @@ class Ledger:
                 raise BudgetError("reservation is already committed")
             connection.execute(
                 "UPDATE spend SET status = 'committed', at_ms = MAX(at_ms, ?), "
-                "expires_at_ms = NULL, reference = COALESCE(?, reference) WHERE spend_id = ?",
+                "reference = COALESCE(?, reference) WHERE spend_id = ?",
                 (now, reference, spend_id),
             )
 
@@ -731,7 +739,7 @@ class Ledger:
                 for row in connection.execute(
                     "SELECT spend.status, COALESCE(SUM(spend.amount), 0), "  # noqa: S608
                     f"COUNT(spend.spend_id) {_COUNTED} GROUP BY spend.status",
-                    (instrument, now, now),
+                    (instrument, now, now, now),
                 )
             }
         spent, committed_uses = sums.get("committed", (0, 0))
@@ -779,7 +787,8 @@ class Ledger:
     @staticmethod
     def _spend(row: sqlite3.Row, window_ms: int, now: int) -> Spend:
         if row["status"] == "committed":
-            counting = row["at_ms"] + window_ms >= now
+            expires = row["expires_at_ms"]
+            counting = row["at_ms"] + window_ms >= now or (expires is not None and expires > now)
         else:
             counting = row["expires_at_ms"] is None or row["expires_at_ms"] > now
         return Spend(
@@ -807,7 +816,7 @@ class Ledger:
             window = self._budget_row(connection, instrument)["window_ms"]
             deleted: int = connection.execute(
                 "DELETE FROM spend WHERE instrument = ? AND status = 'committed' "
-                "AND at_ms + ? < ?",
-                (instrument, window, now),
+                "AND at_ms + ? < ? AND (expires_at_ms IS NULL OR expires_at_ms <= ?)",
+                (instrument, window, now, now),
             ).rowcount
         return deleted

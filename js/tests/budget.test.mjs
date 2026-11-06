@@ -151,6 +151,22 @@ test('pay() returns what the payment returns and keeps its transaction hash', as
   assert.deepEqual([entry.status, entry.amount, entry.tx, entry.to, entry.note], ['settled', 5_000_000n, TX, '0x4165cb72De51A67aac32DC33197d779552205efD', 'one API call']);
 });
 
+test("a commit never shortens a hold: it counts until one window past the hold's settle-by time", async () => {
+  const { budget, clock } = fixture({ perDay: '$150' });
+  // A payee can answer "settled" at once and keep a signed authorization that is valid two days.
+  const held = budget.reserve('$150', { settlesBy: new Date(clock.now + 2 * DAY) });
+  held.commit({ tx: TX });
+  clock.now += DAY + 1;
+  assert.equal(budget.status().spent, 150_000_000n);
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+  clock.now += 2 * DAY - 1; // the settle-by time plus one window
+  await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
+  assert.deepEqual([budget.history()[0].status, budget.history()[0].counting], ['settled', true]);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+  await paid(budget, '$150');
+});
+
 test('a payment that went through but cannot be recorded throws PaymentNotRecorded, not a BudgetError', async () => {
   const { path, budget } = fixture({ perDay: '$150' });
   let id;

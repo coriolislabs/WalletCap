@@ -177,6 +177,21 @@ test('an unconfirmed x402 payment on terms handed to the wallet counts until the
   assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'unknown', 'expired']);
 });
 
+test("the payee's word that a payment on handed-in terms settled doesn't end its hold early", async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  // A made-up hash: the payee says settled and keeps the authorization, valid an hour.
+  const guard = guardAgenticWallet(budget, { request: wallet().request });
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [requirement('50000', 3600)] });
+  assert.equal(budget.history()[0].status, 'settled');
+  clock.now += DAY + 1;
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 3_600_000 - 1; // an hour after the wallet answered, plus one window
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+});
+
 test('a send that went through but cannot be recorded throws PaymentNotRecorded', async () => {
   const { budget, path } = newBudget();
   const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return { transactionHash: TX }; }).request });

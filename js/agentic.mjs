@@ -218,14 +218,14 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       failed(reservation, error);
       throw error;
     }
-    const answer = paymentResponseOf(result);
-    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) {
-      settled(reservation, answer.transaction);
-      return result;
-    }
-    reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
+    // The wallet has answered, so it has signed if it ever will. With the terms handed to it, the
+    // hold learns when the authorization expires, before anything else: a commit never shortens
+    // a hold, so the payee's own word that the payment settled can't free the budget early.
     const settlesBy = settlesByOf(candidates, handed);
     if (settlesBy !== null) reservation[SETTLES_BY](settlesBy);
+    const answer = paymentResponseOf(result);
+    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
+    else reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
     return result;
   }
 

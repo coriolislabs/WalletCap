@@ -232,7 +232,11 @@ class Reservation:
     def commit(
         self, *, tx: str | None = None, outcome: str | None = None, error: str | None = None
     ) -> None:
-        """The payment settled. It counts for one rolling window from now."""
+        """The payment settled. It counts for one rolling window from now.
+
+        With a ``settles_by``, it counts at least until one window past it: a
+        commit never shortens a hold.
+        """
 
         if not self.open:
             raise BudgetError(f"reservation {self._id} is already {self._state}")

@@ -18,6 +18,23 @@ const SLOT = Symbol('walletcap/x402-payment');
 const FINGERPRINTS_KEPT = 10_000;
 
 /**
+ * The longest validity, in seconds, the guard lets a payee ask for: an hour, the
+ * ceiling Coinbase's CDP spend controls enforce too (MAX_PAYMENT_TIMEOUT_SECONDS
+ * in @coinbase/cdp-sdk). x402's clients sign an authorization that can be
+ * redeemed until maxTimeoutSeconds after signing, so a payee asking for days
+ * could hold authorizations and redeem them all later. A requirement asking for
+ * more is refused before anything is signed.
+ */
+export const MAX_PAYMENT_TIMEOUT_SECONDS = 3600;
+
+const timeoutRefusal = requirements => {
+  const seconds = requirements.maxTimeoutSeconds;
+  if (Number.isSafeInteger(seconds) && seconds > 0 && seconds <= MAX_PAYMENT_TIMEOUT_SECONDS) return null;
+  return new BudgetRefused('timeout', `the payee asks for an authorization it could redeem for ${String(seconds)} seconds; `
+    + `walletcap signs for at most ${MAX_PAYMENT_TIMEOUT_SECONDS} seconds (an hour), as Coinbase's CDP spend controls do`);
+};
+
+/**
  * USD stablecoins the budget counts at face value, by CAIP-2 network. The EVM
  * entries are from x402 2.28.0's own DEFAULT_ASSETS, plus Circle's native USDC
  * on Optimism and Solana. Add other USD-pegged stablecoins with
@@ -177,6 +194,8 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     // An early refusal, before anything is signed. The reservation that binds comes after.
     const check = budget.check(amount);
     if (!check.ok) throw new BudgetRefused(check.reason, check.message);
+    const tooLong = timeoutRefusal(context.selectedRequirements);
+    if (tooLong !== null) throw tooLong;
     return undefined;
   });
 

@@ -45,11 +45,14 @@ CREATE TABLE IF NOT EXISTS spend (
 );
 CREATE INDEX IF NOT EXISTS spend_by_instrument ON spend (instrument, at_ms);
 `;
-// The counting rule, the same in Python: a settled payment counts while its
-// settlement is inside the budget's rolling window, and a reservation counts
-// until it is committed or released, or its expiry passes, whatever the window.
+// The counting rule, the same in Python. A settled payment counts while its
+// settlement is inside the budget's rolling window, and also until its expiry,
+// if the reservation it settled had one: a commit never shortens a hold, so a
+// payee's word that a payment settled can't free the budget while its signed
+// authorization can still be redeemed. A reservation counts until it is
+// committed or released, or its expiry passes, whatever the window.
 const COUNTED = 'FROM spend JOIN budgets ON budgets.instrument = spend.instrument '
-  + "WHERE spend.instrument = ? AND ((spend.status = 'committed' AND spend.at_ms + budgets.window_ms >= ?) "
+  + "WHERE spend.instrument = ? AND ((spend.status = 'committed' AND (spend.at_ms + budgets.window_ms >= ? OR spend.expires_at_ms > ?)) "
   + "OR (spend.status = 'reserved' AND (spend.expires_at_ms IS NULL OR spend.expires_at_ms > ?)))";
 
 // node:sqlite prints an ExperimentalWarning when it loads (Node 22 and 24).
@@ -236,7 +239,7 @@ export class Ledger {
 
   #counted(instrument, now) {
     return this.statement(`SELECT COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses ${COUNTED}`)
-      .get(instrument, now, now);
+      .get(instrument, now, now, now);
   }
 
   #insert(instrument, unit, { cap, windowMs, perPayment = null, maxUses = null }) {
@@ -372,8 +375,8 @@ export class Ledger {
   countedRows(name, now = this.now()) {
     const instrument = instrumentName(name);
     return this.read(() => this.statement(
-      `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms ${COUNTED}`,
-    ).all(instrument, now, now));
+      `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms, spend.expires_at_ms ${COUNTED}`,
+    ).all(instrument, now, now, now));
   }
 
   /** Whether `amount` would be refused right now, without reserving it. */
@@ -437,7 +440,12 @@ export class Ledger {
     });
   }
 
-  /** The payment settled: it counts for one rolling window from now. */
+  /**
+   * The payment settled: it counts for one rolling window from now, and, if the
+   * reservation had a settle-by time, at least until one window past that time.
+   * A commit never shortens a hold: the word that a payment settled may come
+   * from the payee, who could still redeem the authorization later.
+   */
   commit(spendId, { reference } = {}) {
     identifier(spendId, 'spend_id');
     const text = referenceText(reference);
@@ -446,7 +454,7 @@ export class Ledger {
       const row = this.statement('SELECT status FROM spend WHERE spend_id = ?').get(spendId);
       if (row === undefined) throw new BudgetError('unknown reservation');
       if (row.status === 'committed') throw new BudgetError('reservation is already committed');
-      this.statement("UPDATE spend SET status = 'committed', at_ms = MAX(at_ms, ?), expires_at_ms = NULL, "
+      this.statement("UPDATE spend SET status = 'committed', at_ms = MAX(at_ms, ?), "
         + 'reference = COALESCE(?, reference) WHERE spend_id = ?').run(now, text, spendId);
     });
   }
@@ -541,7 +549,7 @@ export class Ledger {
       const row = this.#required(instrument);
       const sums = Object.fromEntries(this.statement(
         `SELECT spend.status AS status, COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses ${COUNTED} GROUP BY spend.status`,
-      ).all(instrument, now, now).map(sum => [sum.status, sum]));
+      ).all(instrument, now, now, now).map(sum => [sum.status, sum]));
       const spent = sums.committed?.total ?? 0n;
       const reserved = sums.reserved?.total ?? 0n;
       const revoked = row.revoked_at_ms !== null;
@@ -574,7 +582,7 @@ export class Ledger {
         .map(spend => ({
           ...spend,
           counting: spend.status === 'committed'
-            ? spend.at_ms + row.window_ms >= now
+            ? spend.at_ms + row.window_ms >= now || (spend.expires_at_ms !== null && spend.expires_at_ms > now)
             : spend.expires_at_ms === null || spend.expires_at_ms > now,
         }));
     });
@@ -594,8 +602,9 @@ export class Ledger {
     this.transaction(() => {
       const { window_ms: window } = this.#required(instrument);
       // Reservations stay until committed or released: a lapsed one may still settle.
-      this.statement("DELETE FROM spend WHERE instrument = ? AND status = 'committed' AND at_ms < ? AND at_ms + ? < ?")
-        .run(instrument, cutoff, window, now);
+      this.statement("DELETE FROM spend WHERE instrument = ? AND status = 'committed' AND at_ms < ? AND at_ms + ? < ? "
+        + 'AND (expires_at_ms IS NULL OR expires_at_ms <= ?)')
+        .run(instrument, cutoff, window, now, now);
     });
   }
 

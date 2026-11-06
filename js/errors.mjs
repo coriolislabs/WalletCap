@@ -11,8 +11,9 @@ export class BudgetError extends Error {
 
 /**
  * The budget refused a payment. `reason` is one of 'budget', 'per_payment',
- * 'uses', 'revoked' (the budget is frozen) or 'asset' (an x402 asset the
- * budget cannot price), the same codes the Python ledger uses.
+ * 'uses' and 'revoked' (the budget is frozen), the codes the Python ledger uses
+ * too, or, from the x402 guard, 'asset' (an asset the budget cannot price) or
+ * 'timeout' (the payee asks for an authorization valid longer than an hour).
  */
 export class BudgetRefused extends BudgetError {
   constructor(reason, message) {

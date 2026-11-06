@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
-import { BudgetError, BudgetRefused, openBudget, PaymentNotRecorded } from '../index.mjs';
+import { BudgetError, BudgetRefused, MAX_PAYMENT_TIMEOUT_SECONDS, openBudget, PaymentNotRecorded } from '../index.mjs';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-x402-'));
@@ -147,4 +147,30 @@ test('a settlement the guard cannot record throws PaymentNotRecorded, and the pa
     error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError),
   );
   assert.equal(openBudget({ wallet: kit.account.address, path }).status().inFlight, 50_000n);
+});
+
+test("a payee's word that a payment settled can't free the budget while the authorization is redeemable", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { budget, client, clock } = setup({ perDay: '$0.15' });
+  // The payee answers "settled" with a made-up hash and keeps the authorization, asking for the
+  // longest validity walletcap signs: it could redeem it for an hour yet.
+  const payload = await client.createPaymentPayload(kit.required(150_000, { maxTimeoutSeconds: MAX_PAYMENT_TIMEOUT_SECONDS }));
+  const fake = { success: true, transaction: `0x${'ee'.repeat(32)}`, network: NETWORK };
+  await client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: fake });
+  const validBefore = Number(payload.payload.authorization.validBefore) * 1000;
+  clock.now += DAY + 1;
+  await assert.rejects(client.createPaymentPayload(kit.required(1)), refusedFor('budget'));
+  clock.now = validBefore + DAY;
+  assert.equal(budget.status().spent, 150_000n);
+  clock.now += 1;
+  assert.equal(budget.check('$0.15').ok, true);
+});
+
+test('an authorization valid longer than an hour is refused before it is signed', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { budget, client } = setup();
+  // 0.2.x signed whatever validity the payee asked for: here, 30 days to redeem it.
+  await assert.rejects(client.createPaymentPayload(kit.required(10_000, { maxTimeoutSeconds: 30 * 86_400 })), refusedFor('timeout'));
+  await assert.rejects(client.createPaymentPayload(kit.required(10_000, { maxTimeoutSeconds: MAX_PAYMENT_TIMEOUT_SECONDS + 1 })), refusedFor('timeout'));
+  assert.equal(budget.status().payments, 0n);
+  await client.createPaymentPayload(kit.required(10_000, { maxTimeoutSeconds: MAX_PAYMENT_TIMEOUT_SECONDS }));
+  assert.equal(budget.status().inFlight, 10_000n);
 });

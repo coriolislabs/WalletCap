@@ -77,6 +77,12 @@ export class SharedBudgetStore {
 
   async load() {
     const now = this.#ledger.now();
+    const { window_ms: windowMs } = this.#ledger.budget(this.#instrument) ?? {};
+    // A settled payment that still counts past its window (its reservation's expiry) is dated
+    // to the moment it counts from, so CDP's own window check keeps it while walletcap does.
+    const countsFrom = row => (row.expires_at_ms !== null && windowMs !== undefined && row.expires_at_ms - windowMs - 1n > row.at_ms
+      ? row.expires_at_ms - windowMs - 1n
+      : row.at_ms);
     return this.#ledger.countedRows(this.#instrument, now).map(row => {
       const own = parseReference(row.reference);
       // A CDP entry carries atomicAmount. 0.2.0 wrote those on rail 'x402'; accept
@@ -89,7 +95,7 @@ export class SharedBudgetStore {
       if (atomic !== null) {
         // A payment the payee refused stays open, and counts as of now for as long as it does. A
         // settled one is dated by the ledger, not by the time CDP put in its entry.
-        const at = row.status === 'reserved' ? Number(now) : Number(row.at_ms);
+        const at = row.status === 'reserved' ? Number(now) : Number(countsFrom(row));
         return { atomicAmount: atomic, asset: this.#asset, network: own.network, payTo: own.payTo, at };
       }
       // Spend from another rail (or another asset) counts in this asset's units, rounded up.
@@ -100,7 +106,7 @@ export class SharedBudgetStore {
         payTo: `ledger:${row.spend_id}`,
         // The SDK drops an entry older than its own window; a reservation still
         // open counts as of now, however long ago it was taken.
-        at: row.status === 'reserved' ? Number(now) : Number(row.at_ms),
+        at: row.status === 'reserved' ? Number(now) : Number(countsFrom(row)),
       };
     });
   }
