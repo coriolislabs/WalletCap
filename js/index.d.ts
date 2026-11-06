@@ -45,7 +45,7 @@ export interface BudgetOptions extends Limits {
   wallet: string;
   /** The budget file. Defaults to $WALLETCAP_PATH, else the per-user state directory. */
   path?: string;
-  /** Create the file and the wallet's budget if missing (default true). With false, only an owner's `set` creates them. */
+  /** Create the file and the wallet's budget if missing (default false: only an owner's `walletcap set` creates them). Pass true only for a demo or a first-run setup. */
   create?: boolean;
   /** Milliseconds since the epoch. Defaults to Date.now. */
   clock?: () => number;
