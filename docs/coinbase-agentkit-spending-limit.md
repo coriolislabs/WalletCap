@@ -34,7 +34,7 @@ const x402 = budget.guardAgentKit(new X402ActionProvider());
 - The budget is the same one every other process and rail spends from: see
   [x402](x402-spending-limit.md) and [Python](python-agent-spending-limit.md).
 
-## Crash test: AgentKit signs $1.00, walletcap at 2¢ a payment signs $0
+## Crash test: AgentKit signs $1.00, walletcap at 2¢ a payment signs the approved 1¢
 
 The AgentKit row is opt-in because AgentKit installs about 1.3 GB:
 
@@ -48,13 +48,15 @@ mainnet, to another address, first.
 | Control | Result |
 |---|---|
 | AgentKit 0.10.4 | signed $1.00 on Base mainnet to the first-listed address, valid 4 days; reported $0.01 on Base Sepolia |
-| walletcap, 2¢ a payment | refused before signing |
+| walletcap, 2¢ a payment | signed $0.01 on Base Sepolia to the merchant |
 
-CI runs this row on every pull request and checks it. On `main` on 6 November 2026 the check
-printed:
+walletcap passes over the $1.00, which the merchant asks to be valid 4 days: it signs only terms
+valid an hour or less. It pays the 1¢ offer the agent approved.
+
+CI runs this row on every pull request and checks it. For 0.3.0 the check prints:
 
 ```text
-AgentKit 0.10.4: signed $1.00 on Base mainnet, reported $0.01 on Base Sepolia; walletcap refused.
+AgentKit 0.10.4: signed $1.00 on Base mainnet, reported $0.01 on Base Sepolia; walletcap signed the $0.01 on Base Sepolia.
 ```
 
 ## Links

@@ -122,7 +122,9 @@ not a patch.
   serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts,
   and multiple hosts need a shared service, which isn't shipped yet.
 - `spec/vectors/money.json` holds the amounts both test suites must read the same way, or refuse.
-- `walletcap-crash-test` 0.3.1 depends on walletcap `^0.3.0`.
+- `walletcap-crash-test` 0.3.1 depends on walletcap `^0.3.0`. In its AgentKit row, walletcap now
+  passes over the merchant's first-listed $1.00, valid 4 days, and signs the 1¢ offer the agent
+  approved, where it refused the payment before.
 
 ## 0.2.4 — 2026-11-06
 

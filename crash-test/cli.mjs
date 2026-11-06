@@ -143,7 +143,9 @@ function agentkitReport(row) {
   }
   const signed = row.agentkit.received.map(p => `signed ${where(p)} to ${p.toStranger ? 'the first-listed address' : 'the merchant'}, valid ${Math.round(p.validForSeconds / 86_400)} days`);
   const reported = row.agentkit.reported ? `; reported ${where(row.agentkit.reported)}` : '';
-  const guarded = row.walletcap.received.length === 0 ? 'refused before signing' : row.walletcap.received.map(p => `signed ${where(p)}`).join(', ');
+  const guarded = row.walletcap.received.length === 0
+    ? 'refused before signing'
+    : row.walletcap.received.map(p => `signed ${where(p)} to ${p.toStranger ? 'the first-listed address' : 'the merchant'}`).join(', ');
   return [
     `Coinbase AgentKit ${row.version}: the agent approves the merchant's 1¢ offer on Base Sepolia; the merchant`,
     'lists $1.00 on Base mainnet, to another address, first.',
@@ -218,10 +220,16 @@ export function report(run) {
   ].join('\n');
 }
 
-/** Whether walletcap held: its guard, CDP's controls on its cdpStore, AccountCapSpender and the AgentKit guard. */
+// The AgentKit row's limit: 2¢ a payment in USDC's atomic units (agentkit-agent.mjs).
+const AGENTKIT_PER_PAYMENT = 20_000n;
+
+/**
+ * Whether walletcap held: its guard, CDP's controls on its cdpStore, AccountCapSpender and the
+ * AgentKit guard, which may sign only within 2¢ and only to the merchant the agent approved.
+ */
 export const held = run => run.scenarios.every(s => [s.walletcap, s.cdpStore].every(r => r.over === 0n && r.eurc === 0n))
   && run.spendPermissions.rows.every(r => r.walletcap.over === 0n)
-  && (!run.agentkit || run.agentkit.walletcap.received.length === 0);
+  && (!run.agentkit || run.agentkit.walletcap.received.every(p => !p.toStranger && BigInt(p.amount) <= AGENTKIT_PER_PAYMENT));
 
 const HELP = `walletcap-crash-test: put Coinbase's agent spend controls and walletcap through the same events
 and count what gets past the cap. CDP's x402 controls face a restart, replicas, a shared store and a
