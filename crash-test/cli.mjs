@@ -4,7 +4,7 @@
 // agent a fresh budget (a restart, replicas, a shared store, a different asset), put walletcap
 // through the same events, and print what got past the cap. Offline: nothing is sent.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -153,11 +153,37 @@ export function report(run) {
 
 const held = run => run.scenarios.every(s => s.walletcap.over === 0n && s.walletcap.eurc === 0n);
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { values } = parseArgs({ options: { json: { type: 'boolean' } } });
-  const run = await crashTest();
-  process.stdout.write(values.json
-    ? `${JSON.stringify(run, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2)}\n`
-    : `${report(run)}\n`);
-  process.exitCode = held(run) ? 0 : 1;
+const HELP = `walletcap-crash-test: put Coinbase CDP's x402 spend controls and walletcap through the same
+events (a restart, replicas, a shared store, a different asset) and count what gets past the cap.
+Offline: payments are signed by a throwaway key and nothing is sent.
+
+Usage: npx walletcap-crash-test [--json]
+
+  --json      Machine-readable results
+  --version   Print the version
+
+Exits 1 if walletcap lets anything past the cap.`;
+
+// npm runs a bin through a symlink, so compare real paths: argv[1] is the link, import.meta.url the file.
+const isMain = () => {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+};
+
+if (process.argv[1] && isMain()) {
+  const { values } = parseArgs({ options: { json: { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+  } else if (values.version) {
+    process.stdout.write(`${JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version}\n`);
+  } else {
+    const run = await crashTest();
+    process.stdout.write(values.json
+      ? `${JSON.stringify(run, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2)}\n`
+      : `${report(run)}\n`);
+    process.exitCode = held(run) ? 0 : 1;
+  }
 }

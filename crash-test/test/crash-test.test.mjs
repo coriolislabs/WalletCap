@@ -2,10 +2,30 @@
 // The crash test end to end: Coinbase's published SDK breaks where the README says it does, and
 // walletcap holds every event at $0 over the cap.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { crashTest, report } from '../cli.mjs';
 
 const USD = 1_000_000n;
+const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
+
+test('the CLI runs through a symlink, as npm runs a bin', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'walletcap-crash-bin-'));
+  try {
+    const link = join(dir, 'walletcap-crash-test');
+    symlinkSync(CLI, link);
+    const run = spawnSync(process.execPath, [link, '--version'], { encoding: 'utf8' });
+    const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.stdout.trim(), version);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("CDP's controls let money past the cap on every event; walletcap holds each one at $0", async () => {
   const run = await crashTest();

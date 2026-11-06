@@ -44,7 +44,7 @@ four events, then puts walletcap through the same ones. It runs offline in under
 sends nothing.
 
 ```console
-$ cd crash-test && npm install && npm start
+$ npx walletcap-crash-test
 
                                       CDP's controls                     walletcap
 restart, then pay again               $300 signed · $150 over            $150 signed · $0 over
