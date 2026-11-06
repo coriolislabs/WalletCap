@@ -32,6 +32,8 @@ export const AWAL_CHAINS = Object.freeze({
 });
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+// Room for the wallet's clock, or the chain's, to run ahead of this one.
+const CLOCK_SKEW_MS = 60_000n;
 
 // The wallet's own refusals, raised before it signs anything. Only these give the amount back:
 // any other failure may come after the signature left, so it keeps counting.
@@ -129,7 +131,9 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   // the terms it was handed (awal then skips its own 402 discovery); terms walletcap discovered
   // itself, the wallet asks for again, and a payee can answer the two requests differently. On
   // EVM, x402's exact scheme signs an authorization that expires maxTimeoutSeconds after it is
-  // signed, and once the wallet has answered, it has signed. Anything else counts until released.
+  // signed, and once the wallet has answered, it has signed. The wallet may pay any of the terms
+  // it was handed, whatever walletcap would pick, so the longest of them counts, plus a minute of
+  // clock skew. Anything else counts until released.
   const settlesByOf = (requirements, handed) => {
     if (!handed) return null;
     let longest = 0;
@@ -139,7 +143,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
         || !Number.isSafeInteger(seconds) || seconds <= 0) return null;
       longest = Math.max(longest, seconds);
     }
-    return BigInt(now()) + BigInt(longest) * 1000n;
+    return BigInt(now()) + BigInt(longest) * 1000n + CLOCK_SKEW_MS;
   };
 
   async function send(data) {
@@ -222,7 +226,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     // The wallet has answered, so it has signed if it ever will. With the terms handed to it, the
     // hold learns when the authorization expires, before anything else: a commit never shortens
     // a hold, so the payee's own word that the payment settled can't free the budget early.
-    const settlesBy = settlesByOf(candidates, handed);
+    const settlesBy = settlesByOf(offered, handed);
     if (settlesBy !== null) reservation[SETTLES_BY](settlesBy);
     const answer = paymentResponseOf(result);
     if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);

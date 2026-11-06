@@ -169,8 +169,9 @@ test('an unconfirmed x402 payment on terms handed to the wallet counts until the
   const terms = [requirement('50000', 300)];
   await guard.request('make-x402-request', { ...x402(), paymentRequirements: terms });
   assert.deepEqual(w.calls[0].data.paymentRequirements, terms);
-  // The wallet signed before it answered; the authorization expires 300 s after that.
-  clock.now += 300_000 + DAY;
+  // The wallet signed before it answered; the authorization expires 300 s after that (and a
+  // minute is left for clock skew).
+  clock.now += 300_000 + 60_000 + DAY;
   assert.equal(budget.status().inFlight, 50_000n);
   clock.now += 1;
   assert.equal(budget.status().inFlight, 0n);
@@ -197,10 +198,24 @@ test("the payee's word that a payment on handed-in terms settled doesn't end its
   assert.equal(budget.history()[0].status, 'settled');
   clock.now += DAY + 1;
   assert.equal(budget.status().spent, 50_000n);
-  clock.now += 3_600_000 - 1; // an hour after the wallet answered, plus one window
+  clock.now += 3_600_000 + 60_000 - 1; // an hour and a minute after the wallet answered, plus one window
   assert.equal(budget.status().spent, 50_000n);
   clock.now += 1;
   assert.equal(budget.status().spent, 0n);
+});
+
+test('the hold lasts as long as the longest terms the wallet was handed, not only the ones walletcap would pick', async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const guard = guardAgenticWallet(budget, { request: wallet(() => ({ status: 200, headers: {} })).request });
+  const polygon = { ...requirement('50000', 3600), network: 'eip155:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359' };
+  // The wallet gets both terms; walletcap prices the one on the preferred network. 0.3.0 timed the
+  // hold by that one alone (60 s), though the wallet could have signed the other for an hour.
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [requirement('50000', 60), polygon], preferredNetwork: 'base-sepolia' });
+  clock.now += 3_600_000 + 60_000 + DAY;
+  assert.equal(budget.status().inFlight, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().inFlight, 0n);
 });
 
 test('a send that went through but cannot be recorded throws PaymentNotRecorded', async () => {
