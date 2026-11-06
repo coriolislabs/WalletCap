@@ -1,24 +1,35 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # walletcap crash test
 
-This puts Coinbase CDP's x402 spend controls through the events that hand an AI agent a fresh budget: a restart, replicas, a shared store, and a payee who switches assets. It then runs walletcap through the same events and counts what gets past the cap.
+This puts Coinbase's agent spend controls through the events that hand an AI agent a fresh budget, runs walletcap through the same events, and counts what gets past the cap.
+
+| Control | Events |
+|---|---|
+| CDP's x402 controls | a restart, replicas, a shared store, a payee who switches assets |
+| Spend Permissions | a second permission, a period boundary |
+| AgentKit (`--agentkit`) | a merchant who lists a bigger offer first |
 
 It runs offline in under ten seconds and sends nothing.
 
 ```console
 $ npx walletcap-crash-test
 
-walletcap crash test: Coinbase CDP x402 spend controls
-@coinbase/cdp-sdk 1.61.0 · @x402/core 2.30.0 · walletcap 0.2.3
+walletcap crash test: Coinbase's agent spend controls
+@coinbase/cdp-sdk 1.61.0 · @x402/core 2.30.0 · SpendPermissionManager 1.0.0 · walletcap 0.2.3
 Every agent is held to $50 a payment and $150 in any 24 hours, in USDC on Base.
 
-                                      CDP's controls                     walletcap
-restart, then pay again               $300 signed · $150 over            $150 signed · $0 over
-10 replicas                           $1,500 signed · $1,350 over        $150 signed · $0 over
-10 replicas, shared store 1 ms away   $350 signed · $200 over            $150 signed · $0 over
-payee asks for EURC, not USDC         1,000 EURC signed, counted as $0   refused before signing
+CDP x402 spend controls                      CDP's controls                     walletcap
+  restart, then pay again                    $300 signed · $150 over            $150 signed · $0 over
+  10 replicas                                $1,500 signed · $1,350 over        $150 signed · $0 over
+  10 replicas, shared store 1 ms away        $350 signed · $200 over            $150 signed · $0 over
+  payee asks for EURC, not USDC              1,000 EURC signed, counted as $0   refused before signing
 
-Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls; $0 with walletcap.
+Spend Permissions                            SpendPermissionManager             AccountCapSpender
+  a second permission                        $300 pulled · $150 over            $150 pulled · $0 over
+  across a period boundary, 1 second apart   $300 pulled · $150 over            $150 pulled · $0 over
+
+Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls, $300 with Spend Permissions;
+$0 with walletcap.
 ```
 
 It needs Node 22.13 or later. Add `--json` for machine-readable results. The process exits 1 if walletcap lets anything past the cap.
@@ -45,6 +56,23 @@ The events, each from a fresh start:
 The shared store is what Coinbase's docs advise for replicas: "implement this interface against a shared durable backend (Redis, Postgres, DynamoDB, etc.)". The store in `spend-store.mjs` does exactly what the interface says, and answers each call after 1 ms, as a network database does.
 
 The interface has no single step that both checks the cap and records the payment. CDP reads the total, decides, then appends, and its lock covers one process. Replicas can read the same total before any of them appends. How many overlap varies from run to run.
+
+## Coinbase Spend Permissions
+
+Coinbase's `SpendPermissionManager` v1.0.0 and Smart Wallet run on an in-process EVM. Their code is the exact runtime code deployed on Base mainnet, read once with `eth_getCode` and shipped in `contracts/coinbase-base-mainnet.json` with each code hash, so the crash test needs no network.
+
+A Smart Wallet holds $1,000 of a test token that stands in for USDC, and grants the agent permissions of $150 a day.
+
+| Event | What happens |
+|---|---|
+| A second permission | The wallet grants two permissions with different salts, and the agent pulls $150 from each. |
+| A period boundary | The agent pulls $150 in the last second of one day and $150 in the first second of the next. |
+
+The manager counts each permission, and each period, on its own, so both events pull $300. Within one permission and one period it holds: the test suite checks that a fourth $50 is refused with `ExceededSpendPermission`.
+
+walletcap's side: the wallet grants the same permissions to `AccountCapSpender`, walletcap's on-chain spender. It counts every permission against one rolling $150 cap and refuses the second $150 with `OverBudget`. `AccountCapSpender` is unaudited.
+
+`node contracts/build.mjs --check` checks two things: that each piece of Coinbase code still matches its recorded hash, and that the shipped `AccountCapSpender` still compiles from `solidity/`. `--fetch` re-reads Coinbase's code from Base mainnet.
 
 ## Coinbase AgentKit (`--agentkit`)
 
@@ -75,9 +103,12 @@ Nothing is sent. Each payment is an x402 authorization (EIP-3009) signed with a 
 
 ## What it doesn't cover
 
-- **Settlement.** It measures the client-side control, not what lands on chain.
+- **Settlement of x402 payments.** For x402 it measures what the client-side control lets the agent sign, not what lands on chain. The Spend Permissions rows do move tokens on the local EVM.
 - **More than one machine.** The replicas share one machine, and walletcap's budget file is single-host.
-- **Other vendors' controls.** Coinbase's CDP x402 controls and AgentKit are covered so far. Spend Permissions, the Agentic Wallet, Safe, MetaMask, Tempo and AP2 come next.
+- **A revoke in the same block.** A revoke that lands after the agent's payment in the same block doesn't stop that payment, with either control. Neither control can make a revoke retroactive.
+- **Other vendors' controls.** Coinbase's CDP x402 controls, Spend Permissions and AgentKit are covered so far. The Agentic Wallet, Safe, MetaMask, Tempo and AP2 come next.
+
+Coinbase's contract code in `contracts/coinbase-base-mainnet.json` comes from [coinbase/spend-permissions](https://github.com/coinbase/spend-permissions) and [coinbase/smart-wallet](https://github.com/coinbase/smart-wallet), both under the MIT license.
 
 ## Releasing
 

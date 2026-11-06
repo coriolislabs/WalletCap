@@ -57,6 +57,9 @@ jobs:
           npm install --no-audit --no-fund --no-package-lock
           npm install --no-save --no-audit --no-fund --no-package-lock ../js
         working-directory: crash-test
+      - name: Check the shipped contracts match their sources
+        run: node contracts/build.mjs --check
+        working-directory: crash-test
       - name: Run it
         run: node --test
         working-directory: crash-test
