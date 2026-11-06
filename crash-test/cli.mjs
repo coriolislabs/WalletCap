@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
-// walletcap-crash-test: put Coinbase CDP's x402 spend controls through the events that hand an
-// agent a fresh budget (a restart, replicas, a shared store, a different asset), put walletcap
+// walletcap-crash-test: put Coinbase's agent spend controls (CDP's x402 controls, Spend Permissions,
+// and with --agentkit AgentKit) through the events that hand an agent a fresh budget, put walletcap
 // through the same events, and print what got past the cap. Offline: nothing is sent.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { openBudget } from 'walletcap';
+import { spendPermissionsRows } from './spend-permissions.mjs';
 
 const AGENT = fileURLToPath(new URL('./agent.mjs', import.meta.url));
 const AGENTKIT_AGENT = fileURLToPath(new URL('./agentkit-agent.mjs', import.meta.url));
@@ -116,11 +117,13 @@ export async function crashTest({ agentkit = false } = {}) {
       walletcap: await runControl(scenario, 'walletcap', payTo),
     });
   }
+  const spendPermissions = await spendPermissionsRows();
   const agentkitResult = agentkit ? await agentkitRow() : undefined;
   return {
     versions: { '@coinbase/cdp-sdk': versionOf('@coinbase/cdp-sdk'), '@x402/core': versionOf('@x402/core'), walletcap: versionOf('walletcap') },
     policy: { perPayment: '$50', per24h: '$150', asset: 'USDC', network: 'Base' },
     scenarios,
+    spendPermissions,
     ...(agentkit ? { agentkit: agentkitResult } : {}),
     seconds: (Date.now() - started) / 1000,
   };
@@ -157,30 +160,47 @@ const cell = result => {
   return `${dollars(result.usdc)} signed · ${dollars(result.over)} over`;
 };
 
+const pulledCell = result => `${dollars(result.pulled)} pulled · ${dollars(result.over)} over`;
+
 export function report(run) {
-  const rows = [['', "CDP's controls", 'walletcap'], ...run.scenarios.map(s => [s.label, cell(s.cdp), cell(s.walletcap)])];
+  const sp = run.spendPermissions;
+  const rows = [
+    ['CDP x402 spend controls', "CDP's controls", 'walletcap'],
+    ...run.scenarios.map(s => [`  ${s.label}`, cell(s.cdp), cell(s.walletcap)]),
+    ['', '', ''],
+    ['Spend Permissions', 'SpendPermissionManager', 'AccountCapSpender'],
+    ...sp.rows.map(r => [`  ${r.label}`, pulledCell(r.vendor), pulledCell(r.walletcap)]),
+  ];
   const widths = [0, 1].map(col => Math.max(...rows.map(row => row[col].length)) + 3);
-  const table = rows.map(row => row[0].padEnd(widths[0]) + row[1].padEnd(widths[1]) + row[2]).join('\n');
+  const table = rows.map(row => (row[0].padEnd(widths[0]) + row[1].padEnd(widths[1]) + row[2]).trimEnd()).join('\n');
   const total = side => run.scenarios.reduce((sum, s) => sum + s[side].over, 0n);
   const totalEurc = side => run.scenarios.reduce((sum, s) => sum + s[side].eurc, 0n);
   const past = side => [total(side) > 0n || totalEurc(side) === 0n ? dollars(total(side)) : null, totalEurc(side) > 0n ? eurc(totalEurc(side)) : null].filter(Boolean).join(' and ');
+  const spOver = side => sp.rows.reduce((sum, r) => sum + r[side].over, 0n);
+  const walletcapOver = total('walletcap') + spOver('walletcap');
   const { versions } = run;
   return [
-    'walletcap crash test: Coinbase CDP x402 spend controls',
-    `@coinbase/cdp-sdk ${versions['@coinbase/cdp-sdk']} · @x402/core ${versions['@x402/core']} · walletcap ${versions.walletcap}`,
+    "walletcap crash test: Coinbase's agent spend controls",
+    `@coinbase/cdp-sdk ${versions['@coinbase/cdp-sdk']} · @x402/core ${versions['@x402/core']} · SpendPermissionManager 1.0.0 · walletcap ${versions.walletcap}`,
     'Every agent is held to $50 a payment and $150 in any 24 hours, in USDC on Base.',
     '',
     table,
     '',
-    `Past the $150 cap: ${past('cdp')} with CDP's controls; ${past('walletcap')} with walletcap.`,
+    `Past the $150 cap: ${past('cdp')} with CDP's controls, ${dollars(spOver('vendor'))} with Spend Permissions;`,
+    `${dollars(walletcapOver)} with walletcap.`,
     '',
     "CDP's controls: applySpendControls, set as Coinbase's README shows, with its default in-memory store,",
     `or with a shared store built to its SpendStore interface that answers each call after ${STORE_LATENCY_MS} ms, as Redis`,
     "or Postgres over the network does. CDP reads the total, then records the payment: replicas can read",
     'the same total before any of them records. walletcap: budget.guard() on the same x402 client, with',
-    'one budget file every agent opens.',
-    'Nothing was sent. Each payment is an x402 authorization signed offline by a throwaway key that',
-    'holds nothing; a payee holding one could settle it on Base until it expires.',
+    'one budget file every agent opens. Each payment is an x402 authorization signed offline by a',
+    'throwaway key that holds nothing; a payee holding one could settle it on Base until it expires.',
+    '',
+    "Spend Permissions: Coinbase's SpendPermissionManager and Smart Wallet run on a local EVM from the",
+    `code deployed on Base mainnet (block ${sp.block}). A Smart Wallet grants the agent $150 a day per`,
+    'permission; a test token stands in for USDC. walletcap: the wallet grants the same permissions to',
+    'AccountCapSpender (unaudited), which holds them all to one rolling $150 cap.',
+    'Nothing was sent.',
     ...(run.agentkit === undefined
       ? ['', `Add --agentkit for Coinbase AgentKit's row (it installs @coinbase/agentkit, about 1.3 GB):`, `  ${AGENTKIT_INSTALL}`]
       : ['', ...agentkitReport(run.agentkit)]),
@@ -190,11 +210,13 @@ export function report(run) {
 }
 
 const held = run => run.scenarios.every(s => s.walletcap.over === 0n && s.walletcap.eurc === 0n)
+  && run.spendPermissions.rows.every(r => r.walletcap.over === 0n)
   && (!run.agentkit || run.agentkit.walletcap.received.length === 0);
 
-const HELP = `walletcap-crash-test: put Coinbase CDP's x402 spend controls and walletcap through the same
-events (a restart, replicas, a shared store, a different asset) and count what gets past the cap.
-Offline: payments are signed by a throwaway key and nothing is sent.
+const HELP = `walletcap-crash-test: put Coinbase's agent spend controls and walletcap through the same events
+and count what gets past the cap. CDP's x402 controls face a restart, replicas, a shared store and a
+different asset; Spend Permissions face a second permission and a period boundary; with --agentkit,
+AgentKit faces a merchant who lists a bigger offer first. Offline: nothing is sent.
 
 Usage: npx walletcap-crash-test [--json] [--agentkit]
 
