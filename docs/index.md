@@ -1,12 +1,12 @@
 ---
 title: walletcap
-description: "Per-payment and rolling 24-hour spend limits for AI agent wallets that pay in USDC, held across restarts and replicas. Crash test: $0 past a $150 cap."
+description: "Per-payment and rolling 24-hour spend limits for AI agent wallets that pay in USDC, held across restarts and replicas on one host. Crash test: $0 past a $150 cap."
 ---
 
 # walletcap: spend limits for AI agent wallets
 
 Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour
-budget that holds across restarts, replicas and payment rails. walletcap is an npm and PyPI
+budget that holds across restarts, replicas on one host and payment rails. walletcap is an npm and PyPI
 package under Apache-2.0. It plugs into x402 clients, Coinbase CDP's x402 spend controls,
 Coinbase AgentKit, the Coinbase Agentic Wallet CLI and payments MCP server, and Coinbase Spend
 Permissions.

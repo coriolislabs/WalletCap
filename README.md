@@ -7,7 +7,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/coriolislabs/WalletCap/blob/main/LICENSE)
 
 **Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour
-budget that holds across restarts, replicas and payment rails.** walletcap plugs into x402
+budget that holds across restarts, replicas on one host and payment rails.** walletcap plugs into x402
 clients, Coinbase CDP's x402 spend controls, Coinbase AgentKit, the Coinbase Agentic Wallet CLI
 and payments MCP server, and Coinbase Spend Permissions. By ShadowPath.
 

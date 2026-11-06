@@ -239,6 +239,17 @@ test("a budget that can't be written after the wallet answered raises PaymentNot
   }
 });
 
+test('a send passes the wallet only the fields it takes, as walletcap read them', async () => {
+  const { budget } = newBudget();
+  const w = wallet(() => ({ transactionHash: TX }));
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  // 0.3.0 passed the caller's whole object on, so fields walletcap never read reached the wallet.
+  await guard.request('send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia', asset: 'usdc', amount: '1000000', data: '0xdeadbeef' });
+  assert.deepEqual(w.calls[0].data, { recipient: PAY_TO, amountAtomic: '50000', asset: 'USDC', chain: 'base-sepolia' });
+  await assert.rejects(guard.request('send-transaction', { amountAtomic: '50000', chain: 'base-sepolia' }), /needs a recipient/);
+  assert.deepEqual([w.calls.length, budget.status().payments], [1, 1n]);
+});
+
 test('a send that went through but cannot be recorded throws PaymentNotRecorded', async () => {
   const { budget, path } = newBudget();
   const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return { transactionHash: TX }; }).request });

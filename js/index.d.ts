@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// One spend budget per wallet, counted across every process, replica, key, permission and rail.
+// One spend budget per wallet, counted across every process, replica, key, permission and rail on one host.
 
 export declare const SCHEMA_VERSION: string;
 /**
@@ -254,7 +254,7 @@ export interface SpendLedgerEntry {
 }
 
 export interface SharedBudgetStoreOptions {
-  /** The budget file shared by every process, replica and rail that spends from the budget. */
+  /** The budget file shared by every process on one host, on every rail, that spends from the budget. */
   path: string;
   /** The funding instrument whose budget this store spends from. */
   instrument: string;

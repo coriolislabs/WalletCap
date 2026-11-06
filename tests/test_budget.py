@@ -442,6 +442,10 @@ def test_the_python_cli_reads_counts_in_ascii_digits_only(tmp_path: Path) -> Non
     assert created.returncode == 0, created.stderr
     assert _cli(path, "history", "--limit", "١٢").returncode == 2
     assert _cli(path, "history", "--limit", "12").returncode == 0
+    # Thousands of digits are refused as such, not with a ValueError's traceback.
+    long = _cli(path, "set", "--wallet", WALLET, "--per-day", "150", "--max-payments", "9" * 5000)
+    assert (long.returncode, "Traceback" in long.stderr) == (1, False)
+    assert _cli(path, "history", "--limit", "9" * 5000).returncode == 2
 
 
 @needs_node

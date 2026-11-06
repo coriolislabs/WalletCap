@@ -1,10 +1,10 @@
 # walletcap
 
 **Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour
-budget that holds across restarts, replicas and payment rails.**
+budget that holds across restarts, replicas on one host and payment rails.**
 
 One spend budget per wallet for AI agents: counted across every process, replica,
-key, permission and payment rail that pays from it. A restart, a second replica,
+key, permission and payment rail on one host that pays from it. A restart, a second replica,
 one more key or the next calendar period cannot hand the agent a fresh budget.
 
 `npx walletcap-crash-test` puts Coinbase's agent spend controls through a restart, 10 replicas,

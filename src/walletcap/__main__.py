@@ -42,8 +42,8 @@ def _whole(text: str) -> int:
     """A whole number in ASCII digits, as the JavaScript CLI reads one."""
 
     digits = strip_ascii(text)
-    if not digits.isascii() or not digits.isdigit():
-        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
+    if not digits.isascii() or not digits.isdigit() or len(digits.lstrip("0")) > 19:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number that fits in 64 bits")
     return int(digits)
 
 
@@ -175,7 +175,7 @@ def _set(args: argparse.Namespace, path: Path) -> str:
     max_payments = none(args.max_payments)
     if isinstance(max_payments, str):
         count = strip_ascii(max_payments)
-        if not count.isascii() or not count.isdigit():
+        if not count.isascii() or not count.isdigit() or len(count.lstrip("0")) > 19:
             raise BudgetError("--max-payments must be a whole number of payments, or none")
         max_payments = int(count)
     limits = _limits(

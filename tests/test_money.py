@@ -25,7 +25,7 @@ VECTORS: dict[str, Any] = json.loads(
 NODE = shutil.which("node")
 
 
-@pytest.mark.parametrize("case", VECTORS["cases"], ids=lambda case: repr(case["input"]))
+@pytest.mark.parametrize("case", VECTORS["cases"], ids=lambda case: repr(case["input"])[:40])
 def test_dollars_convert_as_the_shared_vectors_say(case: dict[str, Any]) -> None:
     if case.get("error"):
         with pytest.raises(BudgetError):
@@ -59,6 +59,19 @@ def test_both_languages_convert_the_same_floats() -> None:
     javascript = [int(micros) for micros in json.loads(result.stdout)]
     differ = [(v, p, j) for v, p, j in zip(values, map(to_micros, values), javascript) if p != j]
     assert differ == []
+
+
+def test_inputs_of_thousands_of_digits_are_budget_errors() -> None:
+    # Python refuses int() of a string over 4,300 digits with ValueError; 0.3.0 let it through.
+    for window in ("9" * 5000 + "ms", "1" * 4400 + "h"):
+        with pytest.raises(BudgetError):
+            to_window_ms(window)
+    assert to_window_ms("0" * 5000 + "5ms") == 5
+    with pytest.raises(BudgetError, match="more than"):
+        to_micros(Decimal("1" * 5000))
+    with pytest.raises(BudgetError, match="finer than a millionth"):
+        to_micros(Decimal("1" * 5000 + "E-4995"))
+    assert to_micros(Decimal("1" + "0" * 4999 + "E-4999")) == 1_000_000
 
 
 def test_a_decimal_finer_than_a_micro_dollar_is_refused_at_any_precision() -> None:

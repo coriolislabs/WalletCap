@@ -575,14 +575,6 @@ export class Ledger {
     });
   }
 
-  removeByReference(name, rail, reference) {
-    const instrument = instrumentName(name);
-    this.transaction(() => {
-      this.statement('DELETE FROM spend WHERE spend_id = (SELECT spend_id FROM spend '
-        + 'WHERE instrument = ? AND rail = ? AND reference = ? LIMIT 1)').run(instrument, rail, reference);
-    });
-  }
-
   /**
    * Turn a recorded payment back into an open reservation, noting why: it counts
    * until someone releases it, whatever the window.

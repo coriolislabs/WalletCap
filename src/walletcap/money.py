@@ -36,6 +36,10 @@ DAY_MS: Final = 86_400_000
 WEEK_MS: Final = 604_800_000
 
 _SPACE: Final = " \t\n\v\f\r"
+# Digits in the most an amount, or a time or count, can be. Longer digit strings are refused
+# before int() reads them: Python refuses int() of a string over 4,300 digits with ValueError.
+_AMOUNT_DIGITS: Final = len(str(MAX_AMOUNT))
+_INTEGER_DIGITS: Final = len(str(MAX_INTEGER))
 # ASCII only, in both languages: no other digits or spaces, so "١٢" and "12\x85" are refused.
 _DOLLARS = re.compile(
     r"\$?[ \t\n\v\f\r]*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.([0-9]+))?[ \t\n\v\f\r]*"
@@ -85,23 +89,24 @@ def _float_micros(value: float) -> int:
 
 
 def _decimal_micros(value: Decimal, label: str) -> int:
-    """An exact Decimal of dollars as micro-dollars, refusing anything finer."""
+    """An exact Decimal of dollars as micro-dollars, refusing anything finer.
+
+    It reads the digits, so no int() is built from more digits than an amount
+    can have, however many the Decimal holds.
+    """
 
     _, digits, exponent = value.as_tuple()
-    coefficient = int("".join(map(str, digits)))
-    if coefficient == 0 or not isinstance(exponent, int):
+    if not isinstance(exponent, int) or not any(digits):
         return 0
-    shift = exponent + 6
+    shift = exponent + 6  # the micro-dollars are the digits times 10**shift
+    whole = len(digits) + shift  # how many digits the whole micro-dollars take
+    if whole > _AMOUNT_DIGITS:
+        return MAX_AMOUNT + 1  # more than the most a budget can hold
     if shift >= 0:
-        if len(digits) + shift > len(str(MAX_AMOUNT)):  # at least 10x the most a budget can hold
-            return MAX_AMOUNT + 1
-        return coefficient * _pow10(shift)
-    if -shift > len(digits):  # smaller than a micro-dollar, so it can't be a whole number of them
+        return int("".join(map(str, digits))) * _pow10(shift)
+    if any(digits[max(whole, 0) :]):
         raise BudgetError(f"{label} is finer than a millionth of a dollar: {value}")
-    micros, remainder = divmod(coefficient, _pow10(-shift))
-    if remainder:
-        raise BudgetError(f"{label} is finer than a millionth of a dollar: {value}")
-    return micros
+    return int("".join(map(str, digits[:whole]))) if whole > 0 else 0
 
 
 def to_micros(value: object, label: str = "amount") -> int:
@@ -134,7 +139,11 @@ def to_micros(value: object, label: str = "amount") -> int:
         fraction = match.group(2) or ""
         if fraction[6:].strip("0"):
             raise BudgetError(f"{label} is finer than a millionth of a dollar: {value!r}")
-        micros = int(match.group(1).replace(",", "")) * MICROS + int(fraction[:6].ljust(6, "0"))
+        whole = match.group(1).replace(",", "").lstrip("0") or "0"
+        if len(whole) > _AMOUNT_DIGITS:
+            micros = MAX_AMOUNT + 1  # more than the most a budget can hold
+        else:
+            micros = int(whole) * MICROS + int(fraction[:6].ljust(6, "0"))
     else:
         raise BudgetError(f"{label} must be {_EXAMPLES}")
     if micros < 0:
@@ -173,7 +182,9 @@ def to_window_ms(value: object, label: str = "window") -> int:
         text = strip_ascii(value).lower()
         match = _DURATION.fullmatch(text)
         if match is not None:
-            ms = int(match.group(1)) * _DURATION_MS[match.group(2)]
+            count = match.group(1).lstrip("0") or "0"
+            if len(count) <= _INTEGER_DIGITS:
+                ms = int(count) * _DURATION_MS[match.group(2)]
         else:
             ms = _DURATION_WORDS.get(text)
     if ms is None or ms <= 0 or ms > MAX_INTEGER:

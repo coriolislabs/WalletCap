@@ -167,12 +167,15 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     }
     const atomic = sendAmount(data?.amountAtomic);
     if (atomic <= 0n) throw new BudgetError('the send amount must be more than $0');
+    const recipient = data?.recipient;
+    if (typeof recipient !== 'string' || recipient.length === 0) throw new BudgetError('the send needs a recipient');
     const reservation = budget.reserve(atomic, {
-      rail: 'awal', to: String(data.recipient), note: `send on ${chain}`, details: { network, asset },
+      rail: 'awal', to: recipient, note: `send on ${chain}`, details: { network, asset },
     });
     let result;
     try {
-      result = await request('send-transaction', { ...data, amountAtomic: atomic.toString(), asset, chain });
+      // Only the fields the wallet's send takes, as walletcap read them: nothing else reaches the wallet.
+      result = await request('send-transaction', { recipient, amountAtomic: atomic.toString(), asset, chain });
     } catch (error) {
       failed(reservation, error);
       throw error;
