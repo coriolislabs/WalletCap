@@ -258,6 +258,27 @@ def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
         ledger.reserve("agent", 1)
 
 
+def test_a_checksummed_address_names_the_one_lowercase_budget(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "budget.sqlite")
+    lower = "0xd797ead28c38575fdf4fc523866287372340ca02"
+    checksummed = "0xd797ead28C38575FDf4fC523866287372340Ca02"
+    # 0.2.x kept Ledger.declare's name as given: a checksummed address opened a second budget.
+    ledger.declare(checksummed, unit="usd", cap=150, window_seconds=DAY)
+    ledger.reserve(lower, 150)
+    for name in (checksummed, f"eip155:8453:{checksummed}", "0x" + lower[2:].upper()):
+        with pytest.raises(OverBudget):
+            ledger.reserve(name, 1)
+    with pytest.raises(BudgetError, match="other limits"):
+        ledger.declare(lower, unit="usd", cap=300, window_seconds=DAY)
+    assert [budget.instrument for budget in ledger.budgets()] == [lower]
+    assert ledger.status(checksummed).instrument == lower
+    # A mistyped checksum is refused rather than opening a budget of its own.
+    with pytest.raises(BudgetError, match="EIP-55"):
+        ledger.declare(
+            "0xD797ead28C38575FDf4fC523866287372340Ca02", unit="usd", cap=1, window_seconds=1
+        )
+
+
 def test_a_committed_reservation_cannot_be_committed_or_released_again(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path / "budget.sqlite")
     spend_id = _pay(ledger)

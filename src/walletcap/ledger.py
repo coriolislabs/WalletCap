@@ -49,6 +49,7 @@ from walletcap.money import (
     MAX_INTEGER,
     format_amount,
     format_window,
+    normalize_wallet,
     short_wallet,
 )
 
@@ -178,6 +179,17 @@ def _identifier(value: object, label: str) -> str:
     if not isinstance(value, str) or _ID.fullmatch(value) is None:
         raise BudgetError(f"{label} must be a plain identifier")
     return value
+
+
+def _instrument(value: object) -> str:
+    """The name a budget is kept under, whoever opens it.
+
+    An EVM address, bare or CAIP-10, is lowercased after its EIP-55 check, and a
+    Solana CAIP-10 is reduced to its address, as ``open_budget`` does. A
+    checksummed address can't open a second budget beside the lowercase one.
+    """
+
+    return normalize_wallet(_identifier(value, "instrument"))
 
 
 def _amount(value: object, label: str, *, allow_zero: bool = False) -> int:
@@ -363,7 +375,7 @@ class Ledger:
         counted across every process, replica, permission and rail that uses this file.
         """
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         _identifier(unit, "unit")
         _amount(cap, "cap", allow_zero=True)
         _integer(window_seconds, "window_seconds")
@@ -390,7 +402,7 @@ class Ledger:
     def budget(self, instrument: str) -> BudgetLimits | None:
         """The instrument's limits, or None if it has no budget."""
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         with self._read() as connection:
             row = connection.execute(
                 "SELECT * FROM budgets WHERE instrument = ?", (instrument,)
@@ -421,7 +433,7 @@ class Ledger:
         ``UNSET`` means no opinion and None means no limit.
         """
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         self._check_limits(cap, window_ms, per_payment, max_uses)
         with self._transaction() as connection:
             row = connection.execute(
@@ -506,7 +518,7 @@ class Ledger:
     ) -> BudgetLimits:
         """Change limits in either direction. What was spent keeps counting: nothing resets."""
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         self._check_limits(cap, window_ms, per_payment, max_uses)
         with self._transaction() as connection:
             row = connection.execute(
@@ -580,7 +592,7 @@ class Ledger:
     def check(self, instrument: str, amount: int) -> Checked:
         """Whether ``amount`` would be refused right now, without reserving it."""
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         _amount(amount, "amount")
         now = self._now_ms()
         with self._read() as connection:
@@ -607,7 +619,7 @@ class Ledger:
         already past counts as now.
         """
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         _amount(amount, "amount")
         _identifier(rail, "rail")
         _reference(reference)
@@ -684,7 +696,7 @@ class Ledger:
         payment that was in flight may settle.
         """
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         with self._transaction() as connection:
             self._budget_row(connection, instrument)
             connection.execute(
@@ -696,7 +708,7 @@ class Ledger:
     def unrevoke(self, instrument: str) -> None:
         """Allow reservations again after ``revoke``."""
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         with self._transaction() as connection:
             self._budget_row(connection, instrument)
             connection.execute(
@@ -706,7 +718,7 @@ class Ledger:
     def status(self, instrument: str) -> BudgetStatus:
         """What counts against the instrument's budget right now."""
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         now = self._now_ms()
         with self._read() as connection:
             budget = self._budget_row(connection, instrument)
@@ -736,7 +748,7 @@ class Ledger:
     def history(self, instrument: str, *, limit: int = 20) -> list[Spend]:
         """The instrument's newest payments first, with whether each still counts."""
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         _integer(limit, "limit")
         now = self._now_ms()
         with self._read() as connection:
@@ -785,7 +797,7 @@ class Ledger:
         settle-by time no longer counts, but a late commit still records it.
         """
 
-        _identifier(instrument, "instrument")
+        instrument = _instrument(instrument)
         now = self._now_ms()
         with self._transaction() as connection:
             window = self._budget_row(connection, instrument)["window_ms"]

@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { now as clockNow } from './_clock.mjs';
 import { BudgetError, BudgetRefused } from './errors.mjs';
-import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, MAX_INTEGER, shortWallet } from './money.mjs';
+import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, MAX_INTEGER, normalizeWallet, shortWallet } from './money.mjs';
 
 export const SCHEMA_VERSION = '1';
 export const REFERENCE_LIMIT = 4096;
@@ -76,6 +76,14 @@ export const identifier = (value, label) => {
   if (typeof value !== 'string' || !ID.test(value)) throw new BudgetError(`${label} must be a plain identifier`);
   return value;
 };
+
+/**
+ * The name a budget is kept under, whoever opens it: an EVM address, bare or
+ * CAIP-10, is lowercased after its EIP-55 check, and a Solana CAIP-10 is reduced
+ * to its address, as openBudget() does. A checksummed address can't open a
+ * second budget beside the lowercase one.
+ */
+export const instrumentName = value => normalizeWallet(identifier(value, 'instrument'));
 
 /** Refuse an option `what` doesn't take, naming the one that was probably meant. */
 export const checkKeys = (source, known, what) => {
@@ -241,13 +249,16 @@ export class Ledger {
     return limits;
   }
 
-  budget(instrument) { return this.read(() => this.#row(instrument)); }
+  budget(instrument) {
+    const name = instrumentName(instrument);
+    return this.read(() => this.#row(name));
+  }
 
   budgets() { return this.read(() => this.statement('SELECT * FROM budgets ORDER BY instrument').all()); }
 
   /** Record a budget once; declaring it again with other limits is refused. */
-  declare(instrument, { unit, cap, windowMs, perPayment = null, maxUses = null }) {
-    identifier(instrument, 'instrument');
+  declare(name, { unit, cap, windowMs, perPayment = null, maxUses = null }) {
+    const instrument = instrumentName(name);
     identifier(unit, 'unit');
     const budget = {
       unit,
@@ -274,8 +285,8 @@ export class Ledger {
    * a tighter limit is stored, a looser one is reported and left alone. A
    * restart can lower a limit; only setLimits() raises one.
    */
-  ensure(instrument, asked, { unit = 'usd', create = true } = {}) {
-    identifier(instrument, 'instrument');
+  ensure(name, asked, { unit = 'usd', create = true } = {}) {
+    const instrument = instrumentName(name);
     const limits = Ledger.#limits(asked);
     return this.transaction(() => {
       const row = this.#row(instrument);
@@ -316,8 +327,8 @@ export class Ledger {
   }
 
   /** Change limits in either direction. What was spent keeps counting: nothing resets. */
-  setLimits(instrument, asked, { unit = 'usd', create = true } = {}) {
-    identifier(instrument, 'instrument');
+  setLimits(name, asked, { unit = 'usd', create = true } = {}) {
+    const instrument = instrumentName(name);
     const limits = Ledger.#limits(asked);
     return this.transaction(() => {
       const row = this.#row(instrument);
@@ -348,16 +359,21 @@ export class Ledger {
   }
 
   /** What counts against the budget right now: total and number of payments. */
-  counted(instrument, now = this.now()) { return this.read(() => this.#counted(instrument, now)); }
+  counted(name, now = this.now()) {
+    const instrument = instrumentName(name);
+    return this.read(() => this.#counted(instrument, now));
+  }
 
-  countedRows(instrument, now = this.now()) {
+  countedRows(name, now = this.now()) {
+    const instrument = instrumentName(name);
     return this.read(() => this.statement(
       `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms ${COUNTED}`,
     ).all(instrument, now, now));
   }
 
   /** Whether `amount` would be refused right now, without reserving it. */
-  check(instrument, amount) {
+  check(name, amount) {
+    const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
     const now = this.now();
     return this.read(() => {
@@ -376,8 +392,8 @@ export class Ledger {
    * window after that moment, as if it had settled then; a moment already
    * past counts as now.
    */
-  reserve(instrument, amount, { rail = 'js', reference = null, settlesByMs = null } = {}) {
-    identifier(instrument, 'instrument');
+  reserve(name, amount, { rail = 'js', reference = null, settlesByMs = null } = {}) {
+    const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
     identifier(rail, 'rail');
     const text = referenceText(reference);
@@ -399,7 +415,8 @@ export class Ledger {
    * Record a payment as settled now, after the same checks. Coinbase's SDK
    * records a payment when it creates it; the time is always the ledger's own.
    */
-  record(instrument, amount, { rail, reference = null }) {
+  record(name, amount, { rail, reference = null }) {
+    const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
     identifier(rail, 'rail');
     const text = referenceText(reference);
@@ -466,7 +483,8 @@ export class Ledger {
     });
   }
 
-  removeByReference(instrument, rail, reference) {
+  removeByReference(name, rail, reference) {
+    const instrument = instrumentName(name);
     this.transaction(() => {
       this.statement('DELETE FROM spend WHERE spend_id = (SELECT spend_id FROM spend '
         + 'WHERE instrument = ? AND rail = ? AND reference = ? LIMIT 1)').run(instrument, rail, reference);
@@ -477,7 +495,8 @@ export class Ledger {
    * Turn a recorded payment back into an open reservation, noting why: it counts
    * until someone releases it, whatever the window.
    */
-  reopenByReference(instrument, rail, reference, { outcome } = {}) {
+  reopenByReference(name, rail, reference, { outcome } = {}) {
+    const instrument = instrumentName(name);
     this.transaction(() => {
       const row = this.statement("SELECT spend_id, reference FROM spend WHERE instrument = ? AND rail = ? AND reference = ? AND status = 'committed' LIMIT 1")
         .get(instrument, rail, reference);
@@ -491,7 +510,8 @@ export class Ledger {
   }
 
   /** Refuse every later payment from the instrument, on every rail. */
-  revoke(instrument) {
+  revoke(name) {
+    const instrument = instrumentName(name);
     const now = this.now();
     this.transaction(() => {
       this.#required(instrument);
@@ -500,7 +520,8 @@ export class Ledger {
   }
 
   /** Allow payments again after revoke(). */
-  unrevoke(instrument) {
+  unrevoke(name) {
+    const instrument = instrumentName(name);
     this.transaction(() => {
       this.#required(instrument);
       this.statement('UPDATE budgets SET revoked_at_ms = NULL WHERE instrument = ?').run(instrument);
@@ -508,7 +529,8 @@ export class Ledger {
   }
 
   /** What counts against the budget right now, in its own unit. */
-  status(instrument) {
+  status(name) {
+    const instrument = instrumentName(name);
     const now = this.now();
     return this.read(() => {
       const row = this.#required(instrument);
@@ -536,7 +558,8 @@ export class Ledger {
   }
 
   /** The newest payments first, with whether each still counts. */
-  history(instrument, { limit = 20 } = {}) {
+  history(name, { limit = 20 } = {}) {
+    const instrument = instrumentName(name);
     const rows = integer(limit, 'limit');
     const now = this.now();
     return this.read(() => {
@@ -559,7 +582,8 @@ export class Ledger {
   }
 
   /** Delete settled payments older than `cutoffMs` that no longer count. */
-  prune(instrument, cutoffMs) {
+  prune(name, cutoffMs) {
+    const instrument = instrumentName(name);
     const cutoff = integer(cutoffMs, 'olderThanMs', { allowZero: true });
     const now = this.now();
     this.transaction(() => {

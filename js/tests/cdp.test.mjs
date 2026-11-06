@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { openBudget } from '../index.mjs';
+import { openBudget, SharedBudgetStore } from '../index.mjs';
 import { Ledger } from '../ledger.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-'));
@@ -128,6 +128,33 @@ test("an entry CDP backdates still counts from the ledger's own time", async () 
     assert.equal(budget.status().spent, 1_000_000n);
   } finally {
     store.close();
+    budget.close();
+  }
+});
+
+test('a checksummed or CAIP-10 instrument spends from the one lowercase budget', async () => {
+  const path = join(DIR, `cdp-${files++}.sqlite`);
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
+  await budget.pay('$1', async () => 'paid');
+  // 0.2.x kept SharedBudgetStore's instrument as given: a checksummed address opened a second budget.
+  const checksummed = '0xd797ead28C38575FDf4fC523866287372340Ca02';
+  for (const instrument of [checksummed, `eip155:8453:${checksummed}`]) {
+    const store = new SharedBudgetStore({ path, instrument, asset: USDC });
+    try {
+      assert.equal(store.instrument, WALLET);
+      assert.throws(() => store.declare({ unit: 'usd', cap: 2_000_000n, windowMs: 86_400_000n }), /already declared with other limits/);
+      await assert.rejects(store.append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }), { reason: 'budget' });
+    } finally {
+      store.close();
+    }
+  }
+  // A mistyped checksum is refused rather than opening a budget of its own.
+  assert.throws(() => new SharedBudgetStore({ path, instrument: '0xD797ead28C38575FDf4fC523866287372340Ca02', asset: USDC }), /EIP-55/);
+  const ledger = new Ledger(path);
+  try {
+    assert.deepEqual(ledger.budgets().map(row => row.instrument), [WALLET]);
+  } finally {
+    ledger.close();
     budget.close();
   }
 });

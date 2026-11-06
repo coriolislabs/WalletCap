@@ -8,7 +8,7 @@
 // write transaction, so two processes that both pass the SDK's own in-memory
 // check cannot both record a payment past the cap.
 import { BudgetError } from './errors.mjs';
-import { checkKeys, identifier, integer, Ledger } from './ledger.mjs';
+import { checkKeys, instrumentName, integer, Ledger } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
 
 // The CDP store is its own rail. The x402 guard also writes rail 'x402',
@@ -55,7 +55,7 @@ export class SharedBudgetStore {
     checkKeys(options, OPTION_KEYS, 'SharedBudgetStore');
     const { path, instrument, asset, scale = 1n, busyTimeoutMs = 30_000 } = options;
     if (typeof path !== 'string' || path.length === 0) throw new BudgetError('path is required');
-    this.#instrument = identifier(instrument, 'instrument');
+    this.#instrument = instrumentName(instrument);
     if (typeof asset !== 'string' || asset.trim().length === 0) throw new BudgetError('asset is required');
     this.#asset = normalizeAsset(asset);
     this.#scale = integer(scale, 'scale');
