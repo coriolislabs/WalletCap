@@ -216,3 +216,25 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
   Object.defineProperty(client, GUARDED, { value: budget, enumerable: false });
   return client;
 }
+
+const GUARDED_PROVIDER = Symbol.for('walletcap/agentkit-guard');
+
+/**
+ * Count every payment a Coinbase AgentKit X402ActionProvider makes in `budget`. AgentKit builds
+ * a fresh x402 client for each action through createX402Client(), which its types declare
+ * private, so a TypeScript subclass cannot override it. This wraps that method on the instance:
+ * every client the provider builds is guarded before it can sign. Returns the provider.
+ */
+export function guardX402ActionProvider(provider, budget, options = {}) {
+  const create = provider?.createX402Client;
+  if (typeof create !== 'function') {
+    throw new BudgetError("guardAgentKit() takes AgentKit's X402ActionProvider; this provider has no createX402Client(), so walletcap can't count its payments");
+  }
+  if (provider[GUARDED_PROVIDER] !== undefined) throw new BudgetError('this provider already has a budget guard');
+  assetTable(options.assets ?? []); // a bad asset list fails here, not at the first payment
+  Object.defineProperty(provider, 'createX402Client', {
+    value: async walletProvider => guardX402Client(await create.call(provider, walletProvider), budget, options),
+  });
+  Object.defineProperty(provider, GUARDED_PROVIDER, { value: budget });
+  return provider;
+}

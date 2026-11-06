@@ -17,7 +17,7 @@ import {
   defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
   normalizeWallet, parseLimits, shortWallet, toMicros,
 } from './money.mjs';
-import { guardX402Client, USD_ASSETS } from './x402.mjs';
+import { guardX402ActionProvider, guardX402Client, USD_ASSETS } from './x402.mjs';
 
 export {
   BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, notSent, SCHEMA_VERSION,
@@ -303,6 +303,9 @@ export class Budget {
 
   /** Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client. */
   guard(client, options) { return guardX402Client(client, this, options); }
+
+  /** Count every payment a Coinbase AgentKit X402ActionProvider makes in this budget. Returns the provider. */
+  guardAgentKit(provider, options) { return guardX402ActionProvider(provider, this, options); }
 
   /** A SpendStore for Coinbase's CDP applySpendControls, counting in this budget. For a 6-decimal USD stablecoin. */
   cdpStore({ asset, scale = 1n, clock = Date.now } = {}) {
