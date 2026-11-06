@@ -102,6 +102,10 @@ export class SharedBudgetStore {
   }
 
   async append(entry) {
+    const asset = normalizeAsset(entry.asset);
+    if (asset !== this.#asset) {
+      throw new BudgetError(`this CDP store counts ${this.#asset}, not ${asset}`);
+    }
     const atomic = units(entry.atomicAmount, 'atomicAmount', { allowZero: true });
     if (atomic === 0n) return;
     const spend = atomic * this.#scale;

@@ -131,6 +131,9 @@ There are two ways to count a CDP payment in the budget; use **one** per client.
   CDP's controls, and make its count durable and shared. The store re-checks the budget inside
   the write transaction, so replicas sharing the file cannot both take the last dollar.
 
+`budget.cdpStore()` is walletcap's SQLite ledger behind CDP's `SpendStore` interface — **not**
+CDP's in-memory default. Replacing that default is the fix, not a second control.
+
 Do **not** call both on one client: the CDP store and the guard each record the payment, so
 the budget would count it twice. `budget.guard()` refuses a client that already has CDP
 controls, and a client guarded first refuses CDP controls before signing.
@@ -274,7 +277,7 @@ only for a demo or a first-run setup.
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
 
 ```console
-$ cd js && npm install && node --test            # 57 tests
+$ cd js && npm install && node --test            # 58 tests
 $ uv run --with pytest pytest -q                 # 54 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry

@@ -66,6 +66,26 @@ test('CDP entries use the cdp rail and load back with their own metadata', async
   }
 });
 
+test('the store refuses an entry in another asset', async () => {
+  const { budget, store } = fixture();
+  try {
+    await assert.rejects(
+      store.append({
+        atomicAmount: '50000',
+        asset: '0x00000000000000000000000000000000000000ff',
+        network: NETWORK,
+        payTo: PAY_TO,
+        at: Date.now(),
+      }),
+      /counts .* not/,
+    );
+    assert.equal(budget.status().spent, 0n);
+  } finally {
+    store.close();
+    budget.close();
+  }
+});
+
 test('a 0.2.0 CDP row on the x402 rail still loads after the rail split', async () => {
   const { path, budget, store } = fixture();
   try {
