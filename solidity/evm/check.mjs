@@ -78,9 +78,9 @@ async function send(key, to, data) {
       // A plain require(..., "reason") is Error(string): report the string itself.
       try { reason = decodeErrorResult({ abi: [{ type: 'error', name: 'Error', inputs: [{ type: 'string' }] }], data: raw }).args[0]; } catch { /* opaque */ }
     }
-    return { ok: false, reason };
+    return { ok: false, reason, gas: result.totalGasSpent };
   }
-  return { ok: true, created: result.createdAddress?.toString() };
+  return { ok: true, created: result.createdAddress?.toString(), gas: result.totalGasSpent };
 }
 const deployWith = async (contract, args = []) => {
   const ctor = contract.abi.find(f => f.type === 'constructor');
@@ -134,11 +134,16 @@ const check = (name, ok, detail = '') => {
   const refused = await pay(permission(3n), 1_000_000n);
   check('a period boundary does not refill the budget', !refused.ok && refused.reason === 'OverBudget', refused.reason);
 }
-{ // Spend counts for one rolling window, then ages out.
-  now = START + WINDOW + 1n;
+{ // A payment counts as if made at its bucket's last second, for one window from there.
+  const width = await read(spender, SPENDER.abi, 'bucketWidth', []);
+  const bucketEnd = (START / width + 1n) * width - 1n;
+  now = bucketEnd + WINDOW;
+  const still = await pay(permission(4n), 1_000_000n);
+  check('spend counts until its bucket ends plus one window', !still.ok && still.reason === 'OverBudget', still.reason);
+  now = bucketEnd + WINDOW + 1n;
   const after = await pay(permission(4n), PER_PAYMENT);
   const spent = await read(spender, SPENDER.abi, 'spentInWindow', [ADDR.account, token]);
-  check('spend ages out after one window', after.ok && spent === PER_PAYMENT, `spent ${spent}`);
+  check('spend ages out one second later', after.ok && spent === PER_PAYMENT, `spent ${spent}`);
 }
 {
   const outsider = await pay(permission(5n), 1_000_000n, PAYEE, KEYS.outsider);
@@ -162,22 +167,38 @@ const check = (name, ok, detail = '') => {
   const revoked = await pay(perm, 1_000_000n);
   check('a revoked permission cannot be drawn', !revoked.ok && revoked.reason === 'revoked', revoked.reason);
 }
-{ // perPayment > cap, and an empty payee list, are configuration errors.
-  const bad = await send(KEYS.deployer, undefined,
-    `0x${SPENDER.evm.bytecode.object}${encodeAbiParameters(SPENDER.abi.find(f => f.type === 'constructor').inputs,
-      [manager, ADDR.agent, PER_PAYMENT, WINDOW, CAP, [PAYEE]]).slice(2)}`);
-  const noPayees = await send(KEYS.deployer, undefined,
-    `0x${SPENDER.evm.bytecode.object}${encodeAbiParameters(SPENDER.abi.find(f => f.type === 'constructor').inputs,
-      [manager, ADDR.agent, CAP, WINDOW, PER_PAYMENT, []]).slice(2)}`);
+{ // perPayment > cap, an empty payee list, and a window that isn't a multiple of BUCKETS
+  // are configuration errors.
+  const deploy = args => send(KEYS.deployer, undefined,
+    `0x${SPENDER.evm.bytecode.object}${encodeAbiParameters(SPENDER.abi.find(f => f.type === 'constructor').inputs, args).slice(2)}`);
+  const refused = [
+    await deploy([manager, ADDR.agent, PER_PAYMENT, WINDOW, CAP, [PAYEE]]),
+    await deploy([manager, ADDR.agent, CAP, WINDOW, PER_PAYMENT, []]),
+    await deploy([manager, ADDR.agent, CAP, WINDOW + 1n, PER_PAYMENT, [PAYEE]]),
+  ];
   check('the constructor refuses a bad configuration',
-    !bad.ok && bad.reason === 'InvalidConfiguration' && !noPayees.ok && noPayees.reason === 'InvalidConfiguration',
-    `${bad.reason} / ${noPayees.reason}`);
+    refused.every(r => !r.ok && r.reason === 'InvalidConfiguration'), refused.map(r => r.reason).join(' / '));
 }
 { // The money actually moved to the payee, and only to the payee.
   const paid = await read(token, TOKEN.abi, 'balanceOf', [PAYEE]);
   const held = await read(token, TOKEN.abi, 'balanceOf', [spender]);
   check('every drawn payment reached the payee', paid === CAP + PER_PAYMENT && held === 0n,
     `payee ${paid}, spender holds ${held}`);
+}
+{ // A burst of tiny payments, then a quiet window: the next payment still runs, at the
+  // same cost. An unbounded log made it cost ~6M gas after 1,000 payments.
+  const burst = await deployWith(SPENDER, [manager, ADDR.agent, CAP, WINDOW, PER_PAYMENT, [OTHER_PAYEE]]);
+  const perm = { ...permission(10n), spender: burst, start: Number(now), end: Number(now + 365n * 86_400n) };
+  let first;
+  for (let i = 0; i < 1_000; i += 1) {
+    const r = await call(KEYS.agent, burst, SPENDER.abi, 'pay', [perm, 1_000n, OTHER_PAYEE]);
+    if (!r.ok) throw new Error(`burst payment ${i} failed: ${r.reason}`);
+    first ??= r.gas;
+  }
+  now += WINDOW * 2n;
+  const after = await call(KEYS.agent, burst, SPENDER.abi, 'pay', [perm, PER_PAYMENT, OTHER_PAYEE]);
+  check('a burst then a quiet window does not lock the account', after.ok && after.gas < 250_000n,
+    `${after.ok ? 'paid' : after.reason}, ${after.gas} gas (first burst payment ${first})`);
 }
 
 const failed = results.filter(r => !r.ok);
