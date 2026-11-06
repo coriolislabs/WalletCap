@@ -938,9 +938,11 @@ class Ledger:
         return [self._spend(row, window, now) for row in rows]
 
     def release_unknown(self, instrument: str, older_than_ms: int) -> list[Spend]:
-        """Give back every open payment of unknown outcome taken ``older_than_ms`` ago or more.
+        """Give back every open payment of unknown outcome, or refused by the payee.
 
-        For an owner who has checked they never left the wallet. Returns the
+        Only those taken ``older_than_ms`` ago or more, for an owner who has
+        checked they never left the wallet. One with a settle-by time still
+        ahead stays: the payee could settle it after the release. Returns the
         payments released.
         """
 
@@ -956,14 +958,18 @@ class Ledger:
         with self._transaction() as connection:
             now = self._now_ms()
             window = self._budget_row(connection, instrument)["window_ms"]
+            # A hold's expiry is its settle-by time plus one window plus 1 ms (_expiry). One
+            # capped at MAX_INTEGER can't say when its settle-by is, so it stays.
+            settled = min(now + window + 1, MAX_INTEGER - 1)
             rows = [
                 row
                 for row in connection.execute(
                     "SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' "
-                    "AND at_ms <= ? ORDER BY at_ms, rowid",
-                    (instrument, now - older_than_ms),
+                    "AND at_ms <= ? AND (expires_at_ms IS NULL OR expires_at_ms <= ?) "
+                    "ORDER BY at_ms, rowid",
+                    (instrument, now - older_than_ms, settled),
                 ).fetchall()
-                if outcome(row["reference"]) == "unknown"
+                if outcome(row["reference"]) in ("unknown", "refused")
             ]
             for row in rows:
                 connection.execute(

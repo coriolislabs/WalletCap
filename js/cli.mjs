@@ -28,8 +28,9 @@ Commands
   holds                The open payments that still count, and why: in flight, refused or unknown
   release <id>         Give back an in-flight payment you know never left the wallet
   release --all-unknown --older-than <24h|7d|30m>
-                       Give back every payment of unknown outcome older than that, once you
-                       know none of them left the wallet
+                       Give back every payment of unknown or refused outcome older than that,
+                       once you know none of them left the wallet; one the payee could still
+                       settle stays
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget
   awal-mcp [-- <cmd>]  Coinbase's Agentic Wallet MCP server (~/.payments-mcp) behind a proxy that
                        counts its payments and refuses tools it can't count (--allow-tool <name>)
@@ -113,7 +114,8 @@ const detail = status => [
   `State        ${status.frozen ? 'FROZEN: every payment is refused' : 'active'}`,
 ].join('\n');
 
-// Every payment of unknown outcome older than --older-than, for an owner who has checked the chain.
+// Every payment of unknown or refused outcome older than --older-than that the payee can no longer
+// settle, for an owner who has checked the chain.
 function releaseUnknown(values, path, id) {
   if (id !== undefined) throw new Usage('release takes an id or --all-unknown, not both');
   if (values['older-than'] === undefined) throw new Usage('release --all-unknown needs --older-than, like --older-than 24h');
@@ -124,9 +126,11 @@ function releaseUnknown(values, path, id) {
   try {
     const released = ledger.releaseUnknown(wallet, olderThan);
     if (values.json) return json(released.map(row => ({ id: row.spend_id, amount: row.amount })));
-    if (released.length === 0) return `No payment of unknown outcome from ${shortWallet(wallet)} is older than ${formatWindow(olderThan)}.`;
+    if (released.length === 0) {
+      return `No payment of unknown or refused outcome from ${shortWallet(wallet)} is older than ${formatWindow(olderThan)}, apart from any its payee could still settle.`;
+    }
     const total = released.reduce((sum, row) => sum + row.amount, 0n);
-    return `Released ${released.length} payment${released.length === 1 ? '' : 's'} of unknown outcome older than ${formatWindow(olderThan)} `
+    return `Released ${released.length} payment${released.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `
       + `(${formatUsd(total)} from ${shortWallet(wallet)}): they no longer count. Only do this for payments you know never left the wallet.`;
   } finally {
     ledger.close();

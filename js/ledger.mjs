@@ -675,9 +675,10 @@ export class Ledger {
   }
 
   /**
-   * Give back every open payment whose outcome is unknown and that was taken at
-   * least `olderThanMs` ago, for an owner who has checked they never left the
-   * wallet. Returns the payments released.
+   * Give back every open payment of unknown outcome, or refused by the payee, that
+   * was taken at least `olderThanMs` ago, for an owner who has checked they never
+   * left the wallet. One with a settle-by time still ahead stays: the payee could
+   * settle it after the release. Returns the payments released.
    */
   releaseUnknown(name, olderThanMs) {
     const instrument = instrumentName(name);
@@ -685,9 +686,13 @@ export class Ledger {
     const outcomeOf = text => { try { return JSON.parse(text)?.outcome; } catch { return undefined; } };
     return this.transaction(() => {
       const now = this.now();
-      this.#required(instrument);
-      const released = this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' AND at_ms <= ? ORDER BY at_ms, rowid")
-        .all(instrument, now - age).filter(row => outcomeOf(row.reference) === 'unknown');
+      const { window_ms: window } = this.#required(instrument);
+      // A hold's expiry is its settle-by time plus one window plus 1 ms (expiry()). One capped at
+      // MAX_INTEGER can't say when its settle-by is, so it stays.
+      const settled = now + window + 1n < MAX_INTEGER ? now + window + 1n : MAX_INTEGER - 1n;
+      const released = this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' AND at_ms <= ? "
+        + 'AND (expires_at_ms IS NULL OR expires_at_ms <= ?) ORDER BY at_ms, rowid')
+        .all(instrument, now - age, settled).filter(row => ['unknown', 'refused'].includes(outcomeOf(row.reference)));
       const remove = this.statement("DELETE FROM spend WHERE spend_id = ? AND status = 'reserved'");
       for (const row of released) remove.run(row.spend_id);
       return released;

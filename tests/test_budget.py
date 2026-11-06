@@ -263,12 +263,42 @@ def test_an_owner_lists_holds_and_releases_the_unknown_ones_in_bulk(
     released = _cli(path, "release", "--all-unknown", "--older-than", "1h")
     assert released.returncode == 0, released.stderr
     assert (
-        "Released 2 payments of unknown outcome older than 1h ($3.00 from 0xd797…ca02)"
+        "Released 2 payments of unknown or refused outcome older than 1h ($3.00 from 0xd797…ca02)"
         in released.stdout
     )
     assert [hold.id for hold in budget.holds()] == [recent.id]
     nothing = _cli(path, "release", "--all-unknown", "--older-than", "1h")
-    assert "No payment of unknown outcome" in nothing.stdout
+    assert "No payment of unknown or refused outcome" in nothing.stdout
+
+
+def test_a_bulk_release_keeps_what_the_payee_could_still_settle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "settle-by.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$150", create=True)
+    now = time.time()
+    monkeypatch.setattr(_clock, "source", lambda: now - 7_200)  # all three taken two hours ago
+    live = budget.reserve(
+        "$100", rail="x402", settles_by=datetime.fromtimestamp(now + 3_600, UTC)
+    )
+    lapsed = budget.reserve(
+        "$20", rail="x402", settles_by=datetime.fromtimestamp(now - 3_600, UTC)
+    )
+    refused = budget.reserve("$10", rail="x402")  # as the CDP store reopens a rolled-back one
+    monkeypatch.undo()
+    live.annotate(outcome="unknown")
+    lapsed.annotate(outcome="unknown")
+    refused.annotate(outcome="refused")
+    # 0.3.0 gave back the first too, with its authorization redeemable for another hour, and
+    # kept the refused one counting until released one by one.
+    released = _cli(path, "release", "--all-unknown", "--older-than", "1h")
+    assert released.returncode == 0, released.stderr
+    assert (
+        "Released 2 payments of unknown or refused outcome older than 1h ($30.00 from 0xd797…ca02)"
+        in released.stdout
+    )
+    assert [hold.id for hold in budget.holds()] == [live.id]
+    assert not budget.check("$100").ok
 
 
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:

@@ -74,7 +74,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--all-unknown",
         action="store_true",
-        help="with release: every payment of unknown outcome older than --older-than",
+        help="with release: every payment of unknown or refused outcome older than --older-than "
+        "that its payee can no longer settle",
     )
     parser.add_argument("--older-than", help="with release --all-unknown: 24h, 7d, 30m")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
@@ -277,7 +278,10 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
 
 
 def _release_unknown(args: argparse.Namespace, path: Path) -> str:
-    """Every payment of unknown outcome older than --older-than, for an owner who checked."""
+    """Every payment of unknown or refused outcome older than --older-than that can't settle.
+
+    For an owner who has checked the chain.
+    """
 
     if args.id is not None:
         raise _Usage("release takes an id or --all-unknown, not both")
@@ -292,11 +296,14 @@ def _release_unknown(args: argparse.Namespace, path: Path) -> str:
         return _json([{"id": spend.spend_id, "amount": spend.amount} for spend in released])
     window = format_window(older_than)
     if not released:
-        return f"No payment of unknown outcome from {short_wallet(wallet)} is older than {window}."
+        return (
+            f"No payment of unknown or refused outcome from {short_wallet(wallet)} is older than "
+            f"{window}, apart from any its payee could still settle."
+        )
     plural = "" if len(released) == 1 else "s"
     total = sum(spend.amount for spend in released)
     return (
-        f"Released {len(released)} payment{plural} of unknown outcome older than {window} "
+        f"Released {len(released)} payment{plural} of unknown or refused outcome older than {window} "
         f"({format_usd(total)} from {short_wallet(wallet)}): they no longer count. "
         "Only do this for payments you know never left the wallet."
     )

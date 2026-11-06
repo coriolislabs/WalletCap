@@ -93,9 +93,31 @@ test('an owner lists the open holds and releases the unknown ones in bulk', asyn
   assert.equal(cli(path, 'release', '--all-unknown').code, 2);
   const released = cli(path, 'release', '--all-unknown', '--older-than', '1h');
   assert.equal(released.code, 0, released.err);
-  assert.match(released.out, /Released 2 payments of unknown outcome older than 1h \(\$3\.00 from 0xd797…ca02\)/);
+  assert.match(released.out, /Released 2 payments of unknown or refused outcome older than 1h \(\$3\.00 from 0xd797…ca02\)/);
   assert.deepEqual(budget.holds().map(hold => hold.id), [recent.id]);
-  assert.match(cli(path, 'release', '--all-unknown', '--older-than', '1h').out, /No payment of unknown outcome/);
+  assert.match(cli(path, 'release', '--all-unknown', '--older-than', '1h').out, /No payment of unknown or refused outcome/);
+  budget.close();
+});
+
+test('a bulk release keeps a payment its payee could still settle, and clears refused ones', async () => {
+  const path = join(DIR, 'settle-by.sqlite');
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$150', create: true });
+  const now = Date.now();
+  setClock(() => now - 2 * 3_600_000); // all three were taken two hours ago
+  const live = budget.reserve('$100', { rail: 'x402', settlesBy: now + 3_600_000 });
+  const lapsed = budget.reserve('$20', { rail: 'x402', settlesBy: now - 3_600_000 });
+  const refused = budget.reserve('$10', { rail: 'x402' }); // as the CDP store reopens one CDP rolled back
+  resetClock();
+  live.annotate({ outcome: 'unknown' });
+  lapsed.annotate({ outcome: 'unknown' });
+  refused.annotate({ outcome: 'refused' });
+  // 0.3.0 gave back the first too, with its authorization redeemable for another hour, and kept
+  // the refused one counting until released one by one.
+  const released = cli(path, 'release', '--all-unknown', '--older-than', '1h');
+  assert.equal(released.code, 0, released.err);
+  assert.match(released.out, /Released 2 payments of unknown or refused outcome older than 1h \(\$30\.00 from 0xd797…ca02\)/);
+  assert.deepEqual(budget.holds().map(hold => hold.id), [live.id]);
+  assert.equal(budget.check('$100').ok, false);
   budget.close();
 });
 
