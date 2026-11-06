@@ -12,9 +12,11 @@ the same count.
 Amounts are integers in the budget's own unit (USDC base units, say). A
 reservation counts until it is committed (the payment settled) or released
 (the payment was not made), however long that takes, and a settled payment
-counts for one rolling window from when it settled. By default a reservation
-never lapses: an unknown outcome keeps counting, because over-counting refuses
-a payment while under-counting lets one through.
+counts for one rolling window from when it settled. A reservation never lapses
+on its own. One given the last moment its payment could settle counts for one
+window past that moment, as if it settled then. An unknown outcome keeps
+counting, because over-counting refuses a payment while under-counting lets
+one through.
 
 The JavaScript package reads and writes the same tables, so a Coinbase CDP x402
 client, an x402 guard and a Python agent can spend from one budget.
@@ -245,15 +247,11 @@ class Ledger:
         self,
         path: str | Path,
         *,
-        reservation_ttl_seconds: int | None = None,
         busy_timeout_seconds: float = 30.0,
     ) -> None:
-        if reservation_ttl_seconds is not None:
-            _amount(reservation_ttl_seconds, "reservation_ttl_seconds")
         if not busy_timeout_seconds > 0:
             raise BudgetError("busy_timeout_seconds must be positive")
         self._path = Path(path)
-        self._ttl_ms = None if reservation_ttl_seconds is None else reservation_ttl_seconds * 1000
         self._busy_timeout = float(busy_timeout_seconds)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -604,11 +602,10 @@ class Ledger:
             if refusal is not None:
                 raise refusal
             spend_id = f"spend-{uuid4().hex}"
+            expires: int | None = None
             if settles_by_ms is not None:
                 # Counted exactly as a payment settled at settles_by_ms: through it plus a window.
-                expires: int | None = min(settles_by_ms + budget["window_ms"] + 1, MAX_AMOUNT)
-            else:
-                expires = None if self._ttl_ms is None else now + self._ttl_ms
+                expires = min(settles_by_ms + budget["window_ms"] + 1, MAX_AMOUNT)
             connection.execute(
                 "INSERT INTO spend VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?)",
                 (spend_id, instrument, amount, rail, reference, now, expires),
@@ -619,8 +616,8 @@ class Ledger:
         """Record a reservation's payment as settled, now.
 
         It counts for one rolling window from now, however long the payment
-        took. A reservation that lapsed under ``reservation_ttl_seconds`` is
-        still recorded: the money moved, and leaving it out would under-count.
+        took. A reservation whose settle-by time has passed is still recorded:
+        the money moved, and leaving it out would under-count.
         """
 
         _identifier(spend_id, "spend_id")
@@ -755,9 +752,8 @@ class Ledger:
     def compact(self, instrument: str) -> int:
         """Delete the instrument's settled payments that aged out; return how many went.
 
-        Reservations stay until they are committed or released: one that lapsed
-        under ``reservation_ttl_seconds`` no longer counts, but its payment may
-        still settle.
+        Reservations stay until they are committed or released: one past its
+        settle-by time no longer counts, but a late commit still records it.
         """
 
         _identifier(instrument, "instrument")

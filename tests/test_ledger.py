@@ -198,31 +198,24 @@ def test_an_open_reservation_counts_past_the_window_and_settles_into_a_new_one(
     assert ledger.status("agent").spent == 0
 
 
-def test_a_lapsed_reservation_survives_compaction_and_still_settles(
+def test_a_hold_never_lapses_while_its_payment_can_still_settle(
     tmp_path: Path, clock: Clock
 ) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", reservation_ttl_seconds=60)
-    lapsing = ledger.reserve("agent", 50)
+    # 0.2.x had reservation_ttl_seconds: a hold lapsed after it although its payment could
+    # still settle, so a second full cap was reserved and both settled, $300 on a $150 cap.
+    with pytest.raises(TypeError):
+        Ledger(tmp_path / "ttl.sqlite", reservation_ttl_seconds=60)  # type: ignore[call-arg]
+    ledger = _ledger(tmp_path / "budget.sqlite")
+    held = [ledger.reserve("agent", 50) for _ in range(3)]
     clock.at += 61
-    assert ledger.status("agent").reserved == 0
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+    clock.at += 30 * DAY
+    assert ledger.status("agent").reserved == 150
     assert ledger.compact("agent") == 0
-    ledger.commit(lapsing)
-    assert ledger.status("agent").spent == 50
-
-
-def test_reservations_never_lapse_unless_a_ttl_is_set(tmp_path: Path, clock: Clock) -> None:
-    ledger = _ledger(tmp_path / "default.sqlite")
-    ledger.reserve("agent", 50)
-    clock.at += 3_600
-    assert ledger.status("agent").reserved == 50
-
-    ledger = _ledger(tmp_path / "ttl.sqlite", reservation_ttl_seconds=60)
-    lapsing = ledger.reserve("agent", 50)
-    clock.at += 61
-    assert ledger.status("agent").reserved == 0
-    # A late commit is still recorded: the money moved.
-    ledger.commit(lapsing)
-    assert ledger.status("agent").spent == 50
+    for spend_id in held:
+        ledger.commit(spend_id)
+    assert ledger.status("agent").spent == 150
 
 
 def test_a_committed_reservation_cannot_be_committed_or_released_again(tmp_path: Path) -> None:
