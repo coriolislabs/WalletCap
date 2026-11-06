@@ -60,3 +60,18 @@ jobs:
       - name: Run it
         run: node --test
         working-directory: crash-test
+
+  crash-test-agentkit:
+    name: Crash test (AgentKit)
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Pack the crash test
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+        working-directory: crash-test
+      # As users run it: AgentKit installed alongside, walletcap from npm.
+      - name: Run it with Coinbase AgentKit alongside
+        run: npx -y -p "$RUNNER_TEMP"/walletcap-crash-test-*.tgz -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit --json > "$RUNNER_TEMP/agentkit.json"
+      - name: Check the AgentKit row
+        run: node crash-test/ci/check-agentkit.mjs "$RUNNER_TEMP/agentkit.json"
