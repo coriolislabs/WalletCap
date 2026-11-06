@@ -18,8 +18,11 @@ observer.
 | A buggy agent | Pay more than intended | Per-payment cap, rolling cap, `max_uses`, one reservation per payment | A bug that bypasses the guard entirely |
 | An agent with the same OS user | Delete the budget file, edit it, call the wallet directly | A missing file refuses by default (`create: false`); owner-only `walletcap set`; the file is the source of truth | It can still call the wallet or edit the file. Use a separate OS user, a separate service, or the on-chain cap |
 | A second process or replica on the same host | Race for the last dollar | `BEGIN IMMEDIATE` + a re-check inside the write transaction | A process that writes the file outside the library |
+| A second host | Open the same file over NFS, SMB or a Docker Desktop bind mount | Not supported: the file serves one host, on a local disk | SQLite's locks aren't reliable on those filesystems, so two hosts can both take the last dollar. Multiple hosts need a shared service, which isn't shipped yet |
+| A process with a wrong clock | Pay as if the window had passed | The ledger reads the system clock; there is no clock option, and a settle-by time already past counts as now | A host whose system clock is wrong |
 | A payee | Ask for a different asset, a longer validity, or a "failed" settlement it keeps | The guard prices known USD stablecoins and refuses the rest; the CDP store refuses a different asset; an unknown outcome keeps counting | An asset the guard cannot price is refused, not valued |
 | A payee with a 402 it can replay | Hold authorizations and settle later | A reservation counts until it is committed/released, or its expiry plus one window | A confirmed settlement still needs the chain to be read back |
+| A payment call that fails halfway | Time out after the money left | An error never settles a payment: the reservation stays open, marked unknown, until its settle-by time plus one window or until an owner releases it | An owner who releases a payment that did settle |
 | Another local user | Read the budget file | The parent directory is created `0700`; use a `0600` file if you pass a custom `path` | Files copied out of that directory keep their mode |
 | A host failure | Lose the file | The database is one file; back it up like any other state | A lost file is a lost count; the default refuses to recreate it |
 | A later on-chain revoke | Land in the same block after a payment | The payment is already ordered ahead of the revoke | The owner's revocation is not retroactive |
@@ -33,16 +36,19 @@ observer.
 3. **On chain.** `AccountCapSpender` makes the cap part of the payment path, so
    the agent's own code cannot raise it. It is unaudited; testnet only until an
    audit.
-4. **One host, one volume.** SQLite locking is a local-filesystem contract. A
-   shared volume is not a multi-host database; replicas on separate hosts need
-   the Postgres backend (next), not a network mount.
+4. **One host.** The budget file lives on a local disk of the one host whose
+   processes open it. SQLite's locks aren't reliable over NFS, SMB or Docker
+   Desktop bind mounts, so a file shared that way can let two hosts both take
+   the last dollar. Multiple hosts need a shared service, which isn't shipped
+   yet.
 
 ## What the guard does not do
 
 - It does not decide whether a payment *should* happen; it only bounds it.
 - It does not confirm settlement. A payment the payee calls failed keeps
-  counting until its authorization expires, and a payment with no expiry keeps
-  counting until an owner releases it.
+  counting until its authorization expires, plus one window, and a payment with
+  no expiry keeps counting until an owner releases it. A payment whose outcome
+  is unknown counts the same way.
 - It does not protect the wallet key or the chain.
 - It does not make an unaudited contract safe.
 

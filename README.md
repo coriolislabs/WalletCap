@@ -131,11 +131,11 @@ own code. Findings go to the vendors first; this package is the fix, not the fin
    warning with the command that raises them on purpose.
 4. **Fail closed.** If the count can't be read, nothing pays; a missing file is not a new
    budget. A payment whose outcome is unknown keeps counting, because a payment that failed
-   halfway may still have moved money.
+   halfway may still have moved money. An error never settles a payment.
 
-The count lives in a SQLite file that every process on the machine shares, and each payment is
-reserved inside one write transaction, so replicas racing for the last dollar can't both win.
-JavaScript and Python read and write the same file.
+The count lives in a SQLite file that every process on one host shares, and each payment is
+reserved inside one write transaction, so replicas on that host racing for the last dollar
+can't both win. JavaScript and Python read and write the same file.
 
 ## Use it
 
@@ -149,8 +149,10 @@ const tx = await budget.pay('$5', async reservation => {
 }, { to: payee, note: 'weather API' });
 ```
 
-If the payment throws, it still counts, because it may have left the wallet. If you know it
-didn't, say so and the amount comes back:
+If the payment throws, it may still have left the wallet, so it stays in flight, marked
+unknown in the history. It counts until one window past `settlesBy`, the last moment it could
+still settle, if you pass one; otherwise until you check the chain and run
+`npx walletcap release <id>`. If you know it didn't leave, say so and the amount comes back:
 
 ```js
 import { notSent } from 'walletcap';
@@ -158,8 +160,13 @@ import { notSent } from 'walletcap';
 throw notSent(error); // inside the payment function
 ```
 
-In Python, `raise NotSent("card declined")` inside the `with` block. Set `payment.tx` in the
-block to keep the transaction hash in the history, and use `async with` in async code.
+In Python, `raise NotSent("card declined")` inside the `with` block, and pass `settles_by` (a
+timezone-aware datetime) to `pay()`. Set `payment.tx` in the block to keep the transaction hash
+in the history, and use `async with` in async code.
+
+If the payment went through but the budget can't record it, `pay()` throws
+`PaymentNotRecorded`. It is not a `BudgetError`, so code that retries on a `BudgetError` won't
+pay twice. The payment still counts as in flight.
 
 `budget.check('$5')` answers `{ ok, reason, remaining }` without spending. `budget.reserve()`
 gives you a reservation to `commit()` or `release()` yourself.
@@ -185,8 +192,9 @@ const fetchPaid = wrapFetchWithPayment(fetch, client);
   payment keeps counting until then.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of
   the box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
-  `budget.guard(client, { assets: [{ network, asset, decimals }] })`. Anything else is refused,
-  not guessed.
+  `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged
+  stablecoins: each counts at $1 a token. Decimals are an integer from 0 to 18, and a built-in
+  asset's decimals can't be changed. Anything else is refused, not guessed.
 - `@x402/fetch` rewraps errors from payment creation, so a refusal reaches you as an `Error`
   whose message starts `Failed to create payment payload:` and carries the budget's reason.
 
@@ -198,7 +206,8 @@ There are two ways to count a CDP payment in the budget; use **one** per client.
   and reserves in one write transaction. Use it when the budget is the counter.
 - `applySpendControls(client, { ..., store: budget.cdpStore({ asset: USDC }) })` — keep
   CDP's controls, and make its count durable and shared. The store re-checks the budget inside
-  the write transaction, so replicas sharing the file cannot both take the last dollar.
+  the write transaction, so replicas on one host sharing the file cannot both take the last
+  dollar.
 
 `budget.cdpStore()` is walletcap's SQLite ledger behind CDP's `SpendStore` interface — **not**
 CDP's in-memory default. Replacing that default is the fix, not a second control.
@@ -225,14 +234,14 @@ applySpendControls(client, {
 it cannot value instead of letting CDP count only the asset named in the cap.
 
 walletcap's store re-checks the budget when CDP records a payment, so it holds across replicas
-on its own. When CDP removes a payment from its store, the store can't tell why, so the payment
+on one host on its own. It records the payment at its own time, not the time in CDP's entry. When CDP removes a payment from its store, the store can't tell why, so the payment
 stays counted as in-flight until you check the chain and run `npx walletcap release <id>`. Use
 CDP 1.56.0 or later; the store is tested against the published 1.60.0.
 
 ### Coinbase Agentic Wallet (awal CLI and MCP server)
 
 Run the Agentic Wallet's CLI and MCP server through walletcap, and every payment counts in the
-wallet's budget, whichever process, session or machine makes it:
+wallet's budget, whichever process or session on the host makes it:
 
 ```console
 $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 0.05 --per-day 0.15
@@ -261,12 +270,14 @@ command after `--`.
   that amount, so it refuses to sign for more.
 - A payment the payee confirms as settled counts for one window. One it doesn't confirm keeps
   counting until you release it: the wallet signs whatever validity the payee asks for, and
-  walletcap can't see it. Check the chain, then `npx walletcap release <id>`.
-- The wallet's own refusal, before it signs, gives the amount back. Any other failure keeps
-  counting.
-- Only USDC is counted; a send in any other asset is refused.
-- Machines share a budget when they share its file (a shared volume). Separate hosts without one
-  wait for the Postgres backend.
+  walletcap can't see it. Check the chain, then `npx walletcap release <id>`. The exception: when
+  the caller hands the wallet the payment requirements (`paymentRequirements`, x402's exact
+  scheme on an EVM chain) and the wallet answers, the payment counts until their
+  `maxTimeoutSeconds` after that answer, plus one window.
+- The wallet's own refusal, before it signs, gives the amount back. Any other failure, a send
+  included, keeps counting as unknown until you release it.
+- Only USDC is counted; a send in any other asset is refused. Amounts are read exactly: `100.5abc`
+  is refused, not read as $100.50.
 - It binds the payments that go through it. The wallet app takes requests from any process of
   the same user, so keep the real `awal` out of an agent's reach.
 
@@ -323,10 +334,15 @@ The default file is per user: `~/.local/state/walletcap/budget.sqlite` on Linux,
 `%LOCALAPPDATA%\walletcap\budget.sqlite` on Windows. Set `WALLETCAP_PATH`, or pass `path`, to put it elsewhere. Both languages
 compute the same default.
 
-The budget is as durable as that file. In a container, put it on a volume that outlives the
-container, or a redeploy starts a new file. Opening a budget does not create one: a missing file
-refuses every payment. The owner creates it once with `npx walletcap set`; pass `create: true`
-only for a demo or a first-run setup.
+The file serves one host. Keep it on that host's local disk: SQLite's locks aren't reliable over
+NFS, SMB or Docker Desktop bind mounts, so processes that open it through one of those can both
+take the last dollar. Agents on more than one host need a shared service, which walletcap
+doesn't ship yet.
+
+The budget is as durable as that file. In a container, put it on a local volume that outlives
+the container, or a redeploy starts a new file. Opening a budget does not create one: a missing
+file refuses every payment. The owner creates it once with `npx walletcap set`; pass
+`create: true` only for a demo or a first-run setup.
 
 ## What it doesn't do
 
@@ -334,16 +350,18 @@ only for a demo or a first-run setup.
   go around it: call the wallet directly, or delete the file. To bound an agent like that, keep
   the budget out of its reach (another OS user, another service) or enforce on chain, as
   `AccountCapSpender` does for Spend Permissions.
-- **One file is one host.** A shared volume can work for one host's containers, but SQLite
-  over NFS is not a multi-host database. A Postgres backend for replicas on separate hosts is
-  next.
+- **One file is one host.** Machines can't share a budget through a shared volume or file:
+  SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts. Multiple hosts need
+  a shared service, which isn't shipped yet.
 - **It can't see a revoke that lands later in the same block,** and for x402 schemes that settle
   later (batch vouchers), a payment counts from when the server confirms it.
 - **Some x402 payments can't be confirmed.** `@x402/fetch` doesn't report v1 settlements
   back, and only the exact EVM scheme carries an expiry the guard can read. An unconfirmed
   payment keeps counting until its authorization expires plus one window, or, with no expiry,
   until you `release` it.
-- Amounts are micro-dollars and must fit in 64 bits.
+- Amounts are micro-dollars. A budget, a limit or one payment is at most $1,000,000,000
+  (10^15 micro-dollars), so no sum of payments can overflow.
+- The ledger reads the system clock; there is no option to set it.
 
 ## This repository
 
@@ -354,12 +372,13 @@ only for a demo or a first-run setup.
 | `solidity/` | `AccountCapSpender`, the on-chain cap for Coinbase Spend Permissions |
 | `crash-test/` | the crash test: CDP's spend controls and walletcap through the same events, in dollars |
 | `tests/` | the Python suite, including the tests that drive both languages against one budget file |
+| `spec/vectors/` | the amounts both suites must read the same way, or refuse |
 | `docs/` | the docs site for GitHub Pages: one page per integration, each with a full snippet, plus the threat model |
 | `llms.txt` | a summary of the package and links to the docs, for language models |
 
 ```console
-$ cd js && npm install && node --test            # 65 tests
-$ uv run --with pytest pytest -q                 # 59 tests, from the repository root
+$ cd js && npm install && node --test            # 84 tests
+$ uv run --with pytest pytest -q                 # 130 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
 ```
@@ -369,7 +388,8 @@ restarts and racing replicas as separate processes, and drives the Agentic Walle
 MCP proxy against stand-ins for Coinbase's wallet and MCP server. It builds AgentKit's x402
 client the way AgentKit 0.10.4 does, and type-checks the AgentKit recipe with `tsc` against
 AgentKit's declared types. The Python suite covers the ledger, the API,
-the CLI and one budget shared between both languages. `solidity/evm/check.mjs` compiles the
+the CLI and one budget shared between both languages. Both suites read the amounts in
+`spec/vectors/money.json`, and a Python test checks 15,000 floats against Node. `solidity/evm/check.mjs` compiles the
 contract with solc-js and drives it on an in-process EVM, covering what the Foundry tests cover.
 
 The JavaScript suite also drives the published `@coinbase/cdp-sdk@1.60.0` through the

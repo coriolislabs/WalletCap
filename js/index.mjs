@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // walletcap: one spend budget per wallet, counted across every process,
-// replica, key, permission and payment rail that pays from it.
+// replica, key, permission and payment rail on one host that pays from it.
 //
 // Agent payment kits count "spent so far" per process, per key, per permission
 // or per period, so a restart, a second replica, one more key or the next
 // period starts the count again. This budget is counted per wallet, in a file
-// every process shares, over a rolling window. Changing a limit never resets
-// what has been spent, a restart can lower a limit but never raise one, and if
-// the count cannot be read, nothing is paid.
+// every process on the host shares, over a rolling window. Changing a limit
+// never resets what has been spent, a restart can lower a limit but never raise
+// one, and if the count cannot be read, nothing is paid.
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { SharedBudgetStore } from './cdp.mjs';

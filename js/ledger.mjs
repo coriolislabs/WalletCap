@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// The budget file: one SQLite database that every process, replica and rail
-// opens. A payment reserves its amount inside one BEGIN IMMEDIATE transaction,
-// so two processes racing for the last of a budget cannot both win, and a
-// restart reads the same count. The Python ledger in this package uses the same
-// tables and the same counting rule, so both languages spend from one budget.
+// The budget file: one SQLite database that every process on one host opens,
+// for every rail. A payment reserves its amount inside one BEGIN IMMEDIATE
+// transaction, so two processes racing for the last of a budget cannot both
+// win, and a restart reads the same count. The file must be on that host's
+// local disk: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop
+// bind mounts. The Python ledger in this package uses the same tables and the
+// same counting rule, so both languages spend from one budget.
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { now as clockNow } from './_clock.mjs';

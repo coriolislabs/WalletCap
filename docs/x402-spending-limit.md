@@ -40,8 +40,9 @@ const response = await fetchPaid('https://api.example.com/paid');
   keeps counting until then.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of the
   box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
-  `budget.guard(client, { assets: [{ network, asset, decimals }] })`. Anything else is refused
-  before signing.
+  `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged
+  stablecoins: each counts at $1 a token. Decimals are an integer from 0 to 18, and a built-in
+  asset's decimals can't be changed. Anything else is refused before signing.
 - `@x402/fetch` rewraps errors from payment creation, so a refusal reaches you as an `Error`
   whose message starts `Failed to create payment payload:` and carries the budget's reason.
 - `@x402/core` also caps each payment at $1 by default, on top of the budget;

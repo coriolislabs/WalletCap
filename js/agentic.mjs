@@ -2,7 +2,7 @@
 // Put the budget in front of Coinbase's Agentic Wallet: the awal CLI and the payments-mcp server.
 //
 // Every send and every x402 payment that goes through here is counted in the wallet's budget,
-// whichever process, session or machine makes it. An x402 payment is priced before the wallet
+// whichever process or session on this host makes it. An x402 payment is priced before the wallet
 // signs it, and the wallet is capped at that amount. A confirmed settlement counts for one
 // window. A payment that isn't confirmed keeps counting until it can no longer settle, when
 // walletcap can tell, or else until its owner releases it.

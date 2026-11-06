@@ -3,10 +3,10 @@
 //
 // The CDP SDK's default spend store is in-memory and process-local, so a
 // cumulative cap resets on restart and is not shared by replicas. This store
-// keeps the count in the budget file that every process, replica and rail
-// opens. append() is the authority: it re-checks the shared budget inside one
-// write transaction, so two processes that both pass the SDK's own in-memory
-// check cannot both record a payment past the cap.
+// keeps the count in the budget file that every process on the host opens, for
+// every rail. append() is the authority: it re-checks the shared budget inside
+// one write transaction, so two processes that both pass the SDK's own
+// in-memory check cannot both record a payment past the cap.
 import { BudgetError } from './errors.mjs';
 import { checkKeys, instrumentName, integer, Ledger } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
@@ -39,7 +39,7 @@ const ceilDiv = (numerator, denominator) => (numerator + denominator - 1n) / den
 
 /**
  * A CDP SpendStore whose count lives in the budget file shared by every
- * process, replica and rail. Pass it as `store` to applySpendControls, and set
+ * process on the host, for every rail. Pass it as `store` to applySpendControls, and set
  * maxCumulativeSpend there too: the SDK only records through its store when a
  * cumulative cap is configured. A payment CDP rolls back keeps counting here
  * until it is released; Budget.guard() frees it on its own once its

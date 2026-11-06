@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""One spend budget shared by every process, replica and rail that opens the same file.
+"""One spend budget shared by every process on one host that opens the same file.
 
 A spending limit only holds when every payment counts against one ledger. A
 count kept in process memory resets on restart and is not shared by replicas,
@@ -7,7 +7,8 @@ and allowances granted per permission or per period add up. This ledger is a
 SQLite file: each budget belongs to one funding instrument, and a payment
 reserves its amount inside one ``BEGIN IMMEDIATE`` transaction, so two
 processes racing for the last of a budget cannot both win and a restart reads
-the same count.
+the same count. The file must be on the host's local disk: SQLite's locks
+aren't reliable over NFS, SMB or Docker Desktop bind mounts.
 
 Amounts are integers in the budget's own unit (USDC base units, say). A
 reservation counts until it is committed (the payment settled) or released
@@ -375,7 +376,7 @@ class Ledger:
         """Record an instrument's budget once; declaring it again with other limits is refused.
 
         ``cap`` is the most the instrument may spend in any rolling ``window_seconds``,
-        counted across every process, replica, permission and rail that uses this file.
+        counted across every process, permission and rail on the host that uses this file.
         """
 
         instrument = _instrument(instrument)

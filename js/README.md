@@ -31,8 +31,9 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50'));
 - **Rolling window.** "$150 a day" means any 24 hours; there is no boundary to straddle.
 - **Edits never reset the count.** Raising $150 to $200 after spending $150 leaves $50.
 - **Fail closed.** If the count can't be read, nothing pays; a missing file is not a new budget. Unknown outcomes keep counting.
-- **One SQLite file, shared by every process and by Python.** Each payment reserves inside
-  one write transaction, so replicas racing for the last dollar cannot both win.
+- **One SQLite file on one host, shared by every process there and by Python.** Each payment
+  reserves inside one write transaction, so replicas racing for the last dollar cannot both
+  win. Not over NFS, SMB or Docker Desktop bind mounts, where SQLite's locks aren't reliable.
 - **x402 guard, Coinbase CDP spend store, Agentic Wallet wrapper, AgentKit recipe,
   and an on-chain cap for Spend Permissions.**
 - Node 22.13+, zero runtime dependencies, Apache-2.0.

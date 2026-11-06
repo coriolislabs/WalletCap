@@ -44,8 +44,9 @@ applySpendControls(client, {
 
 - Set `maxCumulativeSpend`: CDP only records through its store when a cumulative cap is set.
 - Set `allowedAssets`: CDP never consults its store for a token outside the cap.
-- The store re-checks the budget inside its write transaction, so replicas sharing the file
-  can't both take the last dollar.
+- The store re-checks the budget inside its write transaction, so replicas on one host sharing
+  the file can't both take the last dollar. The file serves one host: SQLite's locks aren't
+  reliable over NFS, SMB or Docker Desktop bind mounts.
 - Use one counter per client: this store or [`budget.guard()`](x402-spending-limit.md). Each
   records the payment, so with both the budget would count it twice. `budget.guard()` refuses a
   client that already has CDP controls, and a client guarded first refuses CDP controls before

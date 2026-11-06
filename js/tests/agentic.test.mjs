@@ -197,13 +197,13 @@ test('assets walletcap cannot price are refused before the wallet is asked', asy
   assert.equal(w.calls.length, 0);
 });
 
-test('two machines on one budget share one cap', async () => {
+test('two processes on one budget share one cap', async () => {
   const { path } = newBudget();
   const a = guardAgenticWallet(newBudget(undefined, path).budget, { request: wallet().request });
   const b = guardAgenticWallet(newBudget(undefined, path).budget, { request: wallet().request });
   let paid = 0;
-  for (const machine of [a, b, a, b, a, b, a, b]) {
-    try { await machine.request('make-x402-request', x402()); paid += 1; } catch (error) { assert.ok(refused('budget')(error)); }
+  for (const guard of [a, b, a, b, a, b, a, b]) {
+    try { await guard.request('make-x402-request', x402()); paid += 1; } catch (error) { assert.ok(refused('budget')(error)); }
   }
   assert.equal(paid, 3);
 });

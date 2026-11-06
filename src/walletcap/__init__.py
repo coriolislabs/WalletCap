@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""walletcap: one spend budget per wallet, across every process, replica, key and rail.
+"""walletcap: one spend budget per wallet, across every process, key and rail on one host.
 
     from walletcap import open_budget
 

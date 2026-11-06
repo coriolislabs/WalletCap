@@ -5,9 +5,9 @@ around its count, its reservations, or its failure modes, we want to know.
 
 ## Supported versions
 
-The latest **0.2.x** release is supported. The 0.2.1 release fixed the
-fail-open default and the CDP store/guard collision; earlier 0.2.0 installs
-should upgrade before relying on the guard.
+The latest **0.3.x** release is supported. The 0.3.0 release fixed ways past
+the cap through unknown outcomes, caller-supplied times and checksummed
+addresses; 0.2.x installs should upgrade before relying on the guard.
 
 ## Reporting a vulnerability
 
@@ -18,7 +18,7 @@ in a public GitHub issue.
 Please include:
 
 - the version, language (JavaScript or Python), and platform;
-- the configuration (single process or replicas, one file or a shared volume);
+- the configuration (one process or several, and the filesystem the budget file is on);
 - a minimal reproduction, or the sequence of calls;
 - what you expected and what happened.
 
@@ -55,8 +55,9 @@ See [docs/threat-model.md](docs/threat-model.md) for the full model. The short
 version:
 
 - the guard binds only the calls that pass through it;
-- the budget file is single-host; a shared volume is not a substitute for a
-  database that speaks a network protocol;
+- the budget file serves one host: SQLite's locks aren't reliable over NFS, SMB
+  or Docker Desktop bind mounts, and multiple hosts need a shared service, which
+  isn't shipped yet;
 - an x402 payment whose settlement cannot be confirmed keeps counting until its
   authorization expires;
 - `AccountCapSpender` is **unaudited**; see
