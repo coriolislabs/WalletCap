@@ -10,9 +10,17 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { now as clockNow } from './_clock.mjs';
 import { BudgetError, BudgetRefused } from './errors.mjs';
-import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, MAX_INTEGER, normalizeWallet, shortWallet } from './money.mjs';
+import {
+  DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, MAX_INTEGER, normalizeWallet, shortWallet, storedWalletName,
+} from './money.mjs';
 
-export const SCHEMA_VERSION = '1';
+/**
+ * The file's format. Schema 2 is 0.2.x's schema 1 with every budget under its
+ * canonical name and settled payments that keep their reservation's expiry;
+ * 0.3 upgrades a schema 1 file when it opens it, and 0.2.x refuses a schema 2
+ * file rather than misread it.
+ */
+export const SCHEMA_VERSION = '2';
 export const REFERENCE_LIMIT = 4096;
 
 /**
@@ -182,7 +190,8 @@ export class Ledger {
       this.transaction(() => {
         this.statement("INSERT OR IGNORE INTO budget_meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
         const { value } = this.statement("SELECT value FROM budget_meta WHERE key = 'schema'").get();
-        if (value !== SCHEMA_VERSION) throw new BudgetError(`ledger schema ${value} is not ${SCHEMA_VERSION}`);
+        if (value === '1') this.#upgradeFromSchema1();
+        else if (value !== SCHEMA_VERSION) throw new BudgetError(`ledger schema ${value} is not ${SCHEMA_VERSION}`);
       });
     } catch (error) {
       this.#db.close();
@@ -191,6 +200,36 @@ export class Ledger {
   }
 
   get path() { return this.#path; }
+
+  // 0.2.x kept a budget under the name SharedBudgetStore or Python's Ledger was given, so a
+  // checksummed or CAIP-10 address could hold a budget beside the lowercase one. Each moves to its
+  // canonical name, merged with any budget already there: the tighter of every limit, and every
+  // payment, so nothing stops counting. The Python ledger upgrades a file the same way.
+  #upgradeFromSchema1() {
+    const sameUnit = (a, b) => a === b || (DOLLAR_UNITS.has(a) && DOLLAR_UNITS.has(b));
+    const least = (a, b) => (a === null ? b : b === null || a < b ? a : b);
+    for (const row of this.statement('SELECT * FROM budgets ORDER BY instrument').all()) {
+      const name = storedWalletName(row.instrument);
+      if (name === row.instrument) continue;
+      const kept = this.#row(name);
+      if (kept === null) {
+        this.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(name, row.unit, row.cap, row.window_ms, row.per_payment, row.max_uses, row.revoked_at_ms);
+      } else {
+        if (!sameUnit(kept.unit, row.unit)) {
+          throw new BudgetError(`${this.#path} holds two budgets for ${shortWallet(name)}, counted in ${kept.unit} and ${row.unit}; they can't be merged into one`);
+        }
+        // A longer window with a smaller cap is tighter than either budget was.
+        this.statement('UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ?, revoked_at_ms = ? WHERE instrument = ?').run(
+          least(kept.cap, row.cap), kept.window_ms > row.window_ms ? kept.window_ms : row.window_ms,
+          least(kept.per_payment, row.per_payment), least(kept.max_uses, row.max_uses), least(kept.revoked_at_ms, row.revoked_at_ms), name,
+        );
+      }
+      this.statement('UPDATE spend SET instrument = ? WHERE instrument = ?').run(name, row.instrument);
+      this.statement('DELETE FROM budgets WHERE instrument = ?').run(row.instrument);
+    }
+    this.statement("UPDATE budget_meta SET value = ? WHERE key = 'schema'").run(SCHEMA_VERSION);
+  }
 
   /** The ledger's own time: the system clock, in milliseconds. Callers can't set it. */
   now() { return integer(clockNow(), 'clock', { allowZero: true }); }

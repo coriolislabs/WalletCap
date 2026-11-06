@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import warnings
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from walletcap import (  # noqa: E402
     BudgetError,
     BudgetRefused,
     BudgetWarning,
+    Ledger,
     NotSent,
     PaymentNotRecorded,
     _clock,
@@ -453,3 +456,48 @@ def test_the_clock_is_not_an_option(tmp_path: Path) -> None:
         open_budget(WALLET, path=path, clock=lambda: 1e10)
     with pytest.raises(BudgetRefused):
         _pay(open_budget(WALLET, path=path), "$150")
+
+
+def test_a_0_2_file_is_upgraded_on_open(tmp_path: Path, clock: Clock) -> None:
+    path = tmp_path / "old.sqlite"
+    hour = 3_600_000
+    now = int(clock.at * 1000)
+    caip10 = f"eip155:8453:{CHECKSUMMED}"
+    # The file as 0.2.x left it: schema 1, where Ledger and the JavaScript SharedBudgetStore kept
+    # the names they were given. 0.3.0 before this upgrade opened a fresh lowercase budget beside.
+    Ledger(path)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE budget_meta SET value = '1' WHERE key = 'schema'")
+        budget_row = "INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)"
+        connection.execute(budget_row, (CHECKSUMMED, "usd", 150_000_000, 86_400_000, None, None))
+        connection.execute(budget_row, (caip10, "usdc", 300_000_000, 86_400_000, 50_000_000, None))
+        connection.execute(budget_row, (WALLET, "usd", 200_000_000, hour, None, 10))
+        spend_row = "INSERT INTO spend VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)"
+        for spend in (
+            ("spend-a", CHECKSUMMED, 100_000_000, "committed", "cdp", now - hour),
+            ("spend-b", caip10, 20_000_000, "reserved", "js", now - 2 * hour),
+            ("spend-c", WALLET, 10_000_000, "committed", "python", now - hour // 6),
+        ):
+            connection.execute(spend_row, spend)
+
+    upgraded = open_budget(CHECKSUMMED, path=path)
+    status = upgraded.status()
+    # The tighter of every limit: the smallest cap and per-payment limit, and the longest window.
+    assert (status.cap, status.window_ms, status.per_payment, status.max_payments) == (
+        150_000_000,
+        86_400_000,
+        50_000_000,
+        10,
+    )
+    assert (status.spent, status.in_flight, status.remaining) == (
+        110_000_000,
+        20_000_000,
+        20_000_000,
+    )
+    with pytest.raises(BudgetRefused):
+        _pay(upgraded, "$20.01")
+    _pay(upgraded, "$20")
+    assert {"spend-a", "spend-b", "spend-c"} <= {payment.id for payment in upgraded.history()}
+    assert [budget.instrument for budget in Ledger(path).budgets()] == [WALLET]
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT value FROM budget_meta").fetchone() == ("2",)

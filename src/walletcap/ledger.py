@@ -52,6 +52,7 @@ from walletcap.money import (
     format_window,
     normalize_wallet,
     short_wallet,
+    stored_wallet_name,
 )
 
 __all__ = [
@@ -72,7 +73,13 @@ __all__ = [
     "Spend",
 ]
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
+"""The file's format.
+
+Schema 2 is 0.2.x's schema 1 with every budget under its canonical name and
+settled payments that keep their reservation's expiry. 0.3 upgrades a schema 1
+file when it opens it, and 0.2.x refuses a schema 2 file rather than misread it.
+"""
 
 _ID = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
 _REFERENCE_LIMIT = 4096
@@ -304,8 +311,75 @@ class Ledger:
             (version,) = connection.execute(
                 "SELECT value FROM budget_meta WHERE key = 'schema'"
             ).fetchone()
-            if version != SCHEMA_VERSION:
+            if version == "1":
+                self._upgrade_from_schema_1(connection)
+            elif version != SCHEMA_VERSION:
                 raise BudgetError(f"ledger schema {version} is not {SCHEMA_VERSION}")
+
+    def _upgrade_from_schema_1(self, connection: sqlite3.Connection) -> None:
+        """Move every budget a 0.2.x file kept under another spelling to its canonical name.
+
+        0.2.x kept a budget under the name ``Ledger`` or the JavaScript
+        ``SharedBudgetStore`` was given, so a checksummed or CAIP-10 address
+        could hold a budget beside the lowercase one. Each is merged into any
+        budget already under the canonical name: the tighter of every limit,
+        and every payment, so nothing stops counting. The JavaScript ledger
+        upgrades a file the same way.
+        """
+
+        def least(a: int | None, b: int | None) -> int | None:
+            return b if a is None else a if b is None else min(a, b)
+
+        rows = connection.execute("SELECT * FROM budgets ORDER BY instrument").fetchall()
+        for row in rows:
+            name = stored_wallet_name(row["instrument"])
+            if name == row["instrument"]:
+                continue
+            kept = connection.execute(
+                "SELECT * FROM budgets WHERE instrument = ?", (name,)
+            ).fetchone()
+            if kept is None:
+                connection.execute(
+                    "INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        name,
+                        row["unit"],
+                        row["cap"],
+                        row["window_ms"],
+                        row["per_payment"],
+                        row["max_uses"],
+                        row["revoked_at_ms"],
+                    ),
+                )
+            else:
+                same_unit = kept["unit"] == row["unit"] or (
+                    kept["unit"] in DOLLAR_UNITS and row["unit"] in DOLLAR_UNITS
+                )
+                if not same_unit:
+                    raise BudgetError(
+                        f"{self._path} holds two budgets for {short_wallet(name)}, counted in "
+                        f"{kept['unit']} and {row['unit']}; they can't be merged into one"
+                    )
+                # A longer window with a smaller cap is tighter than either budget was.
+                connection.execute(
+                    "UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ?, "
+                    "revoked_at_ms = ? WHERE instrument = ?",
+                    (
+                        min(kept["cap"], row["cap"]),
+                        max(kept["window_ms"], row["window_ms"]),
+                        least(kept["per_payment"], row["per_payment"]),
+                        least(kept["max_uses"], row["max_uses"]),
+                        least(kept["revoked_at_ms"], row["revoked_at_ms"]),
+                        name,
+                    ),
+                )
+            connection.execute(
+                "UPDATE spend SET instrument = ? WHERE instrument = ?", (name, row["instrument"])
+            )
+            connection.execute("DELETE FROM budgets WHERE instrument = ?", (row["instrument"],))
+        connection.execute(
+            "UPDATE budget_meta SET value = ? WHERE key = 'schema'", (SCHEMA_VERSION,)
+        )
 
     @property
     def path(self) -> Path:

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
 import { BudgetError, BudgetRefused, MAX_AMOUNT, notSent, openBudget, PaymentNotRecorded, SharedBudgetStore } from '../index.mjs';
+import { Ledger } from '../ledger.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
@@ -316,4 +317,47 @@ test('the clock is not an option: no process can move its own time to empty the 
   assert.throws(() => budget.cdpStore({ asset: '0x036cbd53842c5426634e7929541ec2318f3dcf7e', clock: Date.now }), /unknown option clock/);
   assert.throws(() => new SharedBudgetStore({ path, instrument: WALLET, asset: '0x036cbd53842c5426634e7929541ec2318f3dcf7e', clock: Date.now }), /unknown option clock/);
   await assert.rejects(paid(openBudget({ wallet: WALLET, path }), '$150'), refusedFor('budget'));
+});
+
+test('a 0.2.x file is upgraded on open: every spelling of a wallet becomes one budget, and every payment still counts', async () => {
+  const { clock } = fixture();
+  const path = join(DIR, `budget-${files++}.sqlite`);
+  const CHECKSUMMED = '0xd797ead28C38575FDf4fC523866287372340Ca02';
+  const HOUR = 3_600_000n;
+  const now = BigInt(clock.now);
+  // The file as 0.2.x left it: schema 1, where SharedBudgetStore and Python's Ledger kept the
+  // names they were given. 0.3.0 before this upgrade opened a fresh lowercase budget beside them.
+  const old = new Ledger(path);
+  old.statement("UPDATE budget_meta SET value = '1' WHERE key = 'schema'").run();
+  const budgetRow = old.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)');
+  budgetRow.run(CHECKSUMMED, 'usd', 150_000_000n, 86_400_000n, null, null);
+  budgetRow.run(`eip155:8453:${CHECKSUMMED}`, 'usdc', 300_000_000n, 86_400_000n, 50_000_000n, null);
+  budgetRow.run(WALLET, 'usd', 200_000_000n, HOUR, null, 10n);
+  const spendRow = old.statement('INSERT INTO spend VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)');
+  spendRow.run('spend-a', CHECKSUMMED, 100_000_000n, 'committed', 'cdp', now - HOUR);
+  spendRow.run('spend-b', `eip155:8453:${CHECKSUMMED}`, 20_000_000n, 'reserved', 'python', now - 2n * HOUR);
+  spendRow.run('spend-c', WALLET, 10_000_000n, 'committed', 'js', now - HOUR / 6n);
+  old.close();
+
+  const upgraded = openBudget({ wallet: CHECKSUMMED, path });
+  const status = upgraded.status();
+  // The tighter of every limit: the smallest cap and per-payment limit, and the longest window.
+  assert.deepEqual([status.cap, status.window, status.perPayment, status.maxPayments], [150_000_000n, 86_400_000n, 50_000_000n, 10n]);
+  assert.deepEqual([status.spent, status.inFlight, status.remaining], [110_000_000n, 20_000_000n, 20_000_000n]);
+  await assert.rejects(paid(upgraded, '$20.01'), refusedFor('budget'));
+  await paid(upgraded, '$20');
+  assert.deepEqual(upgraded.history().map(row => row.id).sort(), ['spend-a', 'spend-b', 'spend-c', upgraded.history()[0].id].sort());
+  const ledger = new Ledger(path);
+  try {
+    assert.deepEqual(ledger.budgets().map(row => row.instrument), [WALLET]);
+    assert.equal(ledger.statement("SELECT value FROM budget_meta WHERE key = 'schema'").get().value, '2');
+  } finally {
+    ledger.close();
+  }
+  const store = new SharedBudgetStore({ path, instrument: CHECKSUMMED, asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' });
+  try {
+    assert.equal(store.status().remaining, 0n);
+  } finally {
+    store.close();
+  }
 });

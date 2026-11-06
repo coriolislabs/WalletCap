@@ -169,6 +169,20 @@ export function normalizeWallet(wallet) {
   return name;
 }
 
+/**
+ * The canonical name for a budget a 0.2.x file holds under some other spelling:
+ * normalizeWallet's rule without its checks. A checksummed, uppercase or CAIP-10
+ * EVM address becomes the lowercase address, even with a bad checksum, and a
+ * Solana CAIP-10 becomes its address, so every spelling merges into one budget.
+ */
+export function storedWalletName(name) {
+  const solana = CAIP10_SOLANA.exec(name);
+  if (solana) return solana[1];
+  const evm = CAIP10_EVM.exec(name);
+  const address = evm ? evm[1] : name;
+  return EVM_ADDRESS.test(address) ? address.toLowerCase() : name;
+}
+
 /** 0xd797…ca02 for an EVM address; anything else as it is. */
 export const shortWallet = wallet => (/^0x[0-9a-f]{40}$/.test(wallet) ? `${wallet.slice(0, 6)}…${wallet.slice(-4)}` : wallet);
 

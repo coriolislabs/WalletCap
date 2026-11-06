@@ -348,8 +348,8 @@ def test_a_ledger_from_another_schema_version_is_refused(tmp_path: Path) -> None
     path = tmp_path / "budget.sqlite"
     Ledger(path)
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE budget_meta SET value = '2' WHERE key = 'schema'")
-    with pytest.raises(BudgetError, match="schema 2"):
+        connection.execute("UPDATE budget_meta SET value = '3' WHERE key = 'schema'")
+    with pytest.raises(BudgetError, match="schema 3"):
         Ledger(path)
 
 

@@ -249,6 +249,23 @@ def normalize_wallet(wallet: object) -> str:
     return name
 
 
+def stored_wallet_name(name: str) -> str:
+    """The canonical name for a budget a 0.2.x file holds under some other spelling.
+
+    ``normalize_wallet``'s rule without its checks: a checksummed, uppercase or
+    CAIP-10 EVM address becomes the lowercase address, even with a bad checksum,
+    and a Solana CAIP-10 becomes its address, so every spelling merges into one
+    budget.
+    """
+
+    solana = _CAIP10_SOLANA.fullmatch(name)
+    if solana is not None:
+        return solana.group(1)
+    evm = _CAIP10_EVM.fullmatch(name)
+    address = evm.group(1) if evm is not None else name
+    return address.lower() if _EVM_ADDRESS.fullmatch(address) else name
+
+
 def short_wallet(wallet: str) -> str:
     """``0xd797…ca02`` for an EVM address; anything else as it is."""
 
