@@ -258,11 +258,22 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     return result;
   }
 
+  // The agent is told why a payment was refused, not which holds its owner could release: that
+  // is for the owner's CLI (walletcap holds) and budget.check().
+  const toAgent = async pay => {
+    try {
+      return await pay();
+    } catch (error) {
+      if (error instanceof BudgetRefused && error.brief !== error.message) throw new BudgetRefused(error.reason, error.brief);
+      throw error;
+    }
+  };
+
   return {
     budget,
     async request(channel, data) {
-      if (channel === 'send-transaction') return send(data ?? {});
-      if (channel === 'make-x402-request') return x402(data ?? {});
+      if (channel === 'send-transaction') return toAgent(() => send(data ?? {}));
+      if (channel === 'make-x402-request') return toAgent(() => x402(data ?? {}));
       return request(channel, data);
     },
   };

@@ -149,6 +149,21 @@ test('a settlement the guard cannot record throws PaymentNotRecorded, and the pa
   assert.equal(openBudget({ wallet: kit.account.address, path }).status().inFlight, 50_000n);
 });
 
+test("a refusal or a lost answer the guard can't record throws PaymentNotRecorded too", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const refusedAnswer = { settleResponse: { success: false, errorReason: 'insufficient_funds', transaction: '', network: NETWORK } };
+  for (const answer of [refusedAnswer, {}]) {
+    const { budget, client, path } = setup();
+    const payload = await client.createPaymentPayload(kit.required(50_000));
+    budget.close(); // the budget can't be written: closed here, a busy timeout in practice
+    // 0.3.0 let the ledger's BudgetError through, which code that retries on one would retry.
+    await assert.rejects(
+      client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, ...answer }),
+      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError) && /what happened to the payment could not be recorded/.test(error.message),
+    );
+    assert.equal(openBudget({ wallet: kit.account.address, path }).status().inFlight, 50_000n);
+  }
+});
+
 test("a payee's word that a payment settled can't free the budget while the authorization is redeemable", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const { budget, client, clock } = setup({ perDay: '$0.15' });
   // The payee answers "settled" with a made-up hash and keeps the authorization, asking for the

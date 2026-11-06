@@ -32,6 +32,8 @@ export declare class BudgetError extends Error {}
 export declare class BudgetRefused extends BudgetError {
   readonly reason: RefusalReason;
   readonly code: `budget_${RefusalReason}`;
+  /** The message without the ids of open payments or what their owner can do about them. */
+  readonly brief: string;
 }
 
 /**

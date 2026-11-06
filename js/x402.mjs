@@ -284,7 +284,12 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
       // and could settle it until it expires, so the payment keeps counting until
       // then, plus one window, as if it settled at the last possible moment.
       const refused = context.settleResponse !== undefined || context.paymentRequired !== undefined;
-      reservation.annotate({ outcome: refused ? 'refused' : 'unknown' });
+      try {
+        reservation.annotate({ outcome: refused ? 'refused' : 'unknown' });
+      } catch (error) {
+        // Not recorded either way: the reservation stays open and keeps counting.
+        throw new PaymentNotRecorded(reservation.id, { cause: error, settled: false });
+      }
     }
     return undefined;
   });

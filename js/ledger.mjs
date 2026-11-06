@@ -174,17 +174,21 @@ export function refusal(row, { total, uses, heldTotal = 0n, heldUses = 0n }, spe
   if (row.per_payment !== null && spend > row.per_payment) {
     return new BudgetRefused('per_payment', `${money(spend)} is over ${name}'s ${money(row.per_payment)} limit per payment`);
   }
+  // The open payments' ids and what their owner can do go in the message, not in `brief`.
   if (total + spend > row.cap) {
     const left = row.cap > total ? row.cap - total : 0n;
-    const held = heldUses > 0n ? `; ${money(heldTotal)} of it is ${heldUses} open payment${plural(heldUses)} (${heldNote(heldUses, openIds)})` : '';
-    return new BudgetRefused('budget', `${money(spend)} would bring ${name} to ${money(total + spend)} in the last ${window}, over its ${money(row.cap)} limit (${money(left)} left)${held}`);
+    const over = `${money(spend)} would bring ${name} to ${money(total + spend)} in the last ${window}, over its ${money(row.cap)} limit (${money(left)} left)`;
+    if (heldUses === 0n) return new BudgetRefused('budget', over);
+    const brief = `${over}; ${money(heldTotal)} of it is ${heldUses} open payment${plural(heldUses)}`;
+    return new BudgetRefused('budget', `${brief} (${heldNote(heldUses, openIds)})`, { brief });
   }
   if (row.max_uses !== null && uses + 1n > row.max_uses) {
     if (heldUses === 0n) {
       return new BudgetRefused('uses', `${name} already made ${uses} payment${plural(uses)} in the last ${window}, the most its budget allows`);
     }
-    return new BudgetRefused('uses', `${name} has ${uses} payment${plural(uses)} counting in the last ${window}, the most its budget allows, `
-      + `and ${heldUses} of them ${heldUses === 1n ? 'is' : 'are'} still open (${heldNote(heldUses, openIds)})`);
+    const brief = `${name} has ${uses} payment${plural(uses)} counting in the last ${window}, the most its budget allows, `
+      + `and ${heldUses} of them ${heldUses === 1n ? 'is' : 'are'} still open`;
+    return new BudgetRefused('uses', `${brief} (${heldNote(heldUses, openIds)})`, { brief });
   }
   return null;
 }

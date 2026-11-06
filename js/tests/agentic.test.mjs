@@ -464,6 +464,31 @@ const mcpProxy = (args, env) => {
   return { ask, send, reply, close };
 };
 
+test("the agent is told why a payment was refused, not which holds its owner could release", async () => {
+  const path = join(DIR, 'mcp-holds.sqlite');
+  const log = join(DIR, 'mcp-holds.log');
+  writeFileSync(log, '');
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$0.15', create: true });
+  for (let i = 0; i < 3; i += 1) budget.reserve('$0.05').annotate({ outcome: 'unknown' });
+  // The owner's own check names the holds and how to release them.
+  assert.match(budget.check('$0.05').message, /3 open payments \(spend-\w+, spend-\w+, spend-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
+  budget.close();
+  // 0.3.0 passed all of it to the agent, through the MCP server and the awal CLI alike.
+  const { ask, close } = mcpProxy(['--wallet', WALLET, '--path', path, '--', process.execPath, FAKE_MCP], { FAKE_MCP_LOG: log });
+  let refused;
+  try {
+    refused = await ask(1, 'tools/call', { name: 'make_http_request_with_x402', arguments: { baseURL: base, path: '/pay?ttl=300', method: 'GET' } });
+  } finally {
+    await close();
+  }
+  assert.equal(refused.isError, true);
+  assert.equal(refused.content[0].text, 'walletcap refused this payment: $0.05 would bring 0xd797…ca02 to $0.20 in the last 24h, '
+    + 'over its $0.15 limit ($0.00 left); $0.15 of it is 3 open payments');
+  const paid = await awal(path, log, 'settle', 'x402', 'pay', `${base}/pay?ttl=300`, '--json');
+  assert.equal(paid.status, 1);
+  assert.equal(JSON.parse(paid.stdout).error.message, refused.content[0].text);
+});
+
 test('npx walletcap awal-mcp runs the server Coinbase installed, not its installer', async () => {
   const home = mkdtempSync(join(DIR, 'home-'));
   const path = join(DIR, 'mcp-default.sqlite');
