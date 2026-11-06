@@ -45,3 +45,18 @@ jobs:
       - name: Drive the contract on an EVM
         run: node check.mjs ..
         working-directory: solidity/evm
+
+  crash-test:
+    name: Crash test
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install the crash test, on this checkout's walletcap
+        run: |
+          npm install --no-audit --no-fund --no-package-lock
+          npm install --no-save --no-audit --no-fund --no-package-lock ../js
+        working-directory: crash-test
+      - name: Run it
+        run: node --test
+        working-directory: crash-test

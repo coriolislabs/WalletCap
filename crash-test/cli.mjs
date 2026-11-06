@@ -1,0 +1,163 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// walletcap-crash-test: put Coinbase CDP's x402 spend controls through the events that hand an
+// agent a fresh budget (a restart, replicas, a shared store, a different asset), put walletcap
+// through the same events, and print what got past the cap. Offline: nothing is sent.
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
+import { openBudget } from 'walletcap';
+
+const AGENT = fileURLToPath(new URL('./agent.mjs', import.meta.url));
+// How long the shared store takes to answer each call: a network database a millisecond away.
+const STORE_LATENCY_MS = 1;
+const CAP = 150_000_000n; // $150, in USDC's six decimals
+const FIFTY = { asset: 'USDC', atomic: '50000000' };
+const EURC_1000 = { asset: 'EURC', atomic: '1000000000' };
+
+/** Each event runs once under CDP's controls and once under walletcap, from a fresh start. */
+export const SCENARIOS = [
+  { id: 'restart', label: 'restart, then pay again', cdp: 'cdp', agents: 2, together: false, payments: Array(4).fill(FIFTY) },
+  { id: 'replicas', label: '10 replicas', cdp: 'cdp', agents: 10, together: true, payments: Array(3).fill(FIFTY) },
+  { id: 'shared-store', label: `10 replicas, shared store ${STORE_LATENCY_MS} ms away`, cdp: 'cdp-shared', agents: 10, together: true, payments: Array(3).fill(FIFTY) },
+  { id: 'asset-switch', label: 'payee asks for EURC, not USDC', cdp: 'cdp', agents: 1, together: false, payments: [EURC_1000] },
+];
+
+const versionOf = name => {
+  for (const dir of createRequire(import.meta.url).resolve.paths(name) ?? []) {
+    const file = join(dir, name, 'package.json');
+    if (existsSync(file)) return JSON.parse(readFileSync(file, 'utf8')).version;
+  }
+  return 'not installed';
+};
+
+const runAgent = config => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', AGENT, JSON.stringify(config)], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.on('error', reject);
+  child.on('close', code => {
+    const line = stdout.split('\n').find(l => l.startsWith('RESULT '));
+    if (code === 0 && line) resolve(JSON.parse(line.slice('RESULT '.length)));
+    else reject(new Error(`an agent exited ${code}: ${stderr.trim().split('\n').slice(-3).join(' ')}`));
+  });
+});
+
+// Replicas start together: each waits for the go file, so their payments overlap.
+async function runAgents(configs, together, dir) {
+  if (!together) {
+    const results = [];
+    for (const config of configs) results.push(await runAgent(config));
+    return results;
+  }
+  const go = join(dir, 'go');
+  const running = configs.map((config, i) => runAgent({ ...config, ready: join(dir, `ready-${i}`), go }));
+  const until = Date.now() + 60_000;
+  while (!configs.every((_, i) => existsSync(join(dir, `ready-${i}`)))) {
+    if (Date.now() > until) throw new Error('the replicas did not start');
+    await new Promise(done => setTimeout(done, 5));
+  }
+  writeFileSync(go, '');
+  return Promise.all(running);
+}
+
+async function runControl(scenario, control, payTo) {
+  const dir = mkdtempSync(join(tmpdir(), 'walletcap-crash-'));
+  try {
+    const key = generatePrivateKey();
+    const budgetPath = join(dir, 'budget.sqlite');
+    if (control === 'walletcap') {
+      // The owner sets the budget once, as `npx walletcap set` does; every agent opens it.
+      openBudget({ wallet: privateKeyToAccount(key).address, path: budgetPath, perPayment: '$50', perDay: '$150', create: true }).close();
+    }
+    const base = { control, key, payTo, budgetPath, storePath: join(dir, 'cdp-store.sqlite'), storeLatencyMs: STORE_LATENCY_MS, payments: scenario.payments };
+    const results = (await runAgents(Array.from({ length: scenario.agents }, () => base), scenario.together, dir)).flat();
+    const signed = asset => results.filter(r => r.signed && r.asset === asset).reduce((sum, r) => sum + BigInt(r.atomic), 0n);
+    const usdc = signed('USDC');
+    return {
+      control,
+      usdc,
+      eurc: signed('EURC'),
+      over: usdc > CAP ? usdc - CAP : 0n,
+      refused: results.filter(r => !r.signed).length,
+      reasons: [...new Set(results.filter(r => !r.signed).map(r => r.reason))],
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+export async function crashTest() {
+  const started = Date.now();
+  const payTo = privateKeyToAccount(generatePrivateKey()).address;
+  const scenarios = [];
+  for (const scenario of SCENARIOS) {
+    scenarios.push({
+      id: scenario.id,
+      label: scenario.label,
+      cdp: await runControl(scenario, scenario.cdp, payTo),
+      walletcap: await runControl(scenario, 'walletcap', payTo),
+    });
+  }
+  return {
+    versions: { '@coinbase/cdp-sdk': versionOf('@coinbase/cdp-sdk'), '@x402/core': versionOf('@x402/core'), walletcap: versionOf('walletcap') },
+    policy: { perPayment: '$50', per24h: '$150', asset: 'USDC', network: 'Base' },
+    scenarios,
+    seconds: (Date.now() - started) / 1000,
+  };
+}
+
+const dollars = atomic => `$${(Number(atomic) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+const eurc = atomic => `${(Number(atomic) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 2 })} EURC`;
+
+const cell = result => {
+  if (result.eurc > 0n) return `${eurc(result.eurc)} signed, counted as $0`;
+  if (result.usdc === 0n) return 'refused before signing';
+  return `${dollars(result.usdc)} signed · ${dollars(result.over)} over`;
+};
+
+export function report(run) {
+  const rows = [['', "CDP's controls", 'walletcap'], ...run.scenarios.map(s => [s.label, cell(s.cdp), cell(s.walletcap)])];
+  const widths = [0, 1].map(col => Math.max(...rows.map(row => row[col].length)) + 3);
+  const table = rows.map(row => row[0].padEnd(widths[0]) + row[1].padEnd(widths[1]) + row[2]).join('\n');
+  const total = side => run.scenarios.reduce((sum, s) => sum + s[side].over, 0n);
+  const totalEurc = side => run.scenarios.reduce((sum, s) => sum + s[side].eurc, 0n);
+  const past = side => [total(side) > 0n || totalEurc(side) === 0n ? dollars(total(side)) : null, totalEurc(side) > 0n ? eurc(totalEurc(side)) : null].filter(Boolean).join(' and ');
+  const { versions } = run;
+  return [
+    'walletcap crash test: Coinbase CDP x402 spend controls',
+    `@coinbase/cdp-sdk ${versions['@coinbase/cdp-sdk']} · @x402/core ${versions['@x402/core']} · walletcap ${versions.walletcap}`,
+    'Every agent is held to $50 a payment and $150 in any 24 hours, in USDC on Base.',
+    '',
+    table,
+    '',
+    `Past the $150 cap: ${past('cdp')} with CDP's controls; ${past('walletcap')} with walletcap.`,
+    '',
+    "CDP's controls: applySpendControls, set as Coinbase's README shows, with its default in-memory store,",
+    `or with a shared store built to its SpendStore interface that answers each call after ${STORE_LATENCY_MS} ms, as Redis`,
+    "or Postgres over the network does. CDP reads the total, then records the payment: replicas can read",
+    'the same total before any of them records. walletcap: budget.guard() on the same x402 client, with',
+    'one budget file every agent opens.',
+    'Nothing was sent. Each payment is an x402 authorization signed offline by a throwaway key that',
+    'holds nothing; a payee holding one could settle it on Base until it expires.',
+    `Ran in ${run.seconds.toFixed(1)}s.`,
+  ].join('\n');
+}
+
+const held = run => run.scenarios.every(s => s.walletcap.over === 0n && s.walletcap.eurc === 0n);
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const { values } = parseArgs({ options: { json: { type: 'boolean' } } });
+  const run = await crashTest();
+  process.stdout.write(values.json
+    ? `${JSON.stringify(run, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2)}\n`
+    : `${report(run)}\n`);
+  process.exitCode = held(run) ? 0 : 1;
+}

@@ -35,4 +35,10 @@ fi
 echo "== Solidity (EVM check) =="
 (cd solidity/evm && npm install --no-audit --no-fund --no-package-lock && node check.mjs ..)
 
+echo "== Crash test =="
+(cd crash-test \
+  && npm install --no-audit --no-fund --no-package-lock \
+  && npm install --no-save --no-audit --no-fund --no-package-lock ../js \
+  && node --test)
+
 echo "All checks passed."
