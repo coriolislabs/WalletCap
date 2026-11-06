@@ -1,6 +1,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # walletcap
 
+[![CircleCI](https://dl.circleci.com/status-badge/img/circleci/9kf5Wo9wYAuLZHsV9nFTQC/Pcdc3JTt5shsZfYpip6SBB/tree/main.svg?style=svg)](https://app.circleci.com/pipelines/circleci/9kf5Wo9wYAuLZHsV9nFTQC/Pcdc3JTt5shsZfYpip6SBB)
+
 **Your agent's spending limit forgets. This one doesn't.** By ShadowPath.
 
 Agent payment kits count "spent so far" per process, per key, per permission or per
