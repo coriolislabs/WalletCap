@@ -12,7 +12,10 @@ const reply = (id, result) => process.stdout.write(`${JSON.stringify({ jsonrpc: 
 createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'initialize') return reply(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'payments-mcp', version: 'test' } });
-  if (message.method === 'tools/list') return reply(message.id, { tools: [{ name: 'make_http_request_with_x402' }, { name: 'send' }, { name: 'get_wallet_balance' }] });
+  if (message.method === 'tools/list') {
+    const names = ['make_http_request_with_x402', 'send', 'get_wallet_balance', 'trade', 'drain_wallet'];
+    return reply(message.id, { tools: names.map(name => ({ name })) });
+  }
   if (message.method !== 'tools/call') return message.id === undefined ? undefined : reply(message.id, {});
   appendFileSync(process.env.FAKE_MCP_LOG, `${JSON.stringify(message.params)}\n`);
   const { name } = message.params;

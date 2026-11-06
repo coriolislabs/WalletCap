@@ -76,15 +76,55 @@ contract AccountCapSpenderTest {
         _pay(_permission(1), PER_PAYMENT);
     }
 
-    function test_spend_counts_for_the_whole_window_then_ages_out() public {
+    function test_spend_counts_for_the_whole_window_then_ages_out_within_one_bucket() public {
         for (uint256 i; i < 3; ++i) _pay(_permission(1), PER_PAYMENT);
-        vm.warp(START + WINDOW); // a payment counts while at + window >= now
+        vm.warp(START + WINDOW); // a payment counts for at least the whole window
         vm.expectRevert(abi.encodeWithSelector(AccountCapSpender.OverBudget.selector, CAP, PER_PAYMENT, CAP));
         _pay(_permission(2), PER_PAYMENT);
-        vm.warp(START + WINDOW + 1);
+        // It counts as if made at the end of its bucket, so it may count a little longer.
+        uint256 width = spender.bucketWidth();
+        uint256 bucketEnd = (START / width + 1) * width - 1;
+        vm.warp(bucketEnd + WINDOW);
+        require(spender.spentInWindow(account, address(token)) == CAP, "still counts at its bucket's end plus the window");
+        vm.warp(bucketEnd + WINDOW + 1);
         require(spender.spentInWindow(account, address(token)) == 0, "aged out");
         _pay(_permission(2), PER_PAYMENT);
         require(spender.spentInWindow(account, address(token)) == PER_PAYMENT, "one payment counts");
+    }
+
+    function test_no_window_long_span_holds_more_than_the_cap() public {
+        // Try $50 at irregular times for five days, across bucket edges, and check every
+        // window-long span against an exact log of what was actually paid.
+        uint256[] memory paidAt = new uint256[](64);
+        uint256 count;
+        uint256 at = START;
+        for (uint256 attempt; attempt < 64; ++attempt) {
+            at += 1 hours + (attempt * 997) % 3 hours; // 1h to 4h apart, never bucket-aligned
+            vm.warp(at);
+            vm.prank(agent);
+            try spender.pay(_permission(1), uint160(PER_PAYMENT), payee) {
+                paidAt[count++] = at;
+            } catch {}
+            uint256 exact;
+            for (uint256 i; i < count; ++i) {
+                if (paidAt[i] + WINDOW >= at) exact += PER_PAYMENT;
+            }
+            require(exact <= CAP, "no window-long span holds more than the cap");
+            require(exact <= spender.spentInWindow(account, address(token)), "the contract never counts less than the log");
+        }
+        require(count >= 10, "the budget comes back after each window");
+    }
+
+    function test_a_burst_then_a_quiet_window_does_not_lock_the_account() public {
+        // An unbounded log made the first payment after this burst cost ~17.7M gas, past
+        // the 2^24 per-transaction cap. The bucket ring keeps it flat.
+        ISpendPermissionManager.SpendPermission memory permission = _permission(1);
+        for (uint256 i; i < 3_000; ++i) _pay(permission, 1_000); // $0.001 each
+        vm.warp(START + WINDOW + spender.bucketWidth() * 2);
+        uint256 before = gasleft();
+        _pay(permission, PER_PAYMENT);
+        require(before - gasleft() < 250_000, "a payment after a burst stays cheap");
+        require(spender.spentInWindow(account, address(token)) == PER_PAYMENT, "the burst aged out");
     }
 
     function test_only_the_agent_can_pay() public {
@@ -131,5 +171,7 @@ contract AccountCapSpenderTest {
         new AccountCapSpender(manager, agent, CAP, 0, PER_PAYMENT, payees);
         vm.expectRevert(AccountCapSpender.InvalidConfiguration.selector);
         new AccountCapSpender(manager, agent, CAP, WINDOW, PER_PAYMENT, new address[](0));
+        vm.expectRevert(AccountCapSpender.InvalidConfiguration.selector);
+        new AccountCapSpender(manager, agent, CAP, WINDOW + 1, PER_PAYMENT, payees); // not a multiple of BUCKETS
     }
 }

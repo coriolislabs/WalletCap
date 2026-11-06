@@ -162,12 +162,17 @@ export declare class Budget {
   history(options?: { limit?: number }): Payment[];
   /** Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client. */
   guard<C extends X402HookedClient>(client: C, options?: { assets?: AssetEntry[] }): C;
+  /**
+   * Count every payment a Coinbase AgentKit X402ActionProvider makes in this budget: each x402
+   * client the provider builds is guarded before it can sign. Returns the provider.
+   */
+  guardAgentKit<P extends object>(provider: P, options?: { assets?: AssetEntry[] }): P;
   /** A SpendStore for Coinbase's CDP applySpendControls that counts in this budget. */
   cdpStore(options: { asset: string; scale?: bigint | number; clock?: () => number }): SharedBudgetStore;
   close(): void;
 }
 
-/** Open the wallet's budget, creating it on first use. */
+/** Open the wallet's budget. Its owner creates it with `walletcap set`; pass create: true only for a demo. */
 export declare function openBudget(options: BudgetOptions): Budget;
 
 /** Dollars as micro-dollars. */

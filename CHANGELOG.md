@@ -1,6 +1,30 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `AccountCapSpender` no longer locks an account after a burst of payments. An unbounded log
+  made the first payment after 3,000 tiny ones cost about 17.7M gas, past the 2^24
+  per-transaction cap. The window is now counted in 24 buckets in a fixed ring of 25 slots, so
+  every `pay` costs the same gas. A payment counts for up to one bucket (window/24) past its
+  window, never less. The window must be a multiple of 24 seconds.
+- `walletcap awal-mcp` ran `npx -y @coinbase/payments-mcp`, which is Coinbase's installer, not
+  the MCP server. It now runs the installed server, `~/.payments-mcp/bundle.js`, and says how to
+  install it when it is missing.
+- `walletcap awal-mcp` forwarded every tool it didn't count. It now passes through only the
+  tools that move no money, and counts `send` and `make_http_request_with_x402`. It refuses
+  everything else, `trade` included, and leaves those tools out of `tools/list`, unless the
+  owner names one with `--allow-tool`. JSON-RPC batches and lines that aren't JSON are refused.
+
+### Added
+
+- `budget.guardAgentKit(provider)` puts the budget on every x402 client an AgentKit
+  `X402ActionProvider` builds. The README's subclass recipe didn't compile in TypeScript,
+  where `createX402Client` is private. `tsc` now checks the recipe against AgentKit's declared
+  types in the test suite.
+
 ## 0.2.2 — 2026-11-05
 
 ### Changed

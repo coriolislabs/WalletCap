@@ -6,8 +6,10 @@
 // signs it, and the wallet is capped at that amount. A confirmed settlement counts for one
 // window; a payment the payee never confirms keeps counting until its owner releases it.
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
@@ -338,11 +340,28 @@ export async function awalMain(argv, { env = process.env, stdout = process.stdou
 }
 
 // ---------------------------------------------------------------------------------------------
-// npx walletcap awal-mcp [--wallet <address>] [--path <file>] [-- <server command>]: Coinbase's
-// payments-mcp server behind a proxy that counts its send and make_http_request_with_x402 calls.
+// npx walletcap awal-mcp [--wallet <address>] [--path <file>] [--allow-tool <name>]... [-- <server command>]:
+// Coinbase's Agentic Wallet MCP server behind a proxy that counts its send and
+// make_http_request_with_x402 calls, and refuses every tool it does not know.
 
 const MCP_PAYMENT_TOOLS = { make_http_request_with_x402: 'make-x402-request', send: 'send-transaction' };
-const DEFAULT_SERVER = ['npx', '-y', '@coinbase/payments-mcp'];
+
+/**
+ * The server's tools that move no money (payments-mcp 2.12.2), passed through as they are. Any
+ * other tool, `trade` included, is refused unless the wallet's owner names it with --allow-tool:
+ * a tool walletcap does not know may move money it cannot count.
+ */
+export const MCP_PASS_THROUGH_TOOLS = Object.freeze([
+  'bazaar_get_resource_details', 'bazaar_list', 'bazaar_search', 'check_session_status',
+  'get_wallet_address', 'get_wallet_balance', 'show_wallet_app', 'sign_in_with_email',
+  'verify_email_otp', 'x402_discover_payment_requirements',
+]);
+
+/**
+ * Where Coinbase's server runs from. `npx @coinbase/payments-mcp` is its installer, not the
+ * server: it downloads the server to ~/.payments-mcp, and MCP clients run bundle.js with node.
+ */
+export const paymentsMcpServer = (home = homedir()) => [process.execPath, join(home, '.payments-mcp', 'bundle.js')];
 
 const toolResult = raw => {
   const text = raw?.content?.find(item => item?.type === 'text')?.text;
@@ -356,18 +375,38 @@ const toolResult = raw => {
   }
 };
 
-/** Proxy an MCP client (stdin/stdout) to the payments-mcp server. Resolves with the server's exit code. */
-export async function awalMcpMain(argv, { env = process.env, input = process.stdin, output = process.stdout, stderr = process.stderr } = {}) {
+/**
+ * Proxy an MCP client (stdin/stdout) to Coinbase's Agentic Wallet MCP server. Payments are
+ * counted, the tools in MCP_PASS_THROUGH_TOOLS and --allow-tool pass through, and every other
+ * tool is refused and left out of tools/list. Resolves with the server's exit code.
+ */
+export async function awalMcpMain(argv, { env = process.env, input = process.stdin, output = process.stdout, stderr = process.stderr, home } = {}) {
   const split = argv.indexOf('--');
   const own = split < 0 ? argv : argv.slice(0, split);
-  const server = split < 0 ? DEFAULT_SERVER : argv.slice(split + 1);
-  const { values } = parseArgs({ args: own, options: { wallet: { type: 'string' }, path: { type: 'string' } }, strict: true });
+  const { values } = parseArgs({
+    args: own,
+    options: { wallet: { type: 'string' }, path: { type: 'string' }, 'allow-tool': { type: 'string', multiple: true } },
+    strict: true,
+  });
+  const server = split < 0 ? paymentsMcpServer(home) : argv.slice(split + 1);
+  if (server.length === 0) {
+    stderr.write('walletcap: give the MCP server command after --\n');
+    return 2;
+  }
+  if (split < 0 && !existsSync(server[1])) {
+    stderr.write(`walletcap: Coinbase's Agentic Wallet MCP server is not installed at ${server[1]}. `
+      + 'Install it once with: npx @coinbase/payments-mcp install --client other --no-auto-config '
+      + '(or give walletcap the server command after --)\n');
+    return 1;
+  }
+  const passed = new Set([...MCP_PASS_THROUGH_TOOLS, ...(values['allow-tool'] ?? [])]);
+  const offered = name => Object.hasOwn(MCP_PAYMENT_TOOLS, name) || passed.has(name);
   const child = spawn(server[0], server.slice(1), { stdio: ['pipe', 'pipe', 'inherit'], env });
   const write = (stream, message) => stream.write(`${JSON.stringify(message)}\n`);
   const pending = new Map();
-  let next = 0;
+  const listing = new Set(); // the client's tools/list requests, whose answers are filtered
   const callTool = (name, args) => new Promise((resolveCall, rejectCall) => {
-    const id = `walletcap-${next += 1}`;
+    const id = `walletcap-${randomUUID()}`;
     pending.set(id, { resolve: resolveCall, reject: rejectCall });
     write(child.stdin, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
   });
@@ -376,10 +415,18 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
     let message;
     try { message = JSON.parse(line); } catch { output.write(`${line}\n`); return; }
     const waiting = pending.get(message?.id);
-    if (waiting === undefined) { output.write(`${line}\n`); return; }
-    pending.delete(message.id);
-    if (message.error) waiting.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
-    else waiting.resolve(message.result);
+    if (waiting !== undefined) {
+      pending.delete(message.id);
+      if (message.error) waiting.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+      else waiting.resolve(message.result);
+      return;
+    }
+    const key = message?.id === undefined ? undefined : JSON.stringify(message.id);
+    if (key !== undefined && listing.delete(key) && Array.isArray(message.result?.tools)) {
+      write(output, { ...message, result: { ...message.result, tools: message.result.tools.filter(tool => offered(tool?.name)) } });
+      return;
+    }
+    output.write(`${line}\n`);
   });
 
   // The guard talks to the wallet through the server's own tools, one guard per call so concurrent
@@ -419,11 +466,37 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
 
   createInterface({ input }).on('line', line => {
     let message;
-    try { message = JSON.parse(line); } catch { child.stdin.write(`${line}\n`); return; }
-    if (message?.method === 'tools/call' && Object.hasOwn(MCP_PAYMENT_TOOLS, message.params?.name ?? '')) {
-      handle(message).catch(error => stderr.write(`walletcap: ${error.message}\n`));
+    try {
+      message = JSON.parse(line);
+    } catch {
+      stderr.write('walletcap: dropped a line from the MCP client that is not JSON\n');
       return;
     }
+    if (Array.isArray(message)) {
+      // A batch would carry calls past the checks below; MCP dropped batches in 2025-06-18.
+      write(output, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'walletcap does not forward JSON-RPC batches' } });
+      return;
+    }
+    if (message?.method === 'tools/call') {
+      const name = String(message.params?.name);
+      if (Object.hasOwn(MCP_PAYMENT_TOOLS, name)) {
+        handle(message).catch(error => stderr.write(`walletcap: ${error.message}\n`));
+        return;
+      }
+      if (!passed.has(name)) {
+        write(output, {
+          jsonrpc: '2.0',
+          id: message.id,
+          result: {
+            content: [{ type: 'text', text: `walletcap refused ${name}: it can't tell whether this tool moves money, so it can't count it. `
+              + `The wallet's owner can let it through, uncounted, with --allow-tool ${name}` }],
+            isError: true,
+          },
+        });
+        return;
+      }
+    }
+    if (message?.method === 'tools/list' && message.id !== undefined && message.id !== null) listing.add(JSON.stringify(message.id));
     child.stdin.write(`${line}\n`);
   }).on('close', () => child.stdin.end());
 

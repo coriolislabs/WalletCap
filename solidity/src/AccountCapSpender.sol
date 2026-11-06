@@ -30,29 +30,38 @@ interface ISpendPermissionManager {
 /// payee, at most `perPayment` at a time and `cap` in any `window` seconds. A revoke
 /// that the owner lands later in the same block is not visible here, so a payment
 /// ordered ahead of it in that block still settles.
+///
+/// The window is counted in `BUCKETS` equal buckets of `bucketWidth` seconds, kept in
+/// a fixed ring of `BUCKETS + 1` storage slots per account and token. Every `pay` reads
+/// the same number of slots however many payments came before it, so a burst of tiny
+/// payments cannot make a later payment too expensive to run. A payment counts as if it
+/// were made at the last second of its bucket: from when it is made until its bucket's
+/// end plus `window`. That is up to one bucket longer than an exact log, never shorter,
+/// so no `window`-long span of time ever holds more than `cap`.
 contract AccountCapSpender {
     address internal constant NATIVE_TOKEN = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
-    struct Payment {
-        uint64 at;
-        uint192 amount;
-    }
+    /// @notice How many buckets the window is counted in.
+    uint256 public constant BUCKETS = 24;
 
-    /// @dev payments[head:] are the ones still inside the window; total is their sum.
-    struct Ledger {
-        Payment[] payments;
-        uint256 head;
-        uint256 total;
+    /// @dev One bucket: its index (timestamp / bucketWidth) and what was paid in it. One slot.
+    struct Bucket {
+        uint64 index;
+        uint192 amount;
     }
 
     ISpendPermissionManager public immutable manager;
     address public immutable agent;
     uint256 public immutable cap;
     uint256 public immutable window;
+    /// @notice `window / BUCKETS` seconds.
+    uint256 public immutable bucketWidth;
     uint256 public immutable perPayment;
 
     mapping(address payee => bool) public allowedPayee;
-    mapping(bytes32 accountToken => Ledger) internal ledgers;
+    /// @dev Bucket i lives in slot i % (BUCKETS + 1): the BUCKETS + 1 buckets that can
+    /// still count always occupy distinct slots.
+    mapping(bytes32 accountToken => Bucket[BUCKETS + 1]) internal ledgers;
 
     event Paid(
         address indexed account,
@@ -71,6 +80,7 @@ contract AccountCapSpender {
     error OverBudget(uint256 spentInWindow, uint256 amount, uint256 cap);
     error TransferFailed();
 
+    /// @param window_ The rolling window in seconds: a positive multiple of BUCKETS.
     constructor(
         ISpendPermissionManager manager_,
         address agent_,
@@ -81,13 +91,14 @@ contract AccountCapSpender {
     ) {
         if (
             address(manager_) == address(0) || agent_ == address(0) || window_ == 0
-                || perPayment_ == 0 || perPayment_ > cap_ || cap_ > type(uint192).max
-                || payees.length == 0
+                || window_ % BUCKETS != 0 || perPayment_ == 0 || perPayment_ > cap_
+                || cap_ > type(uint192).max || payees.length == 0
         ) revert InvalidConfiguration();
         manager = manager_;
         agent = agent_;
         cap = cap_;
         window = window_;
+        bucketWidth = window_ / BUCKETS;
         perPayment = perPayment_;
         for (uint256 i; i < payees.length; ++i) {
             if (payees[i] == address(0)) revert InvalidConfiguration();
@@ -104,40 +115,34 @@ contract AccountCapSpender {
         if (permission.spender != address(this)) revert WrongSpender();
         if (permission.token == NATIVE_TOKEN) revert NativeTokenUnsupported();
         if (amount > perPayment) revert OverPerPayment(amount, perPayment);
-        Ledger storage ledger = ledgers[_key(permission.account, permission.token)];
-        uint256 total = _expire(ledger);
+        Bucket[BUCKETS + 1] storage ledger = ledgers[_key(permission.account, permission.token)];
+        uint256 current = block.timestamp / bucketWidth;
+        uint256 total = _counted(ledger, current);
         if (total + amount > cap) revert OverBudget(total, amount, cap);
-        ledger.payments.push(Payment({at: uint64(block.timestamp), amount: uint192(amount)}));
-        ledger.total = total + amount;
+        Bucket storage bucket = ledger[current % (BUCKETS + 1)];
+        if (bucket.index == current) {
+            bucket.amount += uint192(amount); // total + amount <= cap <= type(uint192).max
+        } else {
+            bucket.index = uint64(current);
+            bucket.amount = uint192(amount);
+        }
         manager.spend(permission, amount);
         _transfer(permission.token, payee, amount);
         emit Paid(permission.account, permission.token, payee, amount, total + amount);
     }
 
-    /// @notice What `account` has paid in `token` inside the current window.
-    function spentInWindow(address account, address token) external view returns (uint256 total) {
-        Ledger storage ledger = ledgers[_key(account, token)];
-        total = ledger.total;
-        for (uint256 i = ledger.head; i < ledger.payments.length; ++i) {
-            Payment memory payment = ledger.payments[i];
-            if (uint256(payment.at) + window >= block.timestamp) break;
-            total -= payment.amount;
-        }
+    /// @notice What `account` has paid in `token` that still counts against the cap.
+    function spentInWindow(address account, address token) external view returns (uint256) {
+        return _counted(ledgers[_key(account, token)], block.timestamp / bucketWidth);
     }
 
-    /// @dev Drops payments that left the window (oldest first) and returns what still counts.
-    function _expire(Ledger storage ledger) internal returns (uint256 total) {
-        total = ledger.total;
-        uint256 head = ledger.head;
-        uint256 length = ledger.payments.length;
-        while (head < length) {
-            Payment memory payment = ledger.payments[head];
-            if (uint256(payment.at) + window >= block.timestamp) break;
-            total -= payment.amount;
-            delete ledger.payments[head];
-            ++head;
+    /// @dev Bucket i counts while (i + 1) * bucketWidth - 1 + window >= now, which is
+    /// exactly i + BUCKETS >= current. A stale slot holds an older index and is skipped.
+    function _counted(Bucket[BUCKETS + 1] storage ledger, uint256 current) internal view returns (uint256 total) {
+        for (uint256 slot; slot <= BUCKETS; ++slot) {
+            Bucket storage bucket = ledger[slot];
+            if (uint256(bucket.index) + BUCKETS >= current) total += bucket.amount;
         }
-        ledger.head = head;
     }
 
     function _key(address account, address token) internal pure returns (bytes32) {

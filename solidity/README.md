@@ -21,14 +21,20 @@ every payment through it against one rolling window instead.
   `(account, token)` ledger.
 - `perPayment` and `cap` are checked before the manager is called; a payment
   over either is refused.
-- The ledger is append-only and expires entries by timestamp. The array keeps
-  its historical slots, so a long-lived contract grows; budget for it.
+- The window is counted in `BUCKETS` (24) buckets of `window / 24` seconds, kept
+  in a fixed ring of 25 storage slots per `(account, token)`. Every `pay` reads
+  the same 25 slots, so its gas stays flat however many payments came before.
+  An unbounded log made the first payment after 3,000 tiny ones cost about
+  17.7M gas, past the 2^24 per-transaction cap, and locked the account.
+- A payment counts as if made at the last second of its bucket: for one window
+  from there. That is up to one bucket longer than an exact log, never shorter,
+  so no window-long span of time ever holds more than `cap`.
 
 ## Tests
 
 ```sh
 cd solidity
-forge test                 # 9 tests, Foundry
+forge test                 # 11 tests, Foundry
 ```
 
 The same behaviour is also checked without Foundry, on an in-process EVM:
@@ -36,13 +42,14 @@ The same behaviour is also checked without Foundry, on an in-process EVM:
 ```sh
 cd solidity/evm
 npm install
-node check.mjs ..          # 10 checks
+node check.mjs ..          # 12 checks
 ```
 
 ## Deploy (testnet only)
 
 The constructor takes the SpendPermissionManager, the agent, the cap, the
-rolling window in seconds, the per-payment max, and the allowlisted payees:
+rolling window in seconds (a multiple of 24), the per-payment max, and the
+allowlisted payees:
 
 ```sh
 forge create src/AccountCapSpender.sol:AccountCapSpender \
@@ -65,15 +72,14 @@ are on; the `ISpendPermissionManager.SpendPermission` struct in
 
 The audit should cover:
 
-- the per-account/token ledger and its expiry arithmetic, including a very large
-  `window`;
+- the per-account/token bucket ring: the bucket index and slot arithmetic, the
+  counting rule `index + BUCKETS >= current`, and a very large `window`;
 - the `manager.spend` call and the token transfer, including fee-on-transfer and
   non-standard ERC-20 return values;
 - access control (`agent` only), allowlisted payees, and the lack of an owner
   pause or upgrade path;
 - the revoke race: a revoke later in the same block is not visible to a payment
-  ordered ahead of it;
-- the append-only array's long-run gas behaviour.
+  ordered ahead of it.
 
 There is no audit report, no verified mainnet address, and no deployment
 script in this repository yet. Those are release blockers for on-chain use.

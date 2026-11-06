@@ -3,12 +3,12 @@
 // server are stand-ins here; the payee is a local HTTP server that answers 402 like an x402 one.
 import assert from 'node:assert/strict';
 import { execFile, spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, before, test } from 'node:test';
 import { BudgetRefused, openBudget } from '../index.mjs';
 import { guardAgenticWallet, usdcAtomic } from '../agentic.mjs';
@@ -202,7 +202,8 @@ test('npx walletcap awal-mcp: the MCP server answers, and payments past the cap 
   };
   try {
     assert.equal((await ask(1, 'initialize', {})).serverInfo.name, 'payments-mcp');
-    assert.equal((await ask(2, 'tools/list', {})).tools.length, 3);
+    // The server also offers trade and a tool walletcap has never seen: neither is listed.
+    assert.deepEqual((await ask(2, 'tools/list', {})).tools.map(t => t.name), ['make_http_request_with_x402', 'send', 'get_wallet_balance']);
     const pay = { baseURL: base, path: '/pay?ttl=300', method: 'GET' };
     const results = [];
     for (let id = 3; id < 7; id += 1) results.push(await ask(id, 'tools/call', { name: 'make_http_request_with_x402', arguments: pay }));
@@ -211,6 +212,12 @@ test('npx walletcap awal-mcp: the MCP server answers, and payments past the cap 
     const sent = await ask(7, 'tools/call', { name: 'send', arguments: { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia' } });
     assert.equal(sent.isError, true);
     assert.equal((await ask(8, 'tools/call', { name: 'get_wallet_balance', arguments: {} })).content.length, 1);
+    // A tool walletcap can't count is refused before it reaches the wallet.
+    for (const [id, name] of [[9, 'trade'], [10, 'drain_wallet']]) {
+      const refused = await ask(id, 'tools/call', { name, arguments: { amount: '1000' } });
+      assert.equal(refused.isError, true);
+      assert.match(refused.content[0].text, new RegExp(`walletcap refused ${name}.*--allow-tool ${name}`));
+    }
   } finally {
     proxy.stdin.end();
     await new Promise(done => proxy.on('exit', done));
@@ -221,4 +228,61 @@ test('npx walletcap awal-mcp: the MCP server answers, and payments past the cap 
   const budget = openBudget({ wallet: WALLET, path, create: false });
   assert.equal(budget.status().spent, 150_000n);
   budget.close();
+});
+
+// Drive `npx walletcap awal-mcp` over stdio: send lines, collect answers by id.
+const mcpProxy = (args, env) => {
+  const proxy = spawn(process.execPath, [CLI, 'awal-mcp', ...args], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const replies = new Map();
+  let stderr = '';
+  proxy.stderr.on('data', chunk => { stderr += chunk; });
+  createInterface({ input: proxy.stdout }).on('line', line => { const m = JSON.parse(line); replies.set(m.id, m); });
+  const send = line => proxy.stdin.write(`${line}\n`);
+  const reply = async id => {
+    for (let i = 0; i < 200 && !replies.has(id); i += 1) await new Promise(done => setTimeout(done, 25));
+    assert.ok(replies.has(id), `no reply to ${id}; stderr: ${stderr}`);
+    return replies.get(id);
+  };
+  const ask = async (id, method, params) => {
+    send(JSON.stringify({ jsonrpc: '2.0', id, method, params }));
+    return (await reply(id)).result;
+  };
+  const close = async () => {
+    proxy.stdin.end();
+    return new Promise(done => proxy.on('exit', code => done({ code, stderr })));
+  };
+  return { ask, send, reply, close };
+};
+
+test('npx walletcap awal-mcp runs the server Coinbase installed, not its installer', async () => {
+  const home = mkdtempSync(join(DIR, 'home-'));
+  const path = join(DIR, 'mcp-default.sqlite');
+  const log = join(DIR, 'mcp-default.log');
+  writeFileSync(log, '');
+  openBudget({ wallet: WALLET, path, perPayment: '$0.05', perDay: '$0.15', create: true }).close();
+  const env = { HOME: home, USERPROFILE: home, FAKE_MCP_LOG: log };
+
+  // Before Coinbase's installer has run, there is no server to start: say so, start nothing.
+  const missing = await mcpProxy(['--wallet', WALLET, '--path', path], env).close();
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /npx @coinbase\/payments-mcp install/);
+
+  // The installer leaves ~/.payments-mcp/bundle.js, an ES module MCP clients run with node.
+  mkdirSync(join(home, '.payments-mcp'));
+  writeFileSync(join(home, '.payments-mcp', 'package.json'), '{"type":"module"}');
+  writeFileSync(join(home, '.payments-mcp', 'bundle.js'), `import ${JSON.stringify(pathToFileURL(FAKE_MCP).href)};\n`);
+  const mcp = mcpProxy(['--wallet', WALLET, '--path', path, '--allow-tool', 'trade'], env);
+  try {
+    assert.equal((await mcp.ask(1, 'initialize', {})).serverInfo.name, 'payments-mcp');
+    // --allow-tool lets trade through, uncounted; a tool nobody named stays out.
+    assert.deepEqual((await mcp.ask(2, 'tools/list', {})).tools.map(t => t.name), ['make_http_request_with_x402', 'send', 'get_wallet_balance', 'trade']);
+    assert.notEqual((await mcp.ask(3, 'tools/call', { name: 'trade', arguments: {} })).isError, true);
+    assert.equal((await mcp.ask(4, 'tools/call', { name: 'drain_wallet', arguments: {} })).isError, true);
+    // A JSON-RPC batch could carry a call past those checks, so it is refused whole.
+    mcp.send(JSON.stringify([{ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'drain_wallet', arguments: {} } }]));
+    assert.equal((await mcp.reply(null)).error.code, -32600);
+  } finally {
+    await mcp.close();
+  }
+  assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line).name), ['trade']);
 });
