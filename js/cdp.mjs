@@ -8,13 +8,14 @@
 // write transaction, so two processes that both pass the SDK's own in-memory
 // check cannot both record a payment past the cap.
 import { BudgetError } from './errors.mjs';
-import { identifier, Ledger, units } from './ledger.mjs';
+import { checkKeys, identifier, Ledger, units } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
 
 // The CDP store is its own rail. The x402 guard also writes rail 'x402',
 // and a shared rail let a guard row reach the CDP loader with the wrong
 // reference shape.
 const RAIL = 'cdp';
+const OPTION_KEYS = new Set(['path', 'instrument', 'asset', 'scale', 'busyTimeoutMs']);
 
 // CDP compares assets after this normalization (EVM addresses lowercased).
 const normalizeAsset = asset => {
@@ -50,13 +51,15 @@ export class SharedBudgetStore {
   #asset;
   #scale;
 
-  constructor({ path, instrument, asset, scale = 1n, clock = Date.now, busyTimeoutMs = 30_000 }) {
+  constructor(options) {
+    checkKeys(options, OPTION_KEYS, 'SharedBudgetStore');
+    const { path, instrument, asset, scale = 1n, busyTimeoutMs = 30_000 } = options;
     if (typeof path !== 'string' || path.length === 0) throw new BudgetError('path is required');
     this.#instrument = identifier(instrument, 'instrument');
     if (typeof asset !== 'string' || asset.trim().length === 0) throw new BudgetError('asset is required');
     this.#asset = normalizeAsset(asset);
     this.#scale = units(scale, 'scale');
-    this.#ledger = new Ledger(path, { clock, busyTimeoutMs });
+    this.#ledger = new Ledger(path, { busyTimeoutMs });
   }
 
   get instrument() { return this.#instrument; }

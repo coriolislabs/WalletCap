@@ -28,6 +28,7 @@ from walletcap import (  # noqa: E402
     BudgetRefused,
     BudgetWarning,
     NotSent,
+    _clock,
     default_budget_path,
     format_usd,
     open_budget,
@@ -47,6 +48,15 @@ class Clock:
 
     def __call__(self) -> float:
         return self.at
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    """The ledger's own clock, replaced through the private hook for one test."""
+
+    fake = Clock()
+    monkeypatch.setattr(_clock, "source", fake)
+    return fake
 
 
 def _node_has_sqlite() -> bool:
@@ -109,11 +119,12 @@ def test_the_window_cannot_change_after_spend(tmp_path: Path) -> None:
     assert fresh.set_limits(cap="$150", window="1h").window_ms == 3_600_000
 
 
-def test_code_can_lower_a_limit_for_everyone_and_the_window_rolls(tmp_path: Path) -> None:
-    clock = Clock()
+def test_code_can_lower_a_limit_for_everyone_and_the_window_rolls(
+    tmp_path: Path, clock: Clock
+) -> None:
     path = tmp_path / "b.sqlite"
-    budget = open_budget(WALLET, path=path, per_day="$150", clock=clock, create=True)
-    open_budget(WALLET, path=path, per_day="$100", clock=clock)
+    budget = open_budget(WALLET, path=path, per_day="$150", create=True)
+    open_budget(WALLET, path=path, per_day="$100")
     assert budget.status().cap == 100_000_000
     _pay(budget, "$100")
     clock.at += DAY
@@ -154,9 +165,10 @@ def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
     assert entry.to == "0x4165cb72De51A67aac32DC33197d779552205efD"
 
 
-def test_a_reservation_with_a_settle_by_time_counts_one_window_past_it(tmp_path: Path) -> None:
-    clock = Clock()
-    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", clock=clock, create=True)
+def test_a_reservation_with_a_settle_by_time_counts_one_window_past_it(
+    tmp_path: Path, clock: Clock
+) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
     settles_by = datetime.fromtimestamp(clock.at, tz=UTC) + timedelta(minutes=5)
     budget.reserve("$100", settles_by=settles_by)
     clock.at += 300 + DAY
@@ -330,3 +342,14 @@ def test_a_warning_names_the_command_that_raises_the_limit(tmp_path: Path) -> No
         open_budget(WALLET, path=path, per_day="$20", on_warning=messages.append)
     assert len(messages) == 1
     assert f"walletcap set --wallet {WALLET} --path {path} --per-day 20" in messages[0]
+
+
+def test_the_clock_is_not_an_option(tmp_path: Path) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$150", create=True)
+    _pay(budget, "$150")
+    # 0.2.x took a clock per process; one running a day ahead saw an empty budget.
+    with pytest.raises(TypeError):
+        open_budget(WALLET, path=path, clock=lambda: 1e10)
+    with pytest.raises(BudgetRefused):
+        _pay(open_budget(WALLET, path=path), "$150")

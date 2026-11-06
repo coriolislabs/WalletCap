@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import shlex
-import time
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -310,7 +309,6 @@ class Budget:
         cap: object = None,
         window: object = None,
         max_payments: object = UNSET,
-        clock: Callable[[], float] = time.time,
         busy_timeout_seconds: float = 30.0,
         on_warning: Callable[[str], None] | None = None,
     ) -> None:
@@ -333,7 +331,7 @@ class Budget:
             )
         if create:
             self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._ledger = Ledger(self._path, clock=clock, busy_timeout_seconds=busy_timeout_seconds)
+        self._ledger = Ledger(self._path, busy_timeout_seconds=busy_timeout_seconds)
         ensured = self._ledger.ensure(self._wallet, unit="usd", create=create, **limits)
         if ensured.looser:
             self._warn_kept(on_warning, ensured.budget, limits)

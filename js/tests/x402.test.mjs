@@ -6,12 +6,14 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, test } from 'node:test';
+import { after, afterEach, test } from 'node:test';
+import { resetClock, setClock } from '../_clock.mjs';
 import { BudgetRefused, openBudget } from '../index.mjs';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-x402-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
+afterEach(resetClock);
 const kit = await x402();
 const DAY = 86_400_000;
 const TX = `0x${'cd'.repeat(32)}`;
@@ -19,8 +21,9 @@ let files = 0;
 
 const setup = (limits = { perPayment: '$0.05', perDay: '$0.15' }) => {
   const clock = { now: Date.now() };
+  setClock(() => clock.now);
   const path = join(DIR, `x402-${files++}.sqlite`);
-  const budget = openBudget({ wallet: kit.account.address, path, clock: () => clock.now, create: true, ...limits });
+  const budget = openBudget({ wallet: kit.account.address, path, create: true, ...limits });
   return { budget, clock, path, client: budget.guard(kit.client()) };
 };
 const settled = { success: true, transaction: TX, network: NETWORK };
@@ -93,8 +96,7 @@ test('an asset the budget cannot price is refused, and a priced one is chosen wh
 
 test('a stablecoin added with its decimals is counted in dollars, rounded up', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const dai = '0x00000000000000000000000000000000000000da';
-  const clock = { now: Date.now() };
-  const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'decimals.sqlite'), clock: () => clock.now, perDay: '$1', create: true });
+  const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'decimals.sqlite'), perDay: '$1', create: true });
   const client = budget.guard(kit.client(), { assets: [{ network: NETWORK, asset: dai, decimals: 18 }] });
   await client.createPaymentPayload(kit.required('100000000000000001', { asset: dai })); // $0.100000000000000001
   assert.equal(budget.status().inFlight, 100_001n);

@@ -12,7 +12,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { SharedBudgetStore } from './cdp.mjs';
 import { BudgetError, BudgetRefused, isNotSent, notSent } from './errors.mjs';
-import { Ledger, SCHEMA_VERSION } from './ledger.mjs';
+import { checkKeys, Ledger, SCHEMA_VERSION } from './ledger.mjs';
 import {
   defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
   normalizeWallet, parseLimits, shortWallet, toMicros,
@@ -25,20 +25,11 @@ export {
 };
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
-const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'clock', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
+const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
+const CDP_STORE_KEYS = new Set(['asset', 'scale']);
 const TO_LIMIT = 256;
 const NOTE_LIMIT = 1024;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
-
-const checkKeys = (source, known, what) => {
-  if (source === null || typeof source !== 'object') throw new BudgetError(`${what} takes an options object`);
-  for (const key of Object.keys(source)) {
-    if (known.has(key)) continue;
-    const plain = key.toLowerCase().replaceAll(/[-_]/g, '');
-    const match = [...known].find(candidate => candidate.toLowerCase() === plain);
-    throw new BudgetError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
-  }
-};
 
 const positive = micros => {
   if (micros === 0n) throw new BudgetError('the amount must be more than $0');
@@ -163,7 +154,7 @@ export class Budget {
       throw new BudgetError(`no budget file at ${this.#path}; its owner creates one with: npx walletcap set --wallet ${this.#wallet}${this.#pathFlag()} --per-day <dollars>`);
     }
     if (create) mkdirSync(dirname(this.#path), { recursive: true, mode: 0o700 });
-    this.#ledger = new Ledger(this.#path, { clock: options.clock ?? Date.now, busyTimeoutMs: options.busyTimeoutMs ?? 30_000 });
+    this.#ledger = new Ledger(this.#path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000 });
     try {
       const { looser, row } = this.#ledger.ensure(this.#wallet, limits, { unit: 'usd', create });
       if (looser.length > 0) this.#warnKept(options.onWarning, row, limits);
@@ -308,8 +299,10 @@ export class Budget {
   guardAgentKit(provider, options) { return guardX402ActionProvider(provider, this, options); }
 
   /** A SpendStore for Coinbase's CDP applySpendControls, counting in this budget. For a 6-decimal USD stablecoin. */
-  cdpStore({ asset, scale = 1n, clock = Date.now } = {}) {
-    return new SharedBudgetStore({ path: this.#path, instrument: this.#wallet, asset, scale, clock });
+  cdpStore(options = {}) {
+    checkKeys(options, CDP_STORE_KEYS, 'cdpStore');
+    const { asset, scale = 1n } = options;
+    return new SharedBudgetStore({ path: this.#path, instrument: this.#wallet, asset, scale });
   }
 
   close() { this.#ledger.close(); }

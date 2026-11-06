@@ -25,14 +25,14 @@ from __future__ import annotations
 import enum
 import re
 import sqlite3
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import AbstractContextManager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
 
+from walletcap import _clock
 from walletcap.errors import (
     BudgetError,
     BudgetRefused,
@@ -245,7 +245,6 @@ class Ledger:
         self,
         path: str | Path,
         *,
-        clock: Callable[[], float] = time.time,
         reservation_ttl_seconds: int | None = None,
         busy_timeout_seconds: float = 30.0,
     ) -> None:
@@ -254,7 +253,6 @@ class Ledger:
         if not busy_timeout_seconds > 0:
             raise BudgetError("busy_timeout_seconds must be positive")
         self._path = Path(path)
-        self._clock = clock
         self._ttl_ms = None if reservation_ttl_seconds is None else reservation_ttl_seconds * 1000
         self._busy_timeout = float(busy_timeout_seconds)
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -311,8 +309,11 @@ class Ledger:
 
         return self._transaction("BEGIN")
 
-    def _now_ms(self) -> int:
-        return int(self._clock() * 1000)
+    @staticmethod
+    def _now_ms() -> int:
+        """The ledger's own time: the system clock. Callers can't set it."""
+
+        return _clock.now_ms()
 
     def _budget_row(self, connection: sqlite3.Connection, instrument: str) -> sqlite3.Row:
         row: sqlite3.Row | None = connection.execute(

@@ -3,22 +3,25 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, test } from 'node:test';
-import { BudgetRefused, notSent, openBudget } from '../index.mjs';
+import { after, afterEach, test } from 'node:test';
+import { resetClock, setClock } from '../_clock.mjs';
+import { BudgetRefused, notSent, openBudget, SharedBudgetStore } from '../index.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
+afterEach(resetClock);
 
 let files = 0;
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 const DAY = 86_400_000;
 const TX = `0x${'ab'.repeat(32)}`;
 
-/** A fresh file and a clock the test moves. */
+/** A fresh file and a clock the test moves (the ledger's own clock, through the internal hook). */
 const fixture = (limits = { perPayment: '$50', perDay: '$150' }) => {
   const path = join(DIR, `budget-${files++}.sqlite`);
   const clock = { now: 1_800_000_000_000 };
-  const open = (more = {}) => openBudget({ wallet: WALLET, path, clock: () => clock.now, create: true, ...more });
+  setClock(() => clock.now);
+  const open = (more = {}) => openBudget({ wallet: WALLET, path, create: true, ...more });
   return { path, clock, open, budget: open(limits) };
 };
 
@@ -175,9 +178,9 @@ test('freezing stops every payment in every process until unfrozen', async () =>
 });
 
 test('checksummed, lowercase and CAIP-10 addresses spend from one budget', async () => {
-  const { path, clock } = fixture({ perDay: '$150' });
-  const a = openBudget({ wallet: '0xd797ead28C38575FDf4fC523866287372340Ca02', path, clock: () => clock.now });
-  const b = openBudget({ wallet: `eip155:8453:${WALLET}`, path, clock: () => clock.now });
+  const { path } = fixture({ perDay: '$150' });
+  const a = openBudget({ wallet: '0xd797ead28C38575FDf4fC523866287372340Ca02', path });
+  const b = openBudget({ wallet: `eip155:8453:${WALLET}`, path });
   await paid(a, '$100');
   await assert.rejects(paid(b, '$100'), refusedFor('budget'));
 });
@@ -216,4 +219,14 @@ test('zero and malformed amounts are refused before anything is reserved', async
   await assert.rejects(budget.pay('$5', 'not a function'), /fn is missing/);
   assert.throws(() => budget.reserve('five dollars'), { name: 'BudgetError' });
   assert.equal(budget.status().payments, 0n);
+});
+
+test('the clock is not an option: no process can move its own time to empty the budget', async () => {
+  const { path, budget } = fixture({ perDay: '$150' });
+  await paid(budget, '$150');
+  // 0.2.x let each process bring its own clock; one running a day ahead saw an empty budget.
+  assert.throws(() => openBudget({ wallet: WALLET, path, clock: () => Date.now() + DAY + 1 }), /unknown option clock/);
+  assert.throws(() => budget.cdpStore({ asset: '0x036cbd53842c5426634e7929541ec2318f3dcf7e', clock: Date.now }), /unknown option clock/);
+  assert.throws(() => new SharedBudgetStore({ path, instrument: WALLET, asset: '0x036cbd53842c5426634e7929541ec2318f3dcf7e', clock: Date.now }), /unknown option clock/);
+  await assert.rejects(paid(openBudget({ wallet: WALLET, path }), '$150'), refusedFor('budget'));
 });

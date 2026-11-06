@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { after, before, test } from 'node:test';
+import { after, afterEach, before, test } from 'node:test';
+import { resetClock, setClock } from '../_clock.mjs';
 import { BudgetRefused, openBudget } from '../index.mjs';
 import { guardAgenticWallet, usdcAtomic } from '../agentic.mjs';
 
@@ -46,10 +47,12 @@ after(() => {
   server?.close();
   rmSync(DIR, { recursive: true, force: true });
 });
+afterEach(resetClock);
 
 let files = 0;
 const newBudget = (clock = { now: Date.now() }, path = join(DIR, `b${files++}.sqlite`)) => {
-  const budget = openBudget({ wallet: WALLET, path, clock: () => clock.now, perPayment: '$0.05', perDay: '$0.15', create: true });
+  setClock(() => clock.now);
+  const budget = openBudget({ wallet: WALLET, path, perPayment: '$0.05', perDay: '$0.15', create: true });
   return { budget, clock, path };
 };
 

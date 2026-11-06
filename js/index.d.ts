@@ -47,8 +47,6 @@ export interface BudgetOptions extends Limits {
   path?: string;
   /** Create the file and the wallet's budget if missing (default false: only an owner's `walletcap set` creates them). Pass true only for a demo or a first-run setup. */
   create?: boolean;
-  /** Milliseconds since the epoch. Defaults to Date.now. */
-  clock?: () => number;
   /** How long to wait for another process's write. Defaults to 30000. */
   busyTimeoutMs?: number;
   /** Called instead of process.emitWarning when the file keeps a limit tighter than the code asks for. */
@@ -168,7 +166,7 @@ export declare class Budget {
    */
   guardAgentKit<P extends object>(provider: P, options?: { assets?: AssetEntry[] }): P;
   /** A SpendStore for Coinbase's CDP applySpendControls that counts in this budget. */
-  cdpStore(options: { asset: string; scale?: bigint | number; clock?: () => number }): SharedBudgetStore;
+  cdpStore(options: { asset: string; scale?: bigint | number }): SharedBudgetStore;
   close(): void;
 }
 
@@ -202,8 +200,6 @@ export interface SharedBudgetStoreOptions {
   asset: string;
   /** Budget units per atomic unit of `asset`. Defaults to 1n. */
   scale?: bigint | number;
-  /** Milliseconds since the epoch. Defaults to Date.now. */
-  clock?: () => number;
   /** How long to wait for another process's write transaction. Defaults to 30000. */
   busyTimeoutMs?: number;
 }

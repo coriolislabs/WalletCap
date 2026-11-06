@@ -6,6 +6,7 @@
 // tables and the same counting rule, so both languages spend from one budget.
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { now as clockNow } from './_clock.mjs';
 import { BudgetError, BudgetRefused } from './errors.mjs';
 import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, shortWallet } from './money.mjs';
 
@@ -70,6 +71,17 @@ export const identifier = (value, label) => {
   return value;
 };
 
+/** Refuse an option `what` doesn't take, naming the one that was probably meant. */
+export const checkKeys = (source, known, what) => {
+  if (source === null || typeof source !== 'object') throw new BudgetError(`${what} takes an options object`);
+  for (const key of Object.keys(source)) {
+    if (known.has(key)) continue;
+    const plain = key.toLowerCase().replaceAll(/[-_]/g, '');
+    const match = [...known].find(candidate => candidate.toLowerCase() === plain);
+    throw new BudgetError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
+  }
+};
+
 /** An integer in the budget's own unit that fits in 64 bits. */
 export const units = (value, label, { allowZero = false } = {}) => {
   let parsed;
@@ -117,17 +129,14 @@ const unitsMatch = (stored, wanted) => (DOLLAR_UNITS.has(wanted) ? DOLLAR_UNITS.
 export class Ledger {
   #db;
   #path;
-  #clock;
   #closed = false;
   #statements = new Map();
 
-  constructor(path, { clock = Date.now, busyTimeoutMs = 30_000 } = {}) {
+  constructor(path, { busyTimeoutMs = 30_000 } = {}) {
     if (typeof path !== 'string' || path.length === 0) throw new BudgetError('path is required');
-    if (typeof clock !== 'function') throw new BudgetError('clock must be a function');
     if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs <= 0) throw new BudgetError('busyTimeoutMs must be a positive integer');
     const { DatabaseSync } = loadSqlite();
     this.#path = path;
-    this.#clock = clock;
     try {
       this.#db = new DatabaseSync(path);
     } catch (error) {
@@ -150,7 +159,8 @@ export class Ledger {
 
   get path() { return this.#path; }
 
-  now() { return units(this.#clock(), 'clock', { allowZero: true }); }
+  /** The ledger's own time: the system clock, in milliseconds. Callers can't set it. */
+  now() { return units(clockNow(), 'clock', { allowZero: true }); }
 
   statement(sql) {
     let statement = this.#statements.get(sql);

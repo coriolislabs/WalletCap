@@ -38,6 +38,7 @@
     "walletcap": "cli.mjs"
   },
   "files": [
+    "_clock.mjs",
     "_keccak.mjs",
     "agentic.mjs",
     "cdp.mjs",
