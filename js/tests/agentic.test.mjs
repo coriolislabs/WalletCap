@@ -90,7 +90,7 @@ test('the wallet is capped at exactly the price walletcap checked', async () => 
   assert.deepEqual([budget.history()[0].status, budget.history()[0].tx, budget.history()[0].rail], ['settled', TX, 'awal-x402']);
 });
 
-test('a payee that holds 7-day authorizations collects at most the cap, restarts included', async () => {
+test('a payee that holds its authorizations collects at most the cap, restarts included', async () => {
   const clock = { now: Date.now() };
   const { path } = newBudget(clock);
   const hold = () => ({ status: 200, headers: { 'PAYMENT-RESPONSE': b64({ success: true, transaction: '' }) } });
@@ -100,14 +100,14 @@ test('a payee that holds 7-day authorizations collects at most the cap, restarts
     const { budget } = newBudget(clock, path);
     const guard = guardAgenticWallet(budget, { request: wallet(hold).request });
     for (let i = 0; i < 4; i += 1) {
-      try { await guard.request('make-x402-request', x402('?ttl=604800')); signed += 1; } catch (error) { assert.ok(refused('budget')(error), error); }
+      try { await guard.request('make-x402-request', x402('?ttl=3600')); signed += 1; } catch (error) { assert.ok(refused('budget')(error), error); }
     }
     budget.close();
   }
   assert.equal(signed, 3);
   const { budget } = newBudget(clock, path);
   assert.equal(budget.status().inFlight, 150_000n);
-  // Unconfirmed, they count until the owner releases them, whatever validity the payee asked for.
+  // Unconfirmed, on terms the wallet discovers again itself, they count until the owner releases them.
   clock.now += 30 * DAY;
   assert.equal(budget.status().inFlight, 150_000n);
   assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'unknown']);
@@ -177,16 +177,14 @@ test('an unconfirmed x402 payment on terms handed to the wallet counts until the
   assert.equal(budget.status().inFlight, 0n);
   assert.equal(budget.history()[0].status, 'expired');
 
-  // Terms walletcap discovered itself, or that aren't x402's exact scheme on EVM, or a wallet that
-  // never answered: walletcap can't tell when the payment can no longer settle.
-  const solana = { ...requirement('50000', 300), network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', payTo: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' };
+  // Terms walletcap discovered itself, or a wallet that never answered: walletcap can't tell when
+  // the payment can no longer settle.
   await guard.request('make-x402-request', x402('?ttl=300'));
-  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [solana] });
   const silent = guardAgenticWallet(budget, { request: wallet(() => { throw new Error('IPC request timed out'); }).request });
   await assert.rejects(silent.request('make-x402-request', { ...x402(), paymentRequirements: terms }), /timed out/);
   clock.now += 30 * DAY;
-  assert.equal(budget.status().inFlight, 150_000n);
-  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'unknown', 'expired']);
+  assert.equal(budget.status().inFlight, 100_000n);
+  assert.deepEqual(budget.history().map(row => row.status), ['unknown', 'unknown', 'expired']);
 });
 
 test("the payee's word that a payment on handed-in terms settled doesn't end its hold early", async () => {
@@ -202,6 +200,37 @@ test("the payee's word that a payment on handed-in terms settled doesn't end its
   assert.equal(budget.status().spent, 50_000n);
   clock.now += 1;
   assert.equal(budget.status().spent, 0n);
+});
+
+test("a term walletcap can't read doesn't switch off the hold's expiry, and terms it can't bound are refused", async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const w = wallet(); // the payee answers "settled" with a made-up hash and keeps the authorization
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  const solana = { ...requirement('50000', 60), network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', payTo: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v' };
+  // 0.3.0 gave the hold no expiry when any term handed over wasn't exact on EVM: one Solana term
+  // and the payee's "settled" ended the count after one window, with the EVM authorization still
+  // redeemable for an hour.
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [requirement('50000', 3600), solana], preferredNetwork: 'base-sepolia' });
+  assert.equal(budget.history()[0].status, 'settled');
+  clock.now += 3_600_000 + 60_000 + DAY;
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+  // A Solana transaction lasts as long as its blockhash, about a minute, however short the terms.
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [{ ...solana, maxTimeoutSeconds: 5 }], preferredNetwork: 'solana-devnet' });
+  clock.now += 120_000 + 60_000 + DAY;
+  assert.equal(budget.status().spent, 50_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+  // Any term over an hour, or one that doesn't say, and the wallet is never asked.
+  for (const seconds of [3601, 0, 1.5, '300', null, undefined]) {
+    const terms = [requirement('50000', 300), { ...requirement('50000', 300), maxTimeoutSeconds: seconds }];
+    await assert.rejects(guard.request('make-x402-request', { ...x402(), paymentRequirements: terms }), refused('timeout'), String(seconds));
+  }
+  await assert.rejects(guard.request('make-x402-request', x402('?ttl=604800')), refused('timeout'));
+  assert.equal(w.calls.length, 2);
+  assert.equal(budget.history().length, 2);
 });
 
 test('the hold lasts as long as the longest terms the wallet was handed, not only the ones walletcap would pick', async () => {

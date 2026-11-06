@@ -27,11 +27,33 @@ const FINGERPRINTS_KEPT = 10_000;
  */
 export const MAX_PAYMENT_TIMEOUT_SECONDS = 3600;
 
-const timeoutRefusal = requirements => {
-  const seconds = requirements.maxTimeoutSeconds;
+/** A refusal for terms whose validity walletcap can't bound to an hour or less, or null. */
+export const timeoutRefusal = requirements => {
+  const seconds = requirements?.maxTimeoutSeconds;
   if (Number.isSafeInteger(seconds) && seconds > 0 && seconds <= MAX_PAYMENT_TIMEOUT_SECONDS) return null;
-  return new BudgetRefused('timeout', `the payee asks for an authorization it could redeem for ${String(seconds)} seconds; `
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    return new BudgetRefused('timeout', `the payee's terms give no whole number of seconds for how long the payment can be redeemed `
+      + `(maxTimeoutSeconds: ${JSON.stringify(seconds) ?? 'none'}), so walletcap can't tell when it stops counting`);
+  }
+  return new BudgetRefused('timeout', `the payee asks for an authorization it could redeem for ${seconds} seconds; `
     + `walletcap signs for at most ${MAX_PAYMENT_TIMEOUT_SECONDS} seconds (an hour), as Coinbase's CDP spend controls do`);
+};
+
+// A Solana payment is a signed transaction, which the chain takes until its blockhash is 150
+// blocks old, about a minute, however short maxTimeoutSeconds is.
+const SOLANA_TRANSACTION_SECONDS = 120;
+
+/**
+ * How long after it is signed a payment on these terms can settle, in seconds, or null if the
+ * terms fail timeoutRefusal. Every scheme x402's clients sign expires maxTimeoutSeconds after
+ * signing: EIP-3009's validBefore, the Permit2 deadline, the escrow's pre-approval expiry, a
+ * batch deposit's validBefore. A Solana transaction lasts at least as long as its blockhash.
+ */
+export const settlesWithinSeconds = requirements => {
+  if (timeoutRefusal(requirements) !== null) return null;
+  const { network, maxTimeoutSeconds: seconds } = requirements;
+  const caip2 = Object.hasOwn(V1_NETWORKS, network) ? V1_NETWORKS[network] : String(network);
+  return caip2.startsWith('solana:') ? Math.max(seconds, SOLANA_TRANSACTION_SECONDS) : seconds;
 };
 
 /**

@@ -20,7 +20,7 @@ import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { SETTLES_BY } from './ledger.mjs';
 import { formatUsd, normalizeWallet, trimAscii } from './money.mjs';
-import { assetKey, assetTable, atomicOf, toMicros as atomicToMicros } from './x402.mjs';
+import { assetKey, assetTable, atomicOf, settlesWithinSeconds, timeoutRefusal, toMicros as atomicToMicros } from './x402.mjs';
 
 /** The wallet's chain names, as CAIP-2 networks. */
 export const AWAL_CHAINS = Object.freeze({
@@ -139,23 +139,19 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     });
   };
 
-  // When an unconfirmed x402 payment can no longer settle, if walletcap can tell. The wallet signs
-  // the terms it was handed (awal then skips its own 402 discovery); terms walletcap discovered
-  // itself, the wallet asks for again, and a payee can answer the two requests differently. On
-  // EVM, x402's exact scheme signs an authorization that expires maxTimeoutSeconds after it is
-  // signed, and once the wallet has answered, it has signed. The wallet may pay any of the terms
-  // it was handed, whatever walletcap would pick, so the longest of them counts, plus a minute of
-  // clock skew. Anything else counts until released.
-  const settlesByOf = (requirements, handed) => {
-    if (!handed) return null;
+  // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay any
+  // of the terms, whatever walletcap would pick, so the longest of them counts, whatever the
+  // scheme (settlesWithinSeconds), plus a minute of clock skew. If any term doesn't say, or asks
+  // for more than an hour, the payment is refused before the wallet is asked: walletcap would
+  // otherwise have only the payee's word that it settled.
+  const settlesWithinMs = requirements => {
     let longest = 0;
     for (const requirement of requirements) {
-      const seconds = requirement?.maxTimeoutSeconds;
-      if (requirement?.scheme !== 'exact' || !networkOf(requirement).startsWith('eip155:')
-        || !Number.isSafeInteger(seconds) || seconds <= 0) return null;
-      longest = Math.max(longest, seconds);
+      const refusal = timeoutRefusal(requirement);
+      if (refusal !== null) throw refusal;
+      longest = Math.max(longest, settlesWithinSeconds(requirement));
     }
-    return BigInt(now()) + BigInt(longest) * 1000n + CLOCK_SKEW_MS;
+    return BigInt(longest) * 1000n + CLOCK_SKEW_MS;
   };
 
   async function send(data) {
@@ -209,6 +205,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       else recorded(reservation, () => reservation.release());
       return result;
     }
+    const settlesWithin = settlesWithinMs(offered);
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
     const candidates = offered.filter(requirement => (preferred === undefined || networkOf(requirement) === preferred)
       && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme));
@@ -224,8 +221,8 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
       throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
     }
-    // An unconfirmed payment counts until its owner releases it (npx walletcap release), unless
-    // walletcap can tell when it can no longer settle (settlesByOf).
+    // A payment counts until its owner releases it (npx walletcap release), or, once the wallet
+    // has answered, until one window past the time it can no longer settle.
     const reservation = budget.reserve(micros, {
       rail: 'awal-x402', to: choice.payTo, note: url,
       details: { network: choice.network, asset: choice.asset, scheme: choice.scheme, maxTimeoutSeconds: choice.maxTimeoutSeconds },
@@ -241,8 +238,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     // The wallet has answered, so it has signed if it ever will. With the terms handed to it, the
     // hold learns when the authorization expires, before anything else: a commit never shortens
     // a hold, so the payee's own word that the payment settled can't free the budget early.
-    const settlesBy = settlesByOf(offered, handed);
-    if (settlesBy !== null) recorded(reservation, () => reservation[SETTLES_BY](settlesBy));
+    if (handed) recorded(reservation, () => reservation[SETTLES_BY](BigInt(now()) + settlesWithin));
     const answer = paymentResponseOf(result);
     if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
     else recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));
