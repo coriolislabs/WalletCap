@@ -125,6 +125,9 @@ export async function discoverRequirements(data, { fetch: fetchImpl = globalThis
 /**
  * Count every send and x402 payment made through `request(channel, data)`, the wallet's own
  * request channel, in `budget`. Returns a `request` with the same shape that applies the budget.
+ * `discover(data)`, if given, stands in for walletcap's own 402 discovery (discoverRequirements):
+ * it returns the 402 answer (`{ accepts, extensions }`) or just its list of payment requirements,
+ * or null when the endpoint asks for no payment.
  */
 export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchImpl, discover } = {}) {
   if (typeof request !== 'function') throw new BudgetError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
@@ -188,8 +191,12 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     // and signs only a term equal to one of them, maxTimeoutSeconds included, so the payee can't
     // show it others.
     const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
-    const required = handed ? null : await findRequirements(data);
+    const found = handed ? null : await findRequirements(data);
+    const required = Array.isArray(found) ? { accepts: found } : found ?? null;
     const url = requestUrl(data).href.slice(0, 1024);
+    if (!handed && required !== null && (!Array.isArray(required.accepts) || required.accepts.length === 0)) {
+      throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
+    }
     if (!handed && required === null) {
       // The endpoint asked for nothing. Let the request through with the wallet's smallest
       // possible payment cap, one atomic unit, counted, in case the payee asks for money after

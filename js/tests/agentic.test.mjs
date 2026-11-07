@@ -318,6 +318,22 @@ test("a budget that can't be written after the wallet answered raises PaymentNot
   }
 });
 
+test('a discover() of its own may return the 402 answer or just its list of terms', async () => {
+  const { budget } = newBudget();
+  const w = wallet();
+  const terms = [requirement('50000', 300)];
+  // 0.3.0 took only the 402 answer, so a list, the shape before it, threw a TypeError.
+  for (const answer of [terms, { accepts: terms }]) {
+    await guardAgenticWallet(budget, { request: w.request, discover: async () => answer }).request('make-x402-request', x402());
+  }
+  assert.deepEqual(w.calls.map(call => call.data.paymentRequirements), [terms, terms]);
+  for (const answer of [[], {}, { accepts: [] }]) {
+    await assert.rejects(guardAgenticWallet(budget, { request: w.request, discover: async () => answer }).request('make-x402-request', x402()),
+      error => error instanceof BudgetError && /without payment requirements walletcap can read/.test(error.message));
+  }
+  assert.equal(w.calls.length, 2);
+});
+
 test('a send passes the wallet only the fields it takes, as walletcap read them', async () => {
   const { budget } = newBudget();
   const w = wallet(() => ({ transactionHash: TX }));
