@@ -156,7 +156,7 @@ jobs:
       - name: Use an npm that supports trusted publishing (11.5.1 or later)
         run: npm install --global --ignore-scripts npm@11.21.1
       - name: Publish the tarball to npm with provenance
-        run: npm publish out/walletcap-*.tgz --provenance --access public
+        run: npm publish ./out/walletcap-*.tgz --provenance --access public
 
   # --- walletcap-mcp ------------------------------------------------------------------------------
 
@@ -208,7 +208,7 @@ jobs:
       - name: Use an npm that supports trusted publishing (11.5.1 or later)
         run: npm install --global --ignore-scripts npm@11.21.1
       - name: Publish the tarball to npm with provenance
-        run: npm publish out/walletcap-mcp-*.tgz --provenance --access public
+        run: npm publish ./out/walletcap-mcp-*.tgz --provenance --access public
 
   # --- walletcap-crash-test ---------------------------------------------------------------------
 
@@ -264,4 +264,4 @@ jobs:
       - name: Use an npm that supports trusted publishing (11.5.1 or later)
         run: npm install --global --ignore-scripts npm@11.21.1
       - name: Publish the tarball to npm with provenance
-        run: npm publish out/walletcap-crash-test-*.tgz --provenance --access public
+        run: npm publish ./out/walletcap-crash-test-*.tgz --provenance --access public
