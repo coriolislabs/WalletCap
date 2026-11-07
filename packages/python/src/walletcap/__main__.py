@@ -38,15 +38,18 @@ _EPILOG = "Amounts are dollars: --per-day 150. Leave out the $ sign, which your 
 _COMMAND_NAMES = ["status", "set", "freeze", "unfreeze", "history", "holds", "void", "settle"]
 
 
-class _Usage(Exception):
-    pass
+class _ArgumentError(Exception):
+    """A command line that can't run as given: exit 2, as argparse does."""
+
+
+_INT64_DIGITS = 19  # the most digits a 64-bit integer has
 
 
 def _whole(text: str) -> int:
     """A whole number in ASCII digits, as the JavaScript CLI reads one."""
 
     digits = strip_ascii(text)
-    if not digits.isascii() or not digits.isdigit() or len(digits.lstrip("0")) > 19:
+    if not digits.isascii() or not digits.isdigit() or len(digits.lstrip("0")) > _INT64_DIGITS:
         raise argparse.ArgumentTypeError(f"{text!r} is not a whole number that fits in 64 bits")
     return int(digits)
 
@@ -132,7 +135,7 @@ def _wallet(args: argparse.Namespace, path: Path) -> str:
         raise BudgetUnavailable(
             f"no budget in {path} yet: walletcap set --wallet <address> --per-day <dollars>"
         )
-    raise _Usage(
+    raise _ArgumentError(
         f"the file holds {len(known)} budgets; pick one with --wallet:\n  " + "\n  ".join(known)
     )
 
@@ -149,8 +152,10 @@ def _detail(status: Status) -> str:
     if status.max_payments is not None:
         lines.append(f"Payments     at most {status.max_payments} per {window}")
     lines += [
-        f"Spent        {format_usd(status.spent)} in the last {window} "
-        f"({status.payments} payment{plural})",
+        (
+            f"Spent        {format_usd(status.spent)} in the last {window} "
+            f"({status.payments} payment{plural})"
+        ),
         f"In flight    {format_usd(status.in_flight)}",
         f"Left         {format_usd(status.remaining)}",
         "State        " + ("FROZEN: every payment is refused" if status.frozen else "active"),
@@ -183,7 +188,7 @@ def _set(args: argparse.Namespace, path: Path) -> str:
     max_payments = none(args.max_payments)
     if isinstance(max_payments, str):
         count = strip_ascii(max_payments)
-        if not count.isascii() or not count.isdigit() or len(count.lstrip("0")) > 19:
+        if not count.isascii() or not count.isdigit() or len(count.lstrip("0")) > _INT64_DIGITS:
             raise UsageError("--max-payments must be a whole number of payments, or none")
         max_payments = int(count)
     limits: dict[str, object] = {
@@ -196,11 +201,11 @@ def _set(args: argparse.Namespace, path: Path) -> str:
         "max_payments": max_payments,
     }
     if all(value is None or value is UNSET for value in limits.values()):
-        raise _Usage("set needs a limit, like --per-day 150 or --per-payment 50")
+        raise _ArgumentError("set needs a limit, like --per-day 150 or --per-payment 50")
     if args.wallet is None and len(_wallets(path)) != 1:
-        raise _Usage("set needs --wallet <address>")
+        raise _ArgumentError("set needs --wallet <address>")
     wallet = _wallet(args, path)
-    status = _owner(path, create=True).set_limits(wallet, **limits)  # type: ignore[arg-type]
+    status = _owner(path, create=True).set_limits(wallet, **limits)
     if args.json:
         return _json(status)
     now = describe_limits(
@@ -293,9 +298,9 @@ def _void_unknown(args: argparse.Namespace, path: Path) -> str:
     """
 
     if args.id is not None:
-        raise _Usage("void takes an id or --all-unknown, not both")
+        raise _ArgumentError("void takes an id or --all-unknown, not both")
     if args.older_than is None:
-        raise _Usage("void --all-unknown needs --older-than, like --older-than 24h")
+        raise _ArgumentError("void --all-unknown needs --older-than, like --older-than 24h")
     older_than = to_window_ms(args.older_than, "--older-than")
     wallet = _wallet(args, path)
     voided = _owner(path).void_unknown(wallet, older_than=older_than)
@@ -319,12 +324,12 @@ def _void_unknown(args: argparse.Namespace, path: Path) -> str:
 
 def _payment(args: argparse.Namespace, path: Path, owner: Owner) -> PaymentRecord:
     if not path.exists():
-        raise _Usage(f"no budget file at {path}")
+        raise _ArgumentError(f"no budget file at {path}")
     payment = owner.payment(args.id)
     if payment is None:
-        raise _Usage(f"no payment {args.id} in {path}")
+        raise _ArgumentError(f"no payment {args.id} in {path}")
     if args.wallet is not None and payment.wallet != normalize_wallet(args.wallet):
-        raise _Usage(
+        raise _ArgumentError(
             f"{args.id} is {short_wallet(payment.wallet)}'s payment, "
             f"not {short_wallet(normalize_wallet(args.wallet))}'s"
         )
@@ -335,9 +340,9 @@ def _void(args: argparse.Namespace, path: Path) -> str:
     if args.all_unknown:
         return _void_unknown(args, path)
     if args.id is None:
-        raise _Usage("void needs the id of a held payment; holds and history show it")
+        raise _ArgumentError("void needs the id of a held payment; holds and history show it")
     if not path.exists():
-        raise _Usage(f"no budget file at {path}")
+        raise _ArgumentError(f"no budget file at {path}")
     owner = _owner(path)
     payment = _payment(args, path, owner)
     if payment.state == "void":
@@ -354,15 +359,17 @@ def _void(args: argparse.Namespace, path: Path) -> str:
 
 def _settle(args: argparse.Namespace, path: Path) -> str:
     if args.id is None:
-        raise _Usage("settle needs the id of a payment; holds and history show it")
+        raise _ArgumentError("settle needs the id of a payment; holds and history show it")
     if not path.exists():
-        raise _Usage(f"no budget file at {path}")
+        raise _ArgumentError(f"no budget file at {path}")
     owner = _owner(path)
     payment = _payment(args, path, owner)
     settled = owner.settle(args.id, evidence=args.tx or "settled by its owner")
     if args.json:
         return _json(settled)
-    until = "" if settled.counts_until is None else f"; it counts until {_iso(settled.counts_until)}"
+    until = (
+        "" if settled.counts_until is None else f"; it counts until {_iso(settled.counts_until)}"
+    )
     return (
         f"Settled {args.id} ({format_usd(payment.amount)} from "
         f"{short_wallet(payment.wallet)}){until}."
@@ -386,7 +393,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     path = expand_home(args.path if args.path is not None else default_budget_path()).absolute()
     try:
         print(_COMMANDS[args.command](args, path))
-    except _Usage as error:
+    except _ArgumentError as error:
         print(error, file=sys.stderr)
         return 2
     except Exception as error:

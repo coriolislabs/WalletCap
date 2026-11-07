@@ -11,7 +11,15 @@ import sys
 import warnings
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages" / "python" / "src"))
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / "packages" / "python" / "src"
+sys.path.insert(0, str(SOURCE))
+# An installed walletcap carries spec/*.sql inside it; a source checkout gets the copies the
+# build would make.
+for name in ("schema.sql", "upgrade.sql"):
+    target = SOURCE / "walletcap" / "spec" / name
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes((ROOT / "spec" / name).read_bytes())
 
 from walletcap import BudgetRefused, open_budget
 

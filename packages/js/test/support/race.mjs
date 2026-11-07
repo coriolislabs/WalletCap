@@ -30,6 +30,6 @@ export async function race(script, dir, configs) {
   writeFileSync(go, '');
   const results = await Promise.all(runs);
   unlinkSync(go);
-  configs.forEach((_, index) => unlinkSync(join(dir, `ready-${index}`)));
+  for (const [index] of configs.entries()) unlinkSync(join(dir, `ready-${index}`));
   return results;
 }

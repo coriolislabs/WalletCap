@@ -4,7 +4,7 @@
 // package parses and formats the same way, and spec/vectors/money.json holds the cases both test
 // suites check.
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import { keccak256Hex } from './_keccak.js';
 import { UsageError } from './errors.js';
 
@@ -223,11 +223,13 @@ export const expandHome = (path: string, home = homedir()): string => (path === 
  * languages find one budget.
  */
 export function defaultBudgetPath(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform, home: string = homedir()): string {
-  if (env.WALLETCAP_PATH) return expandHome(env.WALLETCAP_PATH, home);
-  if (platform === 'win32') return join(env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'walletcap', 'budget.sqlite');
-  if (platform === 'darwin') return join(home, 'Library', 'Application Support', 'walletcap', 'budget.sqlite');
-  const state = env.XDG_STATE_HOME && isAbsolute(env.XDG_STATE_HOME) ? env.XDG_STATE_HOME : join(home, '.local', 'state');
-  return join(state, 'walletcap', 'budget.sqlite');
+  const path = platform === 'win32' ? win32 : posix;
+  const set = env.WALLETCAP_PATH;
+  if (set) return set === '~' || set.startsWith('~/') ? path.join(home, set.slice(1)) : set;
+  if (platform === 'win32') return win32.join(env.LOCALAPPDATA || win32.join(home, 'AppData', 'Local'), 'walletcap', 'budget.sqlite');
+  if (platform === 'darwin') return posix.join(home, 'Library', 'Application Support', 'walletcap', 'budget.sqlite');
+  const state = env.XDG_STATE_HOME && posix.isAbsolute(env.XDG_STATE_HOME) ? env.XDG_STATE_HOME : posix.join(home, '.local', 'state');
+  return posix.join(state, 'walletcap', 'budget.sqlite');
 }
 
 /** Refuse an option `what` doesn't take, naming the one that was probably meant. */

@@ -15,7 +15,8 @@ import { guardAgentKit } from 'walletcap/agentkit';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-agentkit-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 const kit = await x402();
 const JS = fileURLToPath(new URL('..', import.meta.url));
 const TSC = (() => {

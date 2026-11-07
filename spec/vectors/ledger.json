@@ -237,6 +237,25 @@
         { "op": "status", "expect": { "spent": 1000000000000000, "in_flight": 1000000000000000, "remaining": 0, "payments": 2 } },
         { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $2,000,000,000.000001 in the last 24h, over its $1,000,000,000.00 limit ($0.00 left); $1,000,000,000.00 of it is 1 open payment" } }
       ]
+    },
+    {
+      "name": "the bulk release takes a payment at exactly its until, or at exactly an hour and a minute",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "open", "expect": { "held": "open" } },
+        { "op": "note", "id": "open", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 10000000, "id": "bounded", "until_from_now": 1000, "expect": { "held": "bounded" } },
+        { "op": "note", "id": "bounded", "outcome": "refused", "expect": { "state": "held" } },
+        { "op": "advance", "ms": 999 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "advance", "ms": 1 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["bounded"] } },
+        { "op": "advance", "ms": 3658999 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "advance", "ms": 1 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["open"] } },
+        { "op": "status", "expect": { "in_flight": 0, "payments": 0 } }
+      ]
     }
   ]
 }

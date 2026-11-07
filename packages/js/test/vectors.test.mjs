@@ -12,7 +12,8 @@ import { Ledger } from '../dist/core/ledger.js';
 
 const VECTORS = JSON.parse(readFileSync(new URL('../../../spec/vectors/ledger.json', import.meta.url), 'utf8'));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-vectors-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 afterEach(resetClock);
 
 const big = value => (value === undefined || value === null ? null : BigInt(value));

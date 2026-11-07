@@ -22,6 +22,10 @@ from walletcap import MAX_AMOUNT, BudgetRefused, BudgetUnavailable, UsageError, 
 from walletcap._ledger import Ledger  # noqa: E402
 
 DAY = 86_400_000
+CURRENT = (
+    "SELECT payment, wallet, amount, state, held_at, until, outcome, counts_from "
+    "FROM wc_current ORDER BY payment"
+)
 
 
 class Clock:
@@ -93,7 +97,7 @@ print(won)
         workers.append(
             (
                 ready,
-                subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+                subprocess.Popen(
                     [sys.executable, "-c", script, str(SOURCE), str(path), str(ready), str(go)],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -131,7 +135,9 @@ def test_spend_counts_for_the_whole_window_then_ages_out(tmp_path: Path, clock: 
 
 def test_the_limits_refuse_in_order(tmp_path: Path, clock: Clock) -> None:
     ledger = Ledger(tmp_path / "budget.sqlite", create=True)
-    ledger.create_budget("agent", unit="usdc", cap=150, window_ms=DAY, per_payment=50, max_payments=2)
+    ledger.create_budget(
+        "agent", unit="usdc", cap=150, window_ms=DAY, per_payment=50, max_payments=2
+    )
     with pytest.raises(BudgetRefused) as over:
         ledger.hold("agent", 51, rail="python")
     assert over.value.code == "per_payment"
@@ -222,7 +228,9 @@ def test_a_settle_by_time_that_isnt_after_now_is_refused(tmp_path: Path, clock: 
         with pytest.raises(UsageError, match="is not after now"):
             ledger.hold("agent", 50, rail="python", until=until)
     assert ledger.status("agent")["payments"] == 0
-    held = [str(ledger.hold("agent", 50, rail="python", until=now + 1)["payment"]) for _ in range(3)]
+    held = [
+        str(ledger.hold("agent", 50, rail="python", until=now + 1)["payment"]) for _ in range(3)
+    ]
     with pytest.raises(BudgetRefused):
         ledger.hold("agent", 50, rail="python")
     clock.at += DAY / 1000 + 0.002
@@ -245,12 +253,18 @@ def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
     with pytest.raises(UsageError, match="from 1 to 1000000000000000"):
         ledger.hold("agent", MAX_AMOUNT + 1, rail="python")
     # Two holds of the most a budget can hold count at once: one lapsed, then settled late.
-    first = str(ledger.hold("agent", MAX_AMOUNT, rail="python", until=int(clock.at * 1000) + 1)["payment"])
+    first = str(
+        ledger.hold("agent", MAX_AMOUNT, rail="python", until=int(clock.at * 1000) + 1)["payment"]
+    )
     clock.at += DAY / 1000 + 1
     ledger.hold("agent", MAX_AMOUNT, rail="python")
     ledger.settle(first)
     status = ledger.status("agent")
-    assert (status["spent"], status["in_flight"], status["remaining"]) == (MAX_AMOUNT, MAX_AMOUNT, 0)
+    assert (status["spent"], status["in_flight"], status["remaining"]) == (
+        MAX_AMOUNT,
+        MAX_AMOUNT,
+        0,
+    )
     with pytest.raises(BudgetRefused):
         ledger.hold("agent", 1, rail="python")
 
@@ -259,7 +273,9 @@ def test_a_settlement_never_shortens_a_hold(tmp_path: Path, clock: Clock) -> Non
     ledger = _ledger(tmp_path / "budget.sqlite")
     # A payee can say a payment settled at once and keep an authorization valid two days.
     until = int(clock.at * 1000) + 2 * DAY
-    for payment in [ledger.hold("agent", 50, rail="python", until=until)["payment"] for _ in range(3)]:
+    for payment in [
+        ledger.hold("agent", 50, rail="python", until=until)["payment"] for _ in range(3)
+    ]:
         ledger.settle(str(payment))
     clock.at += DAY / 1000 + 1
     assert ledger.status("agent")["spent"] == 150
@@ -285,7 +301,7 @@ def test_the_time_is_read_once_the_write_lock_is_held(tmp_path: Path) -> None:
         "connection.execute('COMMIT')\n"
     )
     # Another process takes the write lock and holds it for 400 ms.
-    holder = subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+    holder = subprocess.Popen(
         [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
     )
     assert holder.stdout is not None
@@ -314,7 +330,9 @@ def test_a_checksummed_address_names_the_one_lowercase_budget(tmp_path: Path) ->
     assert ledger.status(checksummed)["wallet"] == lower
     # A mistyped checksum is refused rather than opening a budget of its own.
     with pytest.raises(UsageError, match="EIP-55"):
-        ledger.create_budget("0xD797ead28C38575FDf4fC523866287372340Ca02", unit="usd", cap=1, window_ms=1)
+        ledger.create_budget(
+            "0xD797ead28C38575FDf4fC523866287372340Ca02", unit="usd", cap=1, window_ms=1
+        )
 
 
 def test_one_identity_is_one_payment(tmp_path: Path) -> None:
@@ -382,10 +400,10 @@ def test_the_rule_binds_every_writer_the_sqlite3_shell_included(tmp_path: Path) 
     _pay(ledger)
     _pay(ledger)
     ledger.create_budget("spare", unit="usdc", cap=150, window_ms=DAY)
-    now = "CAST(round((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER)"
+    now = "CAST(round((julianday('now') - 2440587.5) * 86400000.0) AS INTEGER)"  # a constant
     with closing(sqlite3.connect(path, isolation_level=None)) as shell:
         refusals = {
-            "the budget refuses this payment": "INSERT INTO wc_entry (payment, kind, at, wallet, "
+            "the budget refuses this payment": "INSERT INTO wc_entry (payment, kind, at, wallet, "  # noqa: S608 - constants
             f"amount, rail) VALUES ('by-hand', 'held', {now}, 'agent', 1, 'shell')",
             "dated by the ledger's clock": "INSERT INTO wc_entry (payment, kind, at, wallet, "
             "amount, rail) VALUES ('backdated', 'held', 0, 'spare', 1, 'shell')",
@@ -410,16 +428,15 @@ def test_replaying_the_ledger_rebuilds_each_payments_state(tmp_path: Path, clock
     voided = str(ledger.hold("agent", 10, rail="python")["payment"])
     ledger.void(voided)
     ledger.settle(voided)
-    columns = "payment, wallet, amount, state, held_at, until, outcome, counts_from"
     with closing(sqlite3.connect(path)) as connection:
         entries = connection.execute("SELECT * FROM wc_entry ORDER BY seq").fetchall()
-        current = connection.execute(f"SELECT {columns} FROM wc_current ORDER BY payment").fetchall()  # noqa: S608
+        current = connection.execute(CURRENT).fetchall()
         budget = connection.execute("SELECT * FROM wc_budget").fetchone()
     # A fresh file with the same budget, the entries appended again in order through the
     # projection triggers, holds the same states.
     replay = tmp_path / "replay.sqlite"
     with closing(sqlite3.connect(replay)) as connection, connection:
-        from walletcap._ledger import parse_spec  # noqa: PLC0415
+        from walletcap._ledger import parse_spec
 
         spec = parse_spec((REPO / "spec" / "schema.sql").read_text(encoding="utf-8"))
         connection.executescript(spec.sections["tables"] + spec.sections["projection"])
@@ -427,5 +444,5 @@ def test_replaying_the_ledger_rebuilds_each_payments_state(tmp_path: Path, clock
         connection.executemany(
             "INSERT INTO wc_entry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", entries
         )
-        rebuilt = connection.execute(f"SELECT {columns} FROM wc_current ORDER BY payment").fetchall()  # noqa: S608
+        rebuilt = connection.execute(CURRENT).fetchall()
     assert rebuilt == current

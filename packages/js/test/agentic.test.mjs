@@ -2,13 +2,12 @@
 // The budget in front of Coinbase's Agentic Wallet. The wallet's request channel and its MCP
 // server are stand-ins here; the payee is a local HTTP server that answers 402 like an x402 one.
 import assert from 'node:assert/strict';
-import { execFile, spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { after, afterEach, before, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
 import { BudgetRefused, BudgetUnavailable, openBudget, PaymentNotRecorded, UsageError } from 'walletcap';
@@ -46,7 +45,8 @@ before(async () => {
 after(() => {
   server?.closeAllConnections();
   server?.close();
-  rmSync(DIR, { recursive: true, force: true });
+  // Windows keeps a budget file a test left open; its temp folder is cleared later.
+  try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ }
 });
 afterEach(resetClock);
 

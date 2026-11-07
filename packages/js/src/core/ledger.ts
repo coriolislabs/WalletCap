@@ -430,13 +430,22 @@ export class Ledger {
     attachClock(db);
     const ledger = new Ledger(path, db, busyTimeoutMs);
     try {
-      const { version } = db.prepare('SELECT sqlite_version() AS version').get() as { version: string };
-      if (!versionAtLeast(version, MIN_SQLITE_VERSION)) {
-        throw new BudgetUnavailable(`walletcap needs SQLite ${MIN_SQLITE_VERSION} or later; this Node has ${version}`);
-      }
+      // Before anything reads the file: even preparing a statement loads the schema, and on a
+      // WAL file another process may be mid-recovery (SQLITE_BUSY_RECOVERY), so the open waits
+      // on the event loop like every other call.
       db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
-      db.exec('PRAGMA foreign_keys = ON');
-      db.exec('PRAGMA synchronous = FULL');
+      await ledger.#attempt(() => {
+        try {
+          const { version } = db.prepare('SELECT sqlite_version() AS version').get() as { version: string };
+          if (!versionAtLeast(version, MIN_SQLITE_VERSION)) {
+            throw new BudgetUnavailable(`walletcap needs SQLite ${MIN_SQLITE_VERSION} or later; this Node has ${version}`);
+          }
+          db.exec('PRAGMA foreign_keys = ON');
+          db.exec('PRAGMA synchronous = FULL');
+        } catch (error) {
+          throw isWalletcapError(error) ? error : ledger.#failure(error);
+        }
+      });
       await ledger.#prepareFile();
     } catch (error) {
       ledger.close();

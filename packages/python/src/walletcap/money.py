@@ -21,6 +21,7 @@ from typing import Final
 from walletcap._keccak import keccak256
 from walletcap.errors import UsageError
 
+
 class Micros(int):
     """An amount in micro-dollars: what every amount walletcap returns is.
 
@@ -232,9 +233,14 @@ def to_window_ms(value: object, label: str = "window") -> int:
             ms = _DURATION_WORDS.get(text)
     if ms is None or ms <= 0 or ms > MAX_INTEGER:
         raise UsageError(
-            f'{label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds'
+            f'{label} must be a duration like "24h", "7d" or "30m", '
+            "or a positive number of milliseconds"
         )
     return ms
+
+
+_AGE_PARTS = 2  # "3d 4h", not "3d 4h 12m 5s"
+_UPPER_NIBBLE = 8  # EIP-55: a letter is uppercase where the hash's nibble is 8 or more
 
 
 def format_age(ms: int) -> str:
@@ -248,7 +254,7 @@ def format_age(ms: int) -> str:
             continue
         parts.append(f"{left // size}{suffix}")
         left %= size
-        if len(parts) == 2:
+        if len(parts) == _AGE_PARTS:
             break
     return " ".join(parts)
 
@@ -272,7 +278,7 @@ def _checksum_ok(address: str) -> bool:
     for index, char in enumerate(hexpart):
         if char.isdigit():
             continue
-        if (int(digest[index], 16) >= 8) != char.isupper():
+        if (int(digest[index], 16) >= _UPPER_NIBBLE) != char.isupper():
             return False
     return True
 
@@ -298,11 +304,7 @@ def normalize_wallet(wallet: object) -> str:
             name = caip.group(1)
     if _EVM_ADDRESS.fullmatch(name):
         hexpart = name[2:]
-        if (
-            hexpart != hexpart.lower()
-            and hexpart != hexpart.upper()
-            and not _checksum_ok(name)
-        ):
+        if hexpart != hexpart.lower() and hexpart != hexpart.upper() and not _checksum_ok(name):
             raise UsageError(
                 f"wallet {name!r} has an invalid EIP-55 checksum; "
                 "copy the address or use all lowercase"

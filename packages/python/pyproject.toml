@@ -41,6 +41,9 @@ Homepage = "https://github.com/coriolislabs/WalletCap"
 Repository = "https://github.com/coriolislabs/WalletCap"
 Issues = "https://github.com/coriolislabs/WalletCap/issues"
 
+[dependency-groups]
+dev = ["pytest==9.1.1", "hypothesis==6.170.8", "mypy==2.4.0", "ruff==0.17.2"]
+
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
@@ -59,3 +62,34 @@ exclude = ["src/walletcap/spec", "__pycache__", "*.pyc"]
 # The ledger's rule ships inside the package: spec/ at the repository root is the one copy, and
 # hatch_build.py puts it in both archives.
 [tool.hatch.build.hooks.custom]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "S", "SIM", "RET", "PIE", "PT", "PTH",
+    "PL", "RUF", "BLE", "FBT", "TRY", "TC", "ERA", "DTZ", "ISC", "Q", "T20",
+]
+ignore = [
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",  # the CLI and the ledger client have many cases
+    "TRY003",  # messages say what happened, where it happened
+    "ISC001",  # conflicts with the formatter
+    "TC003",  # annotations import from the standard library at the top; it loads in milliseconds
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "S311", "S603", "S607", "PLC0415", "FBT", "T20", "S108"]
+"src/walletcap/__main__.py" = ["T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests"]
+mypy_path = "src"
+warn_unreachable = true

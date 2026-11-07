@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -15,30 +16,37 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from walletcap import _clock  # noqa: E402
-from walletcap.errors import BudgetRefused, UsageError  # noqa: E402
 from walletcap._ledger import Ledger, ProcessLimits  # noqa: E402
+from walletcap.errors import BudgetRefused, UsageError  # noqa: E402
 
 VECTORS: dict[str, Any] = json.loads(
     (REPO / "spec" / "vectors" / "ledger.json").read_text(encoding="utf-8")
 )
 
 
+def _nothing(_: object) -> None:
+    return None
+
+
 def _outcome(work: Callable[[], Any], expect: dict[str, Any], check: Callable[[Any], None]) -> None:
+    refused: BudgetRefused | None = None
+    usage: UsageError | None = None
     try:
         result = work()
     except BudgetRefused as error:
-        assert "refused" in expect, f"refused {error.code}: {error}"
-        assert (error.code, error.source, error.brief) == (
-            expect["refused"],
-            expect["source"],
-            expect["brief"],
-        )
-        return
+        refused = error
     except UsageError as error:
-        assert expect.get("error") == "usage", str(error)
-        return
-    assert "refused" not in expect and "error" not in expect, f"expected {expect}, got {result}"
-    check(result)
+        usage = error
+    if refused is not None:
+        assert "refused" in expect, f"refused {refused.code}: {refused}"
+        got = (refused.code, refused.source, refused.brief)
+        assert got == (expect["refused"], expect["source"], expect["brief"])
+    elif usage is not None:
+        assert expect.get("error") == "usage", str(usage)
+    else:
+        assert "refused" not in expect, f"expected {expect}, got {result}"
+        assert "error" not in expect, f"expected {expect}, got {result}"
+        check(result)
 
 
 @pytest.mark.parametrize("vector", VECTORS["cases"], ids=lambda vector: vector["name"])
@@ -77,7 +85,8 @@ def test_vector(vector: dict[str, Any], tmp_path: Path, monkeypatch: pytest.Monk
                     assert row["payment"] == expect["held"]
 
             _outcome(
-                lambda step=step, until=until, limits=limits: ledger.hold(
+                partial(
+                    ledger.hold,
                     wallet,
                     step["amount"],
                     rail="vector",
@@ -95,31 +104,33 @@ def test_vector(vector: dict[str, Any], tmp_path: Path, monkeypatch: pytest.Monk
                 held,
             )
         elif op == "settle":
-            _outcome(lambda step=step: ledger.settle(step["id"], evidence=step.get("evidence")), expect, state)
+            _outcome(
+                partial(ledger.settle, step["id"], evidence=step.get("evidence")), expect, state
+            )
         elif op == "void":
-            _outcome(lambda step=step: ledger.void(step["id"]), expect, state)
+            _outcome(partial(ledger.void, step["id"]), expect, state)
         elif op == "note":
             _outcome(
-                lambda step=step: ledger.note(step["id"], step["outcome"], evidence=step.get("evidence")),
+                partial(ledger.note, step["id"], step["outcome"], evidence=step.get("evidence")),
                 expect,
                 state,
             )
         elif op == "bound":
             _outcome(
-                lambda step=step, until=until: ledger.bound(
-                    step["id"], until=until, within_ms=step.get("within_ms")
-                ),
+                partial(ledger.bound, step["id"], until=until, within_ms=step.get("within_ms")),
                 expect,
                 state,
             )
         elif op == "set_limits":
             changes = {key: step[key] for key in ("cap", "window_ms") if key in step}
-            _outcome(lambda changes=changes: ledger.set_limits(wallet, **changes), expect, lambda _: None)
+            _outcome(partial(ledger.set_limits, wallet, **changes), expect, _nothing)
         elif op == "void_unknown":
             voided = ledger.void_unknown(wallet, step["older_than_ms"])
             assert [row["payment"] for row in voided] == expect["voided"]
         elif op == "holds":
-            assert [row["payment"] for row in ledger.counting(wallet, held_only=True)] == expect["ids"]
+            assert [row["payment"] for row in ledger.counting(wallet, held_only=True)] == expect[
+                "ids"
+            ]
         elif op == "status":
             status = ledger.status(wallet)
             got = {**status, "frozen": status["frozen_at"] is not None}

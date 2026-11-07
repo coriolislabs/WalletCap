@@ -19,7 +19,8 @@ try {
   fetchKit = null;
 }
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-fetch-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 const TX = `0x${'cd'.repeat(32)}`;
 
 test('a guarded @x402/fetch pays, keeps counting what the payee refused, and stops at the cap', {

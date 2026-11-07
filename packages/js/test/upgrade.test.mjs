@@ -16,7 +16,8 @@ import { Ledger } from '../dist/core/ledger.js';
 const FIXTURES = new URL('../../../spec/fixtures/', import.meta.url);
 const LEDGER = fileURLToPath(new URL('../dist/core/ledger.js', import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-upgrade-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 afterEach(resetClock);
 let files = 0;
 

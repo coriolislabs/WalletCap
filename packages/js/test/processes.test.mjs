@@ -12,7 +12,8 @@ import { race, run } from './support/race.mjs';
 import { x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-processes-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 const LIMITS = { perPayment: '$50', perDay: '$150' };
@@ -94,8 +95,9 @@ test("a wait for another process's write lock never blocks the event loop", asyn
   } finally {
     clearInterval(ticker);
   }
-  // 0.3.0 waited inside SQLite on this thread, so no timer ran until the lock came free.
-  assert.ok(ticks >= 20, `the event loop ran ${ticks} ticks while the payment waited`);
+  // 0.3.0 waited inside SQLite on this thread, so no timer ran until the lock came free. A
+  // CI runner's timers can be coarse, so this asks for a few ticks, not one per 10 ms.
+  assert.ok(ticks >= 5, `the event loop ran ${ticks} ticks while the payment waited`);
   assert.equal((await budget.status()).spent, 1_000_000n);
   await exited;
   budget.close();

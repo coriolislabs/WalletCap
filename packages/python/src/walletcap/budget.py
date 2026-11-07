@@ -20,9 +20,12 @@ Changing limits, freezing and voiding or settling by id are the owner's (``walle
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import json
+import os
 import shlex
+import subprocess
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -112,8 +115,10 @@ class Status:
     def summary(self) -> str:
         window = format_window(self.window_ms)
         parts = [
-            f"{short_wallet(self.wallet)}: {format_usd(self.spent)} spent of "
-            f"{format_usd(self.cap)} per {window}, {format_usd(self.remaining)} left"
+            (
+                f"{short_wallet(self.wallet)}: {format_usd(self.spent)} spent of "
+                f"{format_usd(self.cap)} per {window}, {format_usd(self.remaining)} left"
+            )
         ]
         if self.in_flight > 0:
             parts.append(f"{format_usd(self.in_flight)} in flight")
@@ -388,14 +393,17 @@ def path_flag(path: Path) -> str:
     """Internal: `` --path <file>`` unless it is the default file, for commands a message names."""
 
     default = expand_home(default_budget_path()).absolute()
-    return "" if path == default else f" --path {shlex.quote(str(path))}"
+    if path == default:
+        return ""
+    quoted = subprocess.list2cmdline([str(path)]) if os.name == "nt" else shlex.quote(str(path))
+    return f" --path {quoted}"
 
 
 # --- The paying process's own limits ---------------------------------------------------------
 
 
 def _process_limits(row: Row, asked: dict[str, Any]) -> tuple[ProcessLimits, bool]:
-    """The limits this process passed that are tighter than the budget's, and whether any was looser.
+    """This process's limits that are tighter than the budget's, and whether any was looser.
 
     A looser limit does nothing. A limit in another window than the budget's binds as its own.
     """
@@ -439,7 +447,9 @@ class Hold:
     transaction hash with the settlement.
     """
 
-    def __init__(self, ledger: Ledger, payment_id: str, amount: Micros, state: str, created: bool) -> None:
+    def __init__(
+        self, ledger: Ledger, payment_id: str, amount: Micros, state: str, *, created: bool
+    ) -> None:
         self._ledger = ledger
         self._id = payment_id
         self._amount = amount
@@ -449,7 +459,7 @@ class Hold:
 
     @property
     def id(self) -> str:
-        """The payment's identity in the ledger: a good idempotency key for the rail you pay through."""
+        """The payment's identity in the ledger: a good idempotency key for its rail."""
 
         return self._id
 
@@ -566,13 +576,12 @@ class Paying:
             except Exception as error:
                 raise PaymentNotRecorded(hold.id, error) from error
             return
-        try:
+        # If recording fails too, the payment stays held and keeps counting.
+        with contextlib.suppress(BudgetUnavailable, UsageError):
             if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:
                 hold.void(reason=f"not sent: {_error_text(exc)}")
             else:
                 hold.note("unknown", _error_text(exc))
-        except Exception:  # noqa: S110 - recording failed; the payment stays held and keeps counting
-            pass
 
     async def __aenter__(self) -> Hold:
         # The ledger waits for another process's write lock in a worker thread, never on the
@@ -640,7 +649,9 @@ class Budget:
                 )
             row = self._ledger.create_budget(self._wallet, **asked)
         if row["unit"] not in ("usd", "usdc"):
-            raise UsageError(f"{short_wallet(self._wallet)}'s budget counts in {row['unit']}, not usd")
+            raise UsageError(
+                f"{short_wallet(self._wallet)}'s budget counts in {row['unit']}, not usd"
+            )
         self._limits, looser = _process_limits(row, asked)
         if looser:
             self._warn_looser(on_warning, row, asked)
@@ -690,8 +701,14 @@ class Budget:
             self._wallet, _positive(to_micros(amount)), limits=self._limits
         )
         if refusal is None:
-            return Check(True, Micros(remaining))
-        return Check(False, Micros(remaining), refusal.code, str(refusal), refusal.brief)
+            return Check(ok=True, remaining=Micros(remaining))
+        return Check(
+            ok=False,
+            remaining=Micros(remaining),
+            code=refusal.code,
+            message=str(refusal),
+            brief=refusal.brief,
+        )
 
     def hold(
         self,
@@ -713,7 +730,9 @@ class Budget:
         ``settles_within`` (a timedelta) bounds how long it can still settle.
         """
 
-        return self._hold(_Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id))
+        return self._hold(
+            _Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id)
+        )
 
     def _hold(self, request: _Request) -> Hold:
         micros = _positive(to_micros(request.amount))
@@ -723,13 +742,21 @@ class Budget:
             rail=request.rail,
             payment=request.payment_id,
             info=json.dumps(request.info) if request.info else None,
-            until=None if request.settles_by is None else _moment_ms(request.settles_by, "settles_by"),
+            until=None
+            if request.settles_by is None
+            else _moment_ms(request.settles_by, "settles_by"),
             within_ms=None
             if request.settles_within is None
             else _duration_ms(request.settles_within, "settles_within"),
             limits=self._limits,
         )
-        return Hold(self._ledger, str(held["payment"]), micros, str(held["state"]), bool(held["created"]))
+        return Hold(
+            self._ledger,
+            str(held["payment"]),
+            micros,
+            str(held["state"]),
+            created=bool(held["created"]),
+        )
 
     def pay(
         self,
@@ -751,7 +778,10 @@ class Budget:
         settle-by time, or, without one, until its owner voids it. ``NotSent`` voids it.
         """
 
-        return Paying(self, _Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id))
+        return Paying(
+            self,
+            _Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id),
+        )
 
     def status(self) -> Status:
         """What has been spent, what is in flight and what is left."""
@@ -790,7 +820,9 @@ class Budget:
         settles_by: datetime | None = None,
         settles_within: timedelta | None = None,
     ) -> Hold:
-        request = _Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id)
+        request = _Request(
+            amount, _describe(to, note, details), rail, settles_by, settles_within, id
+        )
         return await asyncio.to_thread(self._hold, request)
 
     async def astatus(self) -> Status:

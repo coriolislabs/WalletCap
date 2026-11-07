@@ -112,7 +112,9 @@ def _spec(name: str) -> Spec:
         try:
             text = (resources.files("walletcap") / "spec" / name).read_text(encoding="utf-8")
         except OSError as error:
-            raise BudgetUnavailable(f"walletcap's package is missing spec/{name}; reinstall it") from error
+            raise BudgetUnavailable(
+                f"walletcap's package is missing spec/{name}; reinstall it"
+            ) from error
         _SPEC[name] = parse_spec(text)
     return _SPEC[name]
 
@@ -229,6 +231,14 @@ def _held_note(held_payments: int, ids: list[str]) -> str:
     )
 
 
+def _given(limit: int | None) -> int:
+    """A process limit the ledger refused for, which the process must have set."""
+
+    if limit is None:
+        raise BudgetUnavailable("the ledger refused for a limit this process didn't set")
+    return limit
+
+
 def refusal(
     why: Mapping[str, Any], amount: int, limits: ProcessLimits, open_ids: Callable[[], list[str]]
 ) -> BudgetRefused:
@@ -257,19 +267,18 @@ def refusal(
     if why["source"] == "process":
         own = window if limits.window_ms is None else format_window(limits.window_ms)
         if code == "per_payment":
-            assert limits.per_payment is not None
             return refused(
                 "per_payment",
-                f"{money(amount)} is over the {money(limits.per_payment)} limit per payment "
-                "this process set",
+                f"{money(amount)} is over the {money(_given(limits.per_payment))} limit per "
+                "payment this process set",
             )
         if code == "budget":
-            assert limits.cap is not None
-            left = max(limits.cap - why["p_counted"], 0)
+            cap = _given(limits.cap)
+            left = max(cap - why["p_counted"], 0)
             return refused(
                 "budget",
                 f"{money(amount)} would bring {name} to {money(why['p_counted'] + amount)} in the "
-                f"last {own}, over the {money(limits.cap)} limit this process set "
+                f"last {own}, over the {money(cap)} limit this process set "
                 f"({money(left)} left)",
             )
         payments = why["p_payments"]
@@ -342,7 +351,9 @@ class Ledger:
             except FileExistsError:
                 pass
             except OSError as error:
-                raise BudgetUnavailable(f"the budget file {self._path} cannot be used: {error}") from error
+                raise BudgetUnavailable(
+                    f"the budget file {self._path} cannot be used: {error}"
+                ) from error
         version = sqlite3.sqlite_version
         if _version(version) < _version(MIN_SQLITE_VERSION):
             raise BudgetUnavailable(
@@ -360,7 +371,9 @@ class Ledger:
                 self._path, timeout=self._busy_timeout, isolation_level=None
             )
         except sqlite3.Error as error:
-            raise BudgetUnavailable(f"the budget file {self._path} cannot be used: {error}") from error
+            raise BudgetUnavailable(
+                f"the budget file {self._path} cannot be used: {error}"
+            ) from error
         connection.row_factory = sqlite3.Row
         _clock.install(connection)
         try:
@@ -376,7 +389,10 @@ class Ledger:
         if "walletcap: " in message:
             # A guard trigger refused the write: the call broke the ledger's rules.
             return UsageError(message[message.index("walletcap: ") + len("walletcap: ") :])
-        if getattr(error, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_BUSY or "locked" in message:
+        if (
+            getattr(error, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_BUSY
+            or "locked" in message
+        ):
             return BudgetUnavailable(
                 f"the budget file {self._path} is busy: another process held its write lock "
                 "past the busy timeout"
@@ -420,7 +436,8 @@ class Ledger:
         row = connection.execute("SELECT value FROM budget_meta WHERE key = 'schema'").fetchone()
         if row is None:
             raise BudgetUnavailable(
-                f"{self._path} has no schema version; it is not a walletcap budget walletcap can read"
+                f"{self._path} has no schema version; it is not a walletcap budget walletcap "
+                "can read"
             )
         return str(row[0])
 
@@ -464,7 +481,9 @@ class Ledger:
         finally:
             connection.close()
 
-    def _run(self, connection: sqlite3.Connection, name: str, args: Mapping[str, object]) -> list[Row]:
+    def _run(
+        self, connection: sqlite3.Connection, name: str, args: Mapping[str, object]
+    ) -> list[Row]:
         sql = _spec("schema.sql").statements[name]
         names = self._names.get(name)
         if names is None:
@@ -475,7 +494,9 @@ class Ledger:
         }
         return [dict(row) for row in connection.execute(sql, bound).fetchall()]
 
-    def _one(self, connection: sqlite3.Connection, name: str, args: Mapping[str, object]) -> Row | None:
+    def _one(
+        self, connection: sqlite3.Connection, name: str, args: Mapping[str, object]
+    ) -> Row | None:
         rows = self._run(connection, name, args)
         return rows[0] if rows else None
 
@@ -490,7 +511,8 @@ class Ledger:
 
         with self._read() as connection:
             row = self._one(connection, "now", {})
-        assert row is not None
+        if row is None:
+            raise BudgetUnavailable(f"the budget file {self._path} gave no time")
         return int(row["now"])
 
     def budget(self, name: str) -> Row | None:
@@ -535,7 +557,10 @@ class Ledger:
         wallet = normalize_wallet(name)
         unknown = set(limits) - {"cap", "window_ms", "per_payment", "max_payments"}
         if unknown:
-            raise UsageError(f"set_limits takes cap, window_ms, per_payment and max_payments, not {sorted(unknown)}")
+            raise UsageError(
+                "set_limits takes cap, window_ms, per_payment and max_payments, "
+                f"not {sorted(unknown)}"
+            )
         cap, window_ms = limits.get("cap"), limits.get("window_ms")
         per_payment, max_payments = limits.get("per_payment"), limits.get("max_payments")
         values = {
@@ -569,7 +594,7 @@ class Ledger:
     def check(
         self, name: str, amount: int, *, limits: ProcessLimits | None = None
     ) -> tuple[BudgetRefused | None, int]:
-        """Whether a hold of ``amount`` would be refused now, without holding it, and what is left."""
+        """Whether a hold of ``amount`` would be refused now, without holding it; what is left."""
 
         wallet = normalize_wallet(name)
         own = limits or ProcessLimits()
@@ -616,11 +641,13 @@ class Ledger:
 
         wallet = normalize_wallet(name)
         own = limits or ProcessLimits()
+        spend = units(amount, "amount")
+        until_ms = None if until is None else millis(until, "until")
         args: dict[str, object] = {
             "wallet": wallet,
-            "amount": units(amount, "amount"),
+            "amount": spend,
             "payment": None if payment is None else payment_id(payment),
-            "until": None if until is None else millis(until, "until"),
+            "until": until_ms,
             "within_ms": None if within_ms is None else millis(within_ms, "within_ms", low=1),
             "rail": _rail(rail),
             "info": _text(info, "info", _INFO_LIMIT),
@@ -651,24 +678,28 @@ class Ledger:
                     f"{format_amount(existing['amount'], why['unit'])} from "
                     f"{short_wallet(existing['wallet'])}"
                 )
-            if why["settles_too_soon"]:
-                assert isinstance(args["until"], int)
+            if why["settles_too_soon"] and until_ms is not None:
                 raise UsageError(
-                    f"settles_by {_iso(args['until'])} is not after now ({_iso(why['now'])}): "
+                    f"settles_by {_iso(until_ms)} is not after now ({_iso(why['now'])}): "
                     "a payment can't settle before it is made"
                 )
             if why["code"] is None:
-                raise BudgetUnavailable("walletcap could not hold the payment, and the ledger gives no reason")
+                raise BudgetUnavailable(
+                    "walletcap could not hold the payment, and the ledger gives no reason"
+                )
 
             def open_ids() -> list[str]:
                 rows = self._run(connection, "open_ids", {"wallet": wallet})
                 return [str(row["payment"]) for row in rows]
 
-            assert isinstance(args["amount"], int)
-            raise refusal(why, args["amount"], own, open_ids)
+            raise refusal(why, spend, own, open_ids)
 
     def _move(
-        self, statement: str, payment: str, args: Mapping[str, object], why: Callable[[Row], str | None]
+        self,
+        statement: str,
+        payment: str,
+        args: Mapping[str, object],
+        why: Callable[[Row], str | None],
     ) -> Row:
         key = payment_id(payment)
         with self._transaction() as connection:
@@ -686,7 +717,10 @@ class Ledger:
         """held or void -> settled, with the evidence. Idempotent."""
 
         return self._move(
-            "settle", payment, {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)}, lambda _: None
+            "settle",
+            payment,
+            {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)},
+            lambda _: None,
         )
 
     def void(self, payment: str, *, evidence: str | None = None) -> Row:
@@ -713,7 +747,10 @@ class Ledger:
 
         def why(current: Row) -> str | None:
             if current["state"] == "held" and current["until"] is None and until is not None:
-                return f"settles_by {_iso(until)} is not after now: a payment can't settle before it is made"
+                return (
+                    f"settles_by {_iso(until)} is not after now: "
+                    "a payment can't settle before it is made"
+                )
             return None
 
         return self._move("bound", payment, args, why)
@@ -770,7 +807,11 @@ class Ledger:
             return self._run(
                 connection,
                 "void_unknown",
-                {"wallet": wallet, "older_than_ms": age, "evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)},
+                {
+                    "wallet": wallet,
+                    "older_than_ms": age,
+                    "evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT),
+                },
             )
 
 

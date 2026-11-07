@@ -19,3 +19,6 @@ examples/quickstart/demo.sqlite
 
 # Copies of spec/*.sql, made by the build: the files at spec/ are the source.
 packages/python/src/walletcap/spec/
+
+# Caches of the Python tools CI runs.
+.hypothesis/

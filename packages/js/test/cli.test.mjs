@@ -13,7 +13,8 @@ import { cdpStore } from 'walletcap/cdp';
 
 const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cli-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 afterEach(resetClock);
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 

@@ -30,12 +30,14 @@ export interface PaymentContext {
 }
 
 /** An x402 client from @x402/core 2.x: the hooks the guard registers. */
+// Method syntax keeps the parameters bivariant, so @x402/core's own client, whose contexts are
+// richer than these, is one.
 export interface X402HookedClient {
-  onBeforePaymentCreation(hook: (context: any) => Promise<unknown>): unknown;
-  onAfterPaymentCreation(hook: (context: any) => Promise<unknown>): unknown;
-  onPaymentCreationFailure(hook: (context: any) => Promise<unknown>): unknown;
-  onPaymentResponse(hook: (context: any) => Promise<unknown>): unknown;
-  registerPolicy?(policy: (version: number, requirements: any[]) => any[]): unknown;
+  onBeforePaymentCreation(hook: (context: PaymentContext) => Promise<unknown>): unknown;
+  onAfterPaymentCreation(hook: (context: PaymentContext) => Promise<unknown>): unknown;
+  onPaymentCreationFailure(hook: (context: PaymentContext) => Promise<unknown>): unknown;
+  onPaymentResponse(hook: (context: PaymentContext) => Promise<unknown>): unknown;
+  registerPolicy?(policy: (version: number, requirements: PaymentRequirements[]) => PaymentRequirements[]): unknown;
 }
 
 /**
@@ -203,6 +205,7 @@ interface SignedPayload {
 const settlesBy = (payload: SignedPayload | undefined, requirements: PaymentRequirements): { settlesBy?: bigint; settlesWithinMs?: bigint } => {
   const signed = payload?.payload;
   const expiries = [unixMs(signed?.authorization?.validBefore), unixMs(signed?.permit2Authorization?.deadline)].filter((ms): ms is bigint => ms !== null);
+  // biome-ignore lint/complexity/useMathMinMax: these are bigints, which Math.max refuses
   if (expiries.length > 0) return { settlesBy: expiries.reduce((latest, ms) => (ms > latest ? ms : latest)) };
   const within = settlesWithinSeconds(payload?.accepted ?? requirements);
   return within === null ? {} : { settlesWithinMs: BigInt(within) * 1000n };

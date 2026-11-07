@@ -13,7 +13,8 @@ import { guard } from 'walletcap/x402';
 import { NETWORK, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-sdk-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 
 const kit = await x402();
 const skip = kit === null && 'the x402/CDP devDependencies are not installed';

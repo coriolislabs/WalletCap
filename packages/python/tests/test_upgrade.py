@@ -88,9 +88,11 @@ def _big_schema_2(tmp_path: Path, rows: int) -> Path:
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) "
-            "INSERT INTO spend SELECT 'bulk-' || i, '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', 1, "
+            "INSERT INTO spend SELECT 'bulk-' || i, "
+            "'0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', 1, "
             "CASE WHEN i % 3 = 0 THEN 'reserved' ELSE 'committed' END, 'js', "
-            "CASE WHEN i % 5 = 0 THEN '{\"outcome\":\"unknown\"}' END, 1700000000000 + i, NULL FROM n",
+            'CASE WHEN i % 5 = 0 THEN \'{"outcome":"unknown"}\' END, '
+            "1700000000000 + i, NULL FROM n",
             (rows,),
         )
     return path
@@ -107,7 +109,7 @@ def test_a_crash_mid_upgrade_leaves_the_file_as_it_was(tmp_path: Path) -> None:
     )
 
     def upgrade(path: Path) -> subprocess.Popen[str]:
-        return subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+        return subprocess.Popen(
             [sys.executable, "-c", script, str(SOURCE), str(path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -139,7 +141,9 @@ def test_a_crash_mid_upgrade_leaves_the_file_as_it_was(tmp_path: Path) -> None:
         ledger = Ledger(path)
         assert _schema(path) == "3"
         with closing(sqlite3.connect(path)) as connection:
-            held = connection.execute("SELECT count(*) FROM wc_entry WHERE kind = 'held'").fetchone()
+            held = connection.execute(
+                "SELECT count(*) FROM wc_entry WHERE kind = 'held'"
+            ).fetchone()
             assert held == (payments,)
             assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert ledger.status("0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a")["cap"] == 150_000_000
@@ -166,17 +170,27 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
         "const { Ledger } = await import(process.argv[1]);"
         "while (!existsSync(process.argv[3])) await new Promise(done => setTimeout(done, 1));"
         "const status = await (await Ledger.open(process.argv[2])).status(process.argv[4]);"
-        "console.log(JSON.stringify({ payments: Number(status.payments), in_flight: Number(status.in_flight) }));"
+        "console.log(JSON.stringify({ payments: Number(status.payments), "
+        "in_flight: Number(status.in_flight) }));"
     )
     children = [
-        subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+        subprocess.Popen(
             [sys.executable, "-c", python, str(SOURCE), str(path), str(go), wallet],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
         ),
-        subprocess.Popen(  # noqa: S603 - the local Node running a fixed script
-            [NODE, "--input-type=module", "-e", javascript, str(JS / "dist" / "core" / "ledger.js"), str(path), str(go), wallet],
+        subprocess.Popen(
+            [
+                NODE,
+                "--input-type=module",
+                "-e",
+                javascript,
+                (JS / "dist" / "core" / "ledger.js").as_uri(),
+                str(path),
+                str(go),
+                wallet,
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -192,8 +206,8 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
     assert answers[0] == answers[1]
     assert _schema(path) == "3"
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("SELECT count(*) FROM wc_entry WHERE kind = 'held'").fetchone() == (
-            payments,
-        )
+        assert connection.execute(
+            "SELECT count(*) FROM wc_entry WHERE kind = 'held'"
+        ).fetchone() == (payments,)
     if os.name == "posix":
         assert not Path(f"{path}-journal").exists()

@@ -19,8 +19,6 @@ const DIR = mkdtempSync(join(tmpdir(), 'walletcap-mcp-'));
 const WALLET = '0xd797ead28C38575FDf4fC523866287372340Ca02';
 const PAY_TO = '0x0773A0A3ec5F88162EA52470B7973b2cfAaA846A';
 const USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
-const TX = `0x${'cd'.repeat(32)}`;
-const DAY = 86_400_000;
 const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64');
 const requirement = (amount = '50000', ttl = 300, asset = USDC) => ({
   scheme: 'exact', network: 'eip155:84532', asset, amount, payTo: PAY_TO, maxTimeoutSeconds: ttl, extra: { name: 'USDC', version: '2' },
@@ -45,7 +43,8 @@ before(async () => {
 after(() => {
   server?.closeAllConnections();
   server?.close();
-  rmSync(DIR, { recursive: true, force: true });
+  // Windows keeps a budget file a test left open; its temp folder is cleared later.
+  try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ }
 });
 
 

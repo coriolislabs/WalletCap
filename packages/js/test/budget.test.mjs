@@ -12,7 +12,8 @@ import { cdpStore } from 'walletcap/cdp';
 import { Ledger } from '../dist/core/ledger.js';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-'));
-after(() => rmSync(DIR, { recursive: true, force: true }));
+// Windows keeps a budget file a test left open; its temp folder is cleared later.
+after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 afterEach(resetClock);
 
 let files = 0;

@@ -23,8 +23,12 @@ class SpecHook(BuildHookInterface):  # type: ignore[type-arg]
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
         spec = Path(self.root).parent.parent / "spec"
         if not all((spec / name).is_file() for name in FILES):
-            if not all((Path(self.root) / "src" / "walletcap" / "spec" / name).is_file() for name in FILES):
-                raise FileNotFoundError("walletcap's spec/schema.sql and spec/upgrade.sql are missing")
+            if not all(
+                (Path(self.root) / "src" / "walletcap" / "spec" / name).is_file() for name in FILES
+            ):
+                raise FileNotFoundError(
+                    "walletcap's spec/schema.sql and spec/upgrade.sql are missing"
+                )
             return
         where = "walletcap/spec" if self.target_name == "wheel" else "src/walletcap/spec"
         for name in FILES:

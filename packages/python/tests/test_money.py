@@ -49,8 +49,14 @@ def test_both_languages_convert_the_same_floats() -> None:
         "process.stdin.on('data', chunk => { text += chunk; }).on('end', () => "
         "console.log(JSON.stringify(JSON.parse(text).map(value => String(toMicros(value))))));"
     )
-    result = subprocess.run(  # noqa: S603 - fixed local Node script
-        [NODE, "--input-type=module", "-e", script, str(REPO / "packages" / "js" / "dist" / "core" / "money.js")],
+    result = subprocess.run(
+        [
+            NODE,
+            "--input-type=module",
+            "-e",
+            script,
+            (REPO / "packages" / "js" / "dist" / "core" / "money.js").as_uri(),
+        ],
         input=json.dumps(values),
         capture_output=True,
         text=True,
@@ -58,7 +64,8 @@ def test_both_languages_convert_the_same_floats() -> None:
         timeout=60,
     )
     javascript = [int(micros) for micros in json.loads(result.stdout)]
-    differ = [(v, p, j) for v, p, j in zip(values, map(to_micros, values), javascript) if p != j]
+    python = [to_micros(value) for value in values]
+    differ = [(v, p, j) for v, p, j in zip(values, python, javascript, strict=True) if p != j]
     assert differ == []
 
 
