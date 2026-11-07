@@ -482,7 +482,7 @@ put it elsewhere. Both languages compute the same default.
   transaction: every payment that counted keeps counting at least as long. 0.2 and 0.3 can't
   open the file afterwards, so stop every 0.2 and 0.3 process before upgrading. One that opens
   the file anyway adds two empty tables of its own, `budgets` and `spend`, before it refuses it;
-  0.4 drops them the next time it opens the file.
+  0.4 drops them the next time it opens the file with write access. They change no count.
 
 ## What it doesn't do
 

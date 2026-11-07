@@ -4,7 +4,7 @@
 // series of times. The Python suite checks the same files (tests/test_upgrade.py).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -176,4 +176,45 @@ test('the empty tables a 0.2 or 0.3 process leaves in a schema 3 file are droppe
   } finally {
     reopened.close();
   }
+});
+
+test("a read-only file keeps those tables and still reads: dropping them isn't worth refusing the file", {
+  // chmod sets only Windows' read-only attribute, and root writes a read-only file anyway.
+  skip: process.platform === 'win32' || process.getuid?.() === 0 ? 'needs a file this process cannot write' : false,
+}, async () => {
+  const path = join(DIR, `${files++}-read-only-strays.sqlite`);
+  const wallet = '0xd797ead28c38575fdf4fc523866287372340ca02';
+  const ledger = await Ledger.open(path, { create: true });
+  await ledger.createBudget(wallet, { cap: 10_000_000n, windowMs: 86_400_000n });
+  ledger.close();
+  const old = new DatabaseSync(path);
+  old.exec(OLD_OPEN);
+  old.close();
+  const strays = () => {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      return db
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('budgets', 'spend') ORDER BY name")
+        .all()
+        .map(row => row.name);
+    } finally {
+      db.close();
+    }
+  };
+  chmodSync(path, 0o444);
+  try {
+    // The 0.4 draft refused this file here: "attempt to write a readonly database".
+    const readOnly = await Ledger.open(path);
+    try {
+      assert.equal((await readOnly.status(wallet)).cap, 10_000_000n);
+    } finally {
+      readOnly.close();
+    }
+    assert.deepEqual(strays(), ['budgets', 'spend']);
+  } finally {
+    // SQLite gives the -wal and -shm files it creates the database file's mode.
+    for (const file of [path, `${path}-wal`, `${path}-shm`]) if (existsSync(file)) chmodSync(file, 0o644);
+  }
+  (await Ledger.open(path)).close();
+  assert.deepEqual(strays(), []);
 });

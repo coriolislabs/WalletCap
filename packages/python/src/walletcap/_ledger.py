@@ -512,12 +512,18 @@ class Ledger:
         if current == SCHEMA_VERSION:
             # A 0.2 or 0.3 process that opened this file left its own tables, empty, before it
             # refused the schema. They hold nothing; drop them so the file holds only schema 3.
+            # They change no count, so a file this process can't write (read-only, or busy)
+            # keeps them until a process that can opens it.
             if strays:
-                with self._transaction() as connection:
-                    for name in _strays(connection):
-                        (rows,) = connection.execute(f'SELECT count(*) FROM "{name}"').fetchone()  # noqa: S608
-                        if rows == 0:
-                            connection.execute(f'DROP TABLE "{name}"')
+                try:
+                    with self._transaction() as connection:
+                        for name in _strays(connection):
+                            count = f'SELECT count(*) FROM "{name}"'  # noqa: S608
+                            (rows,) = connection.execute(count).fetchone()
+                            if rows == 0:
+                                connection.execute(f'DROP TABLE "{name}"')
+                except BudgetUnavailable:
+                    pass
             return
         schema, upgrade = _spec("schema.sql"), _spec("upgrade.sql")
         with self._transaction() as connection:

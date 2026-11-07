@@ -17,7 +17,7 @@ The ledger and the budget file:
   least as long, and a crash during the upgrade leaves the file as it was. 0.2 and 0.3 refuse a
   schema 3 file, so stop every 0.2 and 0.3 process before upgrading. One that opens the file
   anyway adds its own tables, `budgets` and `spend`, empty, before it refuses it; 0.4 drops them
-  the next time it opens the file.
+  the next time it opens the file with write access. A read-only file keeps them and still reads.
 - Payments are entries appended to a ledger and never deleted. A payment that never left is
   void, and stays in the history with the status `void`; 0.3 deleted it.
 - A payment's id is its rail's own identity where walletcap reads one (`eip3009:<from>:<nonce>`,

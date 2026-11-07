@@ -532,14 +532,20 @@ export class Ledger {
     });
     if (current === SCHEMA_VERSION) {
       // A 0.2 or 0.3 process that opened this file left its own tables, empty, before it refused
-      // the schema. They hold nothing; drop them so the file holds only schema 3.
+      // the schema. They hold nothing; drop them so the file holds only schema 3. They change no
+      // count, so a file this process can't write (read-only, or busy) keeps them until a process
+      // that can opens it.
       if (strays.length > 0) {
-        await this.#write(() => {
-          for (const name of this.#strays()) {
-            const { rows } = this.#db.prepare(`SELECT count(*) AS rows FROM "${name}"`).get() as { rows: number | bigint };
-            if (Number(rows) === 0) this.#db.exec(`DROP TABLE "${name}"`);
-          }
-        });
+        try {
+          await this.#write(() => {
+            for (const name of this.#strays()) {
+              const { rows } = this.#db.prepare(`SELECT count(*) AS rows FROM "${name}"`).get() as { rows: number | bigint };
+              if (Number(rows) === 0) this.#db.exec(`DROP TABLE "${name}"`);
+            }
+          });
+        } catch (error) {
+          if (!(error instanceof BudgetUnavailable)) throw error;
+        }
       }
       return;
     }

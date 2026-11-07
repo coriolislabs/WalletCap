@@ -257,3 +257,37 @@ def test_the_empty_tables_an_old_process_leaves_in_a_schema_3_file_are_dropped(
     assert _schema(path) == "3"
     held = ledger.hold(wallet, 10_000_000, rail="test")
     assert ledger.settle(held["payment"], holder=held["holder"])["state"] == "settled"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    # chmod sets only Windows' read-only attribute, and root writes a read-only file anyway.
+    reason="needs a file this process cannot write",
+)
+def test_a_read_only_file_keeps_those_tables_and_still_reads(tmp_path: Path) -> None:
+    path = tmp_path / "read-only-strays.sqlite"
+    wallet = "0xd797ead28c38575fdf4fc523866287372340ca02"
+    Ledger(path, create=True).create_budget(wallet, cap=10_000_000, window_ms=86_400_000)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(_OLD_OPEN)
+
+    def strays() -> list[str]:
+        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as connection:
+            rows = connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                " AND name IN ('budgets', 'spend') ORDER BY name"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    path.chmod(0o444)
+    try:
+        # The 0.4 draft refused this file here: "attempt to write a readonly database".
+        assert Ledger(path).status(wallet)["cap"] == 10_000_000
+        assert strays() == ["budgets", "spend"]
+    finally:
+        # SQLite gives the -wal and -shm files it creates the database file's mode.
+        for file in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+            if file.exists():
+                file.chmod(0o644)
+    Ledger(path)
+    assert strays() == []
