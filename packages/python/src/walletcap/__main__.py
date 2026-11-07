@@ -20,6 +20,7 @@ from walletcap import __version__
 from walletcap.budget import UNSET, PaymentRecord, Status
 from walletcap.errors import BudgetUnavailable, UsageError, is_walletcap_error
 from walletcap.money import (
+    Micros,
     default_budget_path,
     describe_limits,
     expand_home,
@@ -100,7 +101,7 @@ def _json(value: Any) -> str:
             return [plain(entry) for entry in item]
         if isinstance(item, dict):
             return {key: plain(entry) for key, entry in item.items()}
-        if isinstance(item, int) and not isinstance(item, bool):
+        if isinstance(item, Micros) or (isinstance(item, int) and not isinstance(item, bool)):
             return str(int(item))
         if isinstance(item, Path):
             return str(item)

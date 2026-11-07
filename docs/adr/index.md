@@ -17,3 +17,4 @@ and its consequences.
 - [0012. Network filesystems: unsupported, not detected yet](0012-network-filesystems.md)
 - [0013. A payment's moves belong to the hold that took it](0013-a-payments-moves-belong-to-the-hold-that-took-it.md)
 - [0014. The 61-minute bulk release is for x402 holds only](0014-the-61-minute-release-is-for-x402-holds.md)
+- [0015. An amount reads back as itself](0015-an-amount-reads-back-as-itself.md)

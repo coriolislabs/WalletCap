@@ -20,7 +20,14 @@ REPO = ROOT.parents[1]
 SOURCE = ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
-from walletcap import MAX_AMOUNT, BudgetRefused, BudgetUnavailable, UsageError, _clock  # noqa: E402
+from walletcap import (  # noqa: E402
+    MAX_AMOUNT,
+    BudgetRefused,
+    BudgetUnavailable,
+    Micros,
+    UsageError,
+    _clock,
+)
 from walletcap._ledger import Ledger as _Base  # noqa: E402
 from walletcap._ledger import Row  # noqa: E402
 
@@ -36,7 +43,7 @@ class Ledger(_Base):
     def tokens(self) -> dict[str, str]:
         return {}
 
-    def hold(self, name: str, amount: int, **kwargs: Any) -> Row:
+    def hold(self, name: str, amount: int | Micros, **kwargs: Any) -> Row:
         row = super().hold(name, amount, **kwargs)
         if row["holder"] is not None:
             self.tokens[str(row["payment"])] = str(row["holder"])
@@ -293,12 +300,12 @@ def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
 ) -> None:
     assert MAX_AMOUNT == 10**15
     ledger = Ledger(tmp_path / "budget.sqlite", create=True)
-    for too_much in (MAX_AMOUNT + 1, 2**63 - 1):
+    for too_much in (int(MAX_AMOUNT) + 1, 2**63 - 1):
         with pytest.raises(UsageError, match="from 0 to 1000000000000000"):
             ledger.create_budget("big", unit="usd", cap=too_much, window_ms=DAY)
     ledger.create_budget("agent", unit="usd", cap=MAX_AMOUNT, window_ms=DAY)
     with pytest.raises(UsageError, match="from 1 to 1000000000000000"):
-        ledger.hold("agent", MAX_AMOUNT + 1, rail="python")
+        ledger.hold("agent", int(MAX_AMOUNT) + 1, rail="python")
     # Two holds of the most a budget can hold count at once: one lapsed, then settled late.
     first = str(
         ledger.hold("agent", MAX_AMOUNT, rail="python", until=int(clock.at * 1000) + 1)["payment"]

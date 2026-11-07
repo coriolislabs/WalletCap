@@ -39,9 +39,11 @@ with budget.pay("$12.50", to=payee) as payment:
 - Limits passed to `open_budget` are this process's own: they can tighten the stored ones, for
   this process only. Looser ones change nothing, and warn.
 - Amounts are dollars: strings (`"$12.50"`), `Decimal`s, floats and ints (whole dollars). What
-  comes back is `Micros`, an `int` in micro-dollars whose arithmetic keeps the unit, and
-  `to_micros` reads a `Micros` as micro-dollars, so `budget.check(budget.status().remaining)`
-  means what it says.
+  comes back is `Micros`, a micro-dollar amount, and `to_micros` reads a `Micros` as
+  micro-dollars, so `budget.check(budget.status().remaining)` means what it says. Arithmetic on
+  a `Micros` returns a `Micros` or raises `TypeError`: add or subtract another `Micros`, multiply
+  or floor-divide by an int. `remaining + 1` or `remaining * 1.5` is refused, since a bare number
+  would be read as dollars.
 
 For more control, hold the payment yourself:
 

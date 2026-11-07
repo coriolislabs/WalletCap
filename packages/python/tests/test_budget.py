@@ -105,7 +105,11 @@ def test_the_cap_holds_and_a_restart_cannot_raise_the_limits_it_finds(tmp_path: 
         _pay(restarted, "$1.00")
     assert over.value.code == "per_payment"
     status = restarted.status()
-    assert (status.cap, status.per_payment, status.spent) == (150_000, 50_000, 150_000)
+    assert (status.cap, status.per_payment, status.spent) == (
+        Micros(150_000),
+        Micros(50_000),
+        Micros(150_000),
+    )
 
 
 def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
@@ -115,7 +119,7 @@ def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
     for _ in range(3):
         _pay(budget, "0.05")
     status = open_owner(budget.path).set_limits(WALLET, per_day="$0.20")
-    assert (status.spent, status.remaining) == (150_000, 50_000)
+    assert (status.spent, status.remaining) == (Micros(150_000), Micros(50_000))
     _pay(budget, "0.05")
     with pytest.raises(BudgetRefused):
         _pay(budget, "0.05")
@@ -137,7 +141,7 @@ def test_a_payers_tighter_limits_bind_its_own_process_only(tmp_path: Path, clock
     budget = open_budget(WALLET, path=path, per_day="$150", create=True)
     # 0.3.0 wrote a payer's tighter limits into the file, for everyone that opened it.
     tighter = open_budget(WALLET, path=path, per_day="$100", per_payment="$60")
-    assert (budget.status().cap, budget.status().per_payment) == (150_000_000, None)
+    assert (budget.status().cap, budget.status().per_payment) == (Micros(150_000_000), None)
     with pytest.raises(BudgetRefused) as over:
         _pay(tighter, "$61")
     assert (over.value.code, over.value.source) == ("per_payment", "process")
@@ -162,7 +166,7 @@ def test_a_failed_payment_keeps_counting_unless_it_never_left(tmp_path: Path) ->
     with pytest.raises(NotSent), budget.pay("$50"):
         raise NotSent("card declined")
     status = budget.status()
-    assert (status.spent, status.in_flight) == (0, 50_000_000)
+    assert (status.spent, status.in_flight) == (Micros(0), Micros(50_000_000))
     # The ledger keeps every payment: the one that never left is void, and counts nothing.
     assert [payment.status for payment in budget.history()] == ["void", "unknown"]
 
@@ -174,7 +178,11 @@ def test_an_error_never_settles_a_payment(tmp_path: Path, clock: Clock) -> None:
         raise TimeoutError("receipt timeout")
     clock.at += 30 * DAY
     status = budget.status()
-    assert (status.spent, status.in_flight, status.remaining) == (0, 150_000_000, 0)
+    assert (status.spent, status.in_flight, status.remaining) == (
+        Micros(0),
+        Micros(150_000_000),
+        Micros(0),
+    )
     with pytest.raises(BudgetRefused):
         _pay(budget, "$1")
     [unknown] = budget.history()
@@ -233,9 +241,9 @@ def test_a_refusal_names_the_open_payments_and_holds_lists_them(
     assert [
         (hold.reason, hold.amount, hold.age_ms, hold.counts_until is None) for hold in holds
     ] == [
-        ("unknown", 10_000_000, 3_600_000, True),
-        ("unknown", 20_000_000, 3_600_000, True),
-        ("in flight", 5_000_000, 0, False),
+        ("unknown", Micros(10_000_000), 3_600_000, True),
+        ("unknown", Micros(20_000_000), 3_600_000, True),
+        ("in flight", Micros(5_000_000), 0, False),
     ]
     assert holds[0].error == "rpc timeout"
     # 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
@@ -428,7 +436,7 @@ def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
     assert (entry.id, entry.status, entry.amount, entry.tx, entry.rail) == (
         spend_id,
         "settled",
-        5_000_000,
+        Micros(5_000_000),
         TX,
         "python",
     )
@@ -727,15 +735,15 @@ def test_a_0_2_file_is_upgraded_on_open(tmp_path: Path, clock: Clock) -> None:
     status = upgraded.status()
     # The tighter of every limit: the smallest cap and per-payment limit, and the longest window.
     assert (status.cap, status.window_ms, status.per_payment, status.max_payments) == (
-        150_000_000,
+        Micros(150_000_000),
         86_400_000,
-        50_000_000,
+        Micros(50_000_000),
         10,
     )
     assert (status.spent, status.in_flight, status.remaining) == (
-        110_000_000,
-        20_000_000,
-        20_000_000,
+        Micros(110_000_000),
+        Micros(20_000_000),
+        Micros(20_000_000),
     )
     with pytest.raises(BudgetRefused):
         _pay(upgraded, "$20.01")
@@ -812,7 +820,7 @@ def test_the_payer_has_no_owner_methods_and_the_owner_reconciles_with_evidence(
     lost.note("unknown", "rpc timeout")
     # The chain shows the authorization unused past its expiry: the owner voids it, with that.
     voided = owner.void(lost.id, evidence="authorizationState false after validBefore")
-    assert (voided.state, voided.counting, budget.status().in_flight) == ("void", False, 0)
+    assert (voided.state, voided.counting, budget.status().in_flight) == ("void", False, Micros(0))
     # Later evidence that it paid after all: VOID -> SETTLED, and it counts again.
     settled = owner.settle(lost.id, evidence=TX)
     assert (settled.state, settled.tx) == ("settled", TX)
@@ -834,8 +842,8 @@ def test_amounts_come_back_as_micros_that_read_back_as_micros(tmp_path: Path) ->
     assert remaining == 100_000_000
     # 0.3.0 read the int it returned as dollars: check(status().remaining) asked for $100,000,000.
     assert budget.check(remaining).ok
-    assert not budget.check(remaining + 1).ok
-    assert isinstance(remaining - 1, Micros)
+    assert not budget.check(remaining + Micros(1)).ok
+    assert isinstance(remaining - Micros(1), Micros)
     assert isinstance(2 * Micros(3), Micros)
     assert to_micros(100) == 100_000_000  # a plain int is still dollars
     assert str(remaining) == "100000000"
@@ -868,7 +876,11 @@ def test_a_voided_id_is_spent_so_a_retry_cannot_bring_a_payment_back(tmp_path: P
     with pytest.raises(UsageError), budget.pay("$10", id="order-17"):
         pass
     status = budget.status()
-    assert (status.spent, status.in_flight, status.remaining) == (10_000_000, 0, 0)
+    assert (status.spent, status.in_flight, status.remaining) == (
+        Micros(10_000_000),
+        Micros(0),
+        Micros(0),
+    )
 
 
 def test_only_the_process_that_held_a_payment_or_the_owner_can_move_it(tmp_path: Path) -> None:
@@ -945,7 +957,7 @@ def test_a_cancelled_async_pay_voids_the_hold_it_took(tmp_path: Path) -> None:
     asyncio.run(run())
     assert holder.wait(timeout=30) == 0
     status = budget.status()
-    assert (status.in_flight, status.spent, status.payments) == (0, 0, 0)
+    assert (status.in_flight, status.spent, status.payments) == (Micros(0), Micros(0), 0)
     assert budget.holds() == []
     [voided] = budget.history()
     assert voided.status == "void"
@@ -963,7 +975,7 @@ def test_a_cancelled_ahold_voids_the_hold_it_took(tmp_path: Path) -> None:
 
     asyncio.run(run())
     assert holder.wait(timeout=30) == 0
-    assert (budget.status().in_flight, budget.holds()) == (0, [])
+    assert (budget.status().in_flight, budget.holds()) == (Micros(0), [])
     _pay(budget, "$10")
 
 

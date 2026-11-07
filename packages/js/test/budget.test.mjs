@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
 import {
-  Budget, BudgetRefused, BudgetUnavailable, MAX_AMOUNT, notSent, openBudget, openOwner, Owner, PaymentNotRecorded, UsageError,
+  Budget, BudgetRefused, BudgetUnavailable, MAX_AMOUNT, notSent, openBudget, openOwner, Owner, PaymentNotRecorded, toMicros, UsageError,
 } from 'walletcap';
 import { cdpStore } from 'walletcap/cdp';
 import { Ledger } from '../dist/core/ledger.js';
@@ -493,4 +493,20 @@ test('only the process that held a payment, or the owner, can move it', async ()
   assert.equal(second.state, 'void');
   await assert.rejects(owner.void('order-18', { evidence: 'checked' }), UsageError);
   other.close();
+});
+
+test('an amount stays micro-dollars under bigint arithmetic, as Python keeps a Micros', async () => {
+  const { budget } = await fixture({ perDay: '$150' });
+  const { cap } = await budget.status();
+  // Python's first Micros lost its type under //, so half a $150 cap read as $75,000,000.
+  // A bigint stays a bigint, and walletcap reads a bigint as micro-dollars.
+  const half = cap / 2n;
+  assert.equal(typeof half, 'bigint');
+  assert.equal(toMicros(half), 75_000_000n);
+  assert.equal((await budget.check(half)).ok, true);
+  assert.equal((await budget.check(half * 3n)).ok, false);
+  // A number is dollars, so Number(amount) is a conversion out of micro-dollars: don't pass one back.
+  assert.equal(toMicros(150), 150_000_000n);
+  assert.throws(() => cap + 1.5, TypeError); // JavaScript refuses mixing bigint and number
+  budget.close();
 });

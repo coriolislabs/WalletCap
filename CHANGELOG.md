@@ -71,8 +71,11 @@ Python:
   `BudgetLimits` is now the owner's view of a budget.
 - `OverBudget`, `OverPerPayment`, `OverUses` and `BudgetRevoked` are gone: `BudgetRefused.code`
   says which limit refused.
-- Amounts the API returns are `Micros`, an `int` in micro-dollars. `to_micros` reads a `Micros` as
-  micro-dollars and a plain `int` as whole dollars, as before.
+- Amounts the API returns are `Micros`, a micro-dollar amount of its own type. `to_micros` reads a
+  `Micros` as micro-dollars and a plain `int` as whole dollars, as before. Arithmetic on a
+  `Micros` returns a `Micros` or raises `TypeError` (ADR 0015): `cap // 2` is half the cap,
+  while `cap + 1`, `1.5 * cap`, `cap / 2` and `float(cap)` are refused, because a bare number
+  would be read as dollars. `int(amount)` gives the micro-dollars as a plain int.
 
 Both languages:
 

@@ -35,7 +35,9 @@ with budget.pay("$12.50") as payment:  # refused past $150 in any 24 hours
   another process's lock in a worker thread, not on the event loop. If the task is cancelled
   while it waits, the hold the thread takes is voided.
 - Amounts are dollars: strings (`"$12.50"`), `Decimal`s, floats and ints (whole dollars). What
-  comes back is `Micros`, an `int` in micro-dollars that `to_micros` reads as micro-dollars.
+  comes back is `Micros`, a micro-dollar amount that `to_micros` reads as micro-dollars. Its
+  arithmetic returns a `Micros` or raises `TypeError`: `remaining // 2` works, `remaining + 1`
+  doesn't, since a bare number would be read as dollars.
 - The owner's command, `walletcap` or `python -m walletcap`: `status`, `set`, `freeze`,
   `unfreeze`, `history`, `holds`, `void <id>`, `void --all-unknown --older-than 24h` and
   `settle <id> --tx <hash>`.

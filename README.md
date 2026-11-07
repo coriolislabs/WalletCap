@@ -237,9 +237,11 @@ except BroadcastFailed:
 - Inside `with budget.pay(...)`, set `payment.tx` to keep the transaction hash, and raise
   `NotSent("card declined")` when you know it didn't leave. `settles_by` takes a timezone-aware
   datetime; a naive one is refused.
-- Amounts come back as `Micros`, an `int` in micro-dollars whose arithmetic keeps the unit.
-  `to_micros` reads a `Micros` as micro-dollars and a plain `int` as whole dollars, so
-  `budget.check(budget.status().remaining)` means what it says.
+- Amounts come back as `Micros`, a micro-dollar amount. `to_micros` reads a `Micros` as
+  micro-dollars and a plain `int` as whole dollars, so `budget.check(budget.status().remaining)`
+  means what it says. Arithmetic on a `Micros` returns a `Micros` or raises `TypeError`:
+  `remaining // 2` is half of it, and `remaining + 1`, `remaining * 1.5` or `remaining / 2` is
+  refused, since a bare number would be read as dollars.
 - In async code, `async with budget.pay(...)` and `acheck`, `ahold`, `astatus`, `aholds` and
   `ahistory` wait for another process's lock in a worker thread, through `asyncio.to_thread`.
   If the task is cancelled while it waits, the hold the thread takes is voided.

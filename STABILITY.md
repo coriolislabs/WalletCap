@@ -46,6 +46,21 @@ The Python names match the JavaScript ones, in Python's naming convention: `open
 `paymentId`. The async forms of the payer's methods are `acheck`, `ahold`, `astatus`, `aholds`
 and `ahistory`, and a hold's are `asettle`, `avoid` and `anote`.
 
+### Amounts
+
+The two packages read numbers the same way, and every amount they return reads back as itself:
+
+| | JavaScript | Python |
+|---|---|---|
+| Micro-dollars | `bigint` (`Micros`, a branded bigint) | `Micros` |
+| Dollars | `number`, a string like `"$12.50"` | `int`, `float`, `Decimal`, a string |
+| Arithmetic on an amount | bigint arithmetic, which stays bigint, so stays micro-dollars | a `Micros`, or `TypeError`; never a bare number |
+
+So `check(status().remaining)`, `check(remaining / 2n)` and `check(remaining // 2)` read
+micro-dollars in both. Converting an amount to a plain number yourself, `Number(remaining)` or
+`int(remaining)`, gives micro-dollars that walletcap would read as dollars: don't pass one back.
+ADR 0015 records why.
+
 ### Errors
 
 Four classes, the same in both languages, with no common base: `BudgetUnavailable`,

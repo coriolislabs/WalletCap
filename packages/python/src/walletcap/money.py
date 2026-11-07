@@ -16,51 +16,227 @@ import sys
 from collections.abc import Mapping
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn, SupportsIndex
 
 from walletcap._keccak import keccak256
 from walletcap.errors import UsageError
 
 
-class Micros(int):
-    """An amount in micro-dollars: what every amount walletcap returns is.
+def _refused(operation: str) -> TypeError:
+    return TypeError(
+        f"{operation} is refused: a Micros is micro-dollars, and walletcap reads a bare int, "
+        "float, Decimal or str as dollars, so the result could be read a million times too "
+        "large. Add or subtract Micros, multiply or floor-divide by an int count."
+    )
 
-    ``to_micros`` reads a ``Micros`` as micro-dollars and a plain ``int`` as whole dollars, so
-    ``budget.check(budget.status().remaining)`` means what it says. Adding, subtracting,
-    negating or multiplying by an int keeps the type.
+
+class Micros:
+    """An amount in micro-dollars: every amount walletcap returns is one.
+
+    ``to_micros`` reads a ``Micros`` as micro-dollars and a bare ``int`` as whole dollars, as
+    JavaScript reads a bigint and a number. So no arithmetic on a ``Micros`` gives a bare number
+    that would be read back as dollars: each operation returns a ``Micros`` or raises
+    ``TypeError``, whichever side the other operand is on. A ``Micros`` is its own type, not an
+    ``int``: as an ``int`` subclass, ``1.5 * amount`` or ``Decimal(2) * amount`` would compute as
+    plain numbers before ``Micros`` could refuse them.
+
+    - ``Micros + Micros``, ``Micros - Micros``: a ``Micros``. Zero adds as itself, so ``sum()``
+      works.
+    - ``Micros * int``, ``int * Micros``, ``Micros // int``, ``Micros % int``,
+      ``divmod(Micros, int)``, ``round()``, ``abs()``, unary ``-`` and ``+``,
+      ``math.floor``/``ceil``/``trunc``: a ``Micros``.
+    - Anything else raises ``TypeError``: a bare int, float, Decimal or str added or subtracted
+      (it could be dollars); a float or Decimal factor; true division; ``Micros // Micros`` and
+      ``Micros % Micros``; powers; bit operations; and ``float(amount)``.
+
+    It compares and hashes like the int of micro-dollars, so ``Micros(5) == 5``.
+    ``int(amount)`` and ``str(amount)`` give that number of micro-dollars: walletcap would read
+    the int as dollars, so don't pass it back.
     """
 
-    __slots__ = ()
+    __slots__ = ("_value",)
+    _value: int
 
-    def __add__(self, other: int) -> Micros:
-        return Micros(int(self) + int(other))
+    def __init__(self, value: object = 0) -> None:
+        if isinstance(value, Micros):
+            value = value._value
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"Micros takes an int of micro-dollars, not {type(value).__name__}")
+        object.__setattr__(self, "_value", int(value))
 
-    def __radd__(self, other: int) -> Micros:
-        return Micros(int(other) + int(self))
+    def __setattr__(self, name: str, value: object) -> NoReturn:
+        raise AttributeError("a Micros can't be changed")
 
-    def __sub__(self, other: int) -> Micros:
-        return Micros(int(self) - int(other))
+    def __reduce__(self) -> tuple[type[Micros], tuple[int]]:
+        return (Micros, (self._value,))
 
-    def __rsub__(self, other: int) -> Micros:
-        return Micros(int(other) - int(self))
+    @staticmethod
+    def _amount(other: object, operation: str) -> int:
+        # Another Micros, or zero, which is zero in either unit.
+        if isinstance(other, Micros):
+            return other._value
+        if type(other) is int and other == 0:
+            return 0
+        raise _refused(operation)
 
-    def __mul__(self, other: int) -> Micros:
-        return Micros(int(self) * int(other))
+    @staticmethod
+    def _count(other: object, operation: str) -> int:
+        if type(other) is not int:
+            raise _refused(operation)
+        return other
 
-    def __rmul__(self, other: int) -> Micros:
-        return Micros(int(other) * int(self))
+    def __int__(self) -> int:
+        return self._value
+
+    def __bool__(self) -> bool:
+        return self._value != 0
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    @staticmethod
+    def _comparable(other: object) -> int | None:
+        if isinstance(other, Micros):
+            return other._value
+        if isinstance(other, int):
+            return int(other)
+        return None
+
+    def __eq__(self, other: object) -> bool:
+        value = self._comparable(other)
+        return NotImplemented if value is None else self._value == value
+
+    def __lt__(self, other: object) -> bool:
+        value = self._comparable(other)
+        return NotImplemented if value is None else self._value < value
+
+    def __le__(self, other: object) -> bool:
+        value = self._comparable(other)
+        return NotImplemented if value is None else self._value <= value
+
+    def __gt__(self, other: object) -> bool:
+        value = self._comparable(other)
+        return NotImplemented if value is None else self._value > value
+
+    def __ge__(self, other: object) -> bool:
+        value = self._comparable(other)
+        return NotImplemented if value is None else self._value >= value
+
+    def __add__(self, other: object) -> Micros:
+        return Micros(self._value + self._amount(other, "adding a number to a Micros"))
+
+    def __radd__(self, other: object) -> Micros:
+        return Micros(self._amount(other, "adding a Micros to a number") + self._value)
+
+    def __sub__(self, other: object) -> Micros:
+        return Micros(self._value - self._amount(other, "subtracting a number from a Micros"))
+
+    def __rsub__(self, other: object) -> Micros:
+        return Micros(self._amount(other, "subtracting a Micros from a number") - self._value)
+
+    def __mul__(self, other: object) -> Micros:
+        return Micros(self._value * self._count(other, "multiplying a Micros by a non-int"))
+
+    def __rmul__(self, other: object) -> Micros:
+        return Micros(self._count(other, "multiplying a Micros by a non-int") * self._value)
+
+    def __floordiv__(self, other: object) -> Micros:
+        return Micros(self._value // self._count(other, "floor-dividing a Micros by a non-int"))
+
+    def __rfloordiv__(self, other: object) -> NoReturn:
+        raise _refused("dividing by a Micros")
+
+    def __mod__(self, other: object) -> Micros:
+        return Micros(self._value % self._count(other, "a Micros modulo a non-int"))
+
+    def __rmod__(self, other: object) -> NoReturn:
+        raise _refused("a number modulo a Micros")
+
+    def __divmod__(self, other: object) -> tuple[Micros, Micros]:
+        divisor = self._count(other, "divmod of a Micros by a non-int")
+        quotient, remainder = divmod(self._value, divisor)
+        return Micros(quotient), Micros(remainder)
+
+    def __rdivmod__(self, other: object) -> NoReturn:
+        raise _refused("divmod by a Micros")
+
+    def __truediv__(self, other: object) -> NoReturn:
+        raise _refused("true division of a Micros")
+
+    def __rtruediv__(self, other: object) -> NoReturn:
+        raise _refused("true division by a Micros")
+
+    def __pow__(self, other: object, modulo: object = None) -> NoReturn:
+        raise _refused("a power of a Micros")
+
+    def __rpow__(self, other: object, modulo: object = None) -> NoReturn:
+        raise _refused("a power with a Micros")
+
+    def __lshift__(self, other: object) -> NoReturn:
+        raise _refused("a bit shift of a Micros")
+
+    def __rlshift__(self, other: object) -> NoReturn:
+        raise _refused("a bit shift by a Micros")
+
+    def __rshift__(self, other: object) -> NoReturn:
+        raise _refused("a bit shift of a Micros")
+
+    def __rrshift__(self, other: object) -> NoReturn:
+        raise _refused("a bit shift by a Micros")
+
+    def __and__(self, other: object) -> NoReturn:
+        raise _refused("a bit operation on a Micros")
+
+    def __rand__(self, other: object) -> NoReturn:
+        raise _refused("a bit operation on a Micros")
+
+    def __or__(self, other: object) -> NoReturn:
+        raise _refused("a bit operation on a Micros")
+
+    def __ror__(self, other: object) -> NoReturn:
+        raise _refused("a bit operation on a Micros")
+
+    def __xor__(self, other: object) -> NoReturn:
+        raise _refused("a bit operation on a Micros")
+
+    def __rxor__(self, other: object) -> NoReturn:
+        raise _refused("a bit operation on a Micros")
+
+    def __invert__(self) -> NoReturn:
+        raise _refused("inverting the bits of a Micros")
 
     def __neg__(self) -> Micros:
-        return Micros(-int(self))
+        return Micros(-self._value)
+
+    def __pos__(self) -> Micros:
+        return Micros(self._value)
 
     def __abs__(self) -> Micros:
-        return Micros(abs(int(self)))
+        return Micros(abs(self._value))
+
+    def __round__(self, ndigits: SupportsIndex | None = None) -> Micros:
+        return Micros(round(self._value, ndigits))
+
+    def __trunc__(self) -> Micros:
+        return Micros(self._value)
+
+    def __floor__(self) -> Micros:
+        return Micros(self._value)
+
+    def __ceil__(self) -> Micros:
+        return Micros(self._value)
+
+    def __float__(self) -> NoReturn:
+        raise _refused("float() of a Micros")
+
+    def __format__(self, spec: str) -> str:
+        return format(self._value, spec)
 
     def __repr__(self) -> str:
-        return f"Micros({int(self)})"
+        return f"Micros({self._value})"
 
     def __str__(self) -> str:
-        return int.__repr__(self)
+        return str(self._value)
 
 
 MICROS: Final = 1_000_000
@@ -143,7 +319,7 @@ def _decimal_micros(value: Decimal, label: str) -> int:
     shift = exponent + 6  # the micro-dollars are the digits times 10**shift
     whole = len(digits) + shift  # how many digits the whole micro-dollars take
     if whole > _AMOUNT_DIGITS:
-        return MAX_AMOUNT + 1  # more than the most a budget can hold
+        return int(MAX_AMOUNT) + 1  # more than the most a budget can hold
     if shift >= 0:
         return int("".join(map(str, digits))) * _pow10(shift)
     if any(digits[max(whole, 0) :]):
@@ -185,7 +361,7 @@ def to_micros(value: object, label: str = "amount") -> Micros:
             raise UsageError(f"{label} is finer than a millionth of a dollar: {value!r}")
         whole = match.group(1).replace(",", "").lstrip("0") or "0"
         if len(whole) > _AMOUNT_DIGITS:
-            micros = MAX_AMOUNT + 1  # more than the most a budget can hold
+            micros = int(MAX_AMOUNT) + 1  # more than the most a budget can hold
         else:
             micros = int(whole) * MICROS + int(fraction[:6].ljust(6, "0"))
     else:
@@ -199,16 +375,17 @@ def to_micros(value: object, label: str = "amount") -> Micros:
     return Micros(micros)
 
 
-def format_usd(micros: int) -> str:
+def format_usd(micros: int | Micros) -> str:
     """``"$1,234.50"`` for 1_234_500_000 micro-dollars; sub-cent amounts keep their digits."""
 
-    sign = "-" if micros < 0 else ""
-    whole, part = divmod(abs(micros), MICROS)
+    value = int(micros)
+    sign = "-" if value < 0 else ""
+    whole, part = divmod(abs(value), MICROS)
     fraction = f"{part:06d}".rstrip("0").ljust(2, "0")
     return f"{sign}${whole:,}.{fraction}"
 
 
-def format_amount(amount: int, unit: str) -> str:
+def format_amount(amount: int | Micros, unit: str) -> str:
     """An amount in a budget's own unit: dollars for usd and usdc, raw units otherwise."""
 
     return format_usd(amount) if unit in DOLLAR_UNITS else f"{amount} {unit}"
@@ -383,9 +560,9 @@ def expand_home(path: str | Path, home: Path | None = None) -> Path:
 
 def describe_limits(
     *,
-    cap: int | None = None,
+    cap: int | Micros | None = None,
     window_ms: int | None = None,
-    per_payment: int | None = None,
+    per_payment: int | Micros | None = None,
     max_uses: int | None = None,
 ) -> str:
     """``"$150.00 per 24h, at most $50.00 a payment, 20 payments per 24h"`` for the set fields."""
@@ -402,14 +579,14 @@ def describe_limits(
 
 def limit_flags(
     *,
-    cap: int | None = None,
+    cap: int | Micros | None = None,
     window_ms: int | None = None,
-    per_payment: int | None = None,
+    per_payment: int | Micros | None = None,
     max_uses: int | None = None,
 ) -> str:
     """The CLI flags that would set these limits, for messages that tell an owner what to run."""
 
-    def dollars(micros: int) -> str:
+    def dollars(micros: int | Micros) -> str:
         return format_usd(micros)[1:].replace(",", "").removesuffix(".00")
 
     flags = []

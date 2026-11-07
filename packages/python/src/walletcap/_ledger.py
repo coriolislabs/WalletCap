@@ -16,7 +16,7 @@ import secrets
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
@@ -24,7 +24,14 @@ from typing import Any, Final
 
 from walletcap import _clock
 from walletcap.errors import BudgetRefused, BudgetUnavailable, UsageError
-from walletcap.money import MAX_AMOUNT, format_amount, format_window, normalize_wallet, short_wallet
+from walletcap.money import (
+    MAX_AMOUNT,
+    Micros,
+    format_amount,
+    format_window,
+    normalize_wallet,
+    short_wallet,
+)
 
 __all__ = [
     "MAX_TIME",
@@ -132,6 +139,8 @@ def _version(text: str) -> tuple[int, ...]:
 
 
 def _whole(value: object, label: str, low: int, high: int) -> int:
+    if isinstance(value, Micros):  # the ledger counts in plain ints of the budget's unit
+        value = int(value)
     if not isinstance(value, int) or isinstance(value, bool):
         raise UsageError(f"{label} must be an integer")
     value = int(value)
@@ -143,7 +152,7 @@ def _whole(value: object, label: str, low: int, high: int) -> int:
 def units(value: object, label: str, *, allow_zero: bool = False) -> int:
     """An amount in the budget's own unit, from 1 (or 0) to MAX_AMOUNT."""
 
-    return _whole(value, label, 0 if allow_zero else 1, MAX_AMOUNT)
+    return _whole(value, label, 0 if allow_zero else 1, int(MAX_AMOUNT))
 
 
 def millis(value: object, label: str, *, low: int = 0) -> int:
@@ -289,6 +298,9 @@ def refusal(
 ) -> BudgetRefused:
     """The refusal for ``why``, a row of the refusal statement, worded as JavaScript words it."""
 
+    # The ledger counts in plain ints of the budget's unit; a Micros refuses to mix with them.
+    amount = int(amount)
+    limits = ProcessLimits(*(None if value is None else int(value) for value in astuple(limits)))
     name = short_wallet(why["wallet"])
     unit = why["unit"]
     window = format_window(why["window_ms"])
@@ -544,7 +556,7 @@ class Ledger:
         if names is None:
             names = self._names[name] = _parameters(sql)
         bound = {
-            key: (int(value) if isinstance(value, bool) else value)
+            key: (int(value) if isinstance(value, (bool, Micros)) else value)
             for key, value in ((key, args.get(key)) for key in names)
         }
         return [dict(row) for row in connection.execute(sql, bound).fetchall()]
@@ -584,9 +596,9 @@ class Ledger:
         name: str,
         *,
         unit: str = "usd",
-        cap: int,
+        cap: int | Micros,
         window_ms: int,
-        per_payment: int | None = None,
+        per_payment: int | Micros | None = None,
         max_payments: int | None = None,
     ) -> Row:
         wallet = normalize_wallet(name)
@@ -647,7 +659,7 @@ class Ledger:
             self._run(connection, "unfreeze", {"wallet": wallet})
 
     def check(
-        self, name: str, amount: int, *, limits: ProcessLimits | None = None
+        self, name: str, amount: int | Micros, *, limits: ProcessLimits | None = None
     ) -> tuple[BudgetRefused | None, int]:
         """Whether a hold of ``amount`` would be refused now, without holding it; what is left."""
 
@@ -677,7 +689,7 @@ class Ledger:
     def hold(
         self,
         name: str,
-        amount: int,
+        amount: int | Micros,
         *,
         rail: str,
         payment: str | None = None,
