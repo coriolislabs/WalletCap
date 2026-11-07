@@ -54,9 +54,11 @@ applySpendControls(client, {
 - A payment counts until an hour (and a minute) after CDP records it, plus one window: CDP signs
   it after recording it, and lets a payee ask for an authorization it can redeem for up to an
   hour.
-- A payment CDP removes from its store stays counted as in flight, marked refused, until you
-  check the chain and run `npx walletcap release <id>`, or `npx walletcap release --all-unknown
-  --older-than 24h` for every such payment older than that.
+- A payment CDP removes from its store stays counted as in flight, marked refused, as long as it
+  would have counted settled: an hour and a minute after CDP recorded it, plus one window. Once
+  you've checked the chain, `npx walletcap release <id>` gives it back sooner, and so does
+  `npx walletcap release --all-unknown --older-than 24h` once that hour and a minute has passed.
+- A refusal the store passes to CDP, and so to the agent, says why, not which payments are open.
 - Use CDP 1.60.0 or later: its published source refuses a `maxTimeoutSeconds` over 3600, which
   the store's hour relies on. The test suite drives the published `@coinbase/cdp-sdk` 1.60.0
   through the store, and the crash test runs 1.61.0.

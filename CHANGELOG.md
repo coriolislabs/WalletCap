@@ -40,8 +40,9 @@ not a patch.
   3600 (`MAX_PAYMENT_TIMEOUT_SECONDS`), as Coinbase's CDP spend controls do. It passes over
   longer terms for shorter ones on offer, and refuses before signing, with the reason
   `'timeout'`, when none are.
-- The Agentic Wallet wrapper refuses a paid x402 request, before the wallet is asked, if any of
-  its terms asks for more than an hour or gives no whole number of seconds (reason `'timeout'`).
+- The Agentic Wallet wrapper hands the wallet only the terms it can price that are valid an hour
+  or less, and refuses a paid x402 request, before the wallet is asked, when none are left
+  (reason `'asset'` or `'timeout'`).
 - `guard(client, { assets })` and the Agentic Wallet wrapper's `assets` refuse an entry that
   changes a built-in asset's decimals, and decimals that aren't an integer from 0 to 18.
 - Amounts and windows take only the digits 0-9, and only ASCII whitespace is trimmed, in both
@@ -99,25 +100,32 @@ not a patch.
   open payments that still count: id, amount, reason (in flight, refused, unknown), age, and
   when each stops counting. `walletcap release --all-unknown --older-than <24h|7d|30m>` gives
   back every payment of unknown or refused outcome older than that, for an owner who has checked
-  the chain, except one whose settle-by time is still ahead: the payee could still settle it.
+  the chain, except one whose settle-by time is still ahead: the payee could still settle it. One
+  with no settle-by time, which the wallet may have signed as it failed, goes only once it is an
+  hour and a minute old (`UNBOUNDED_HOLD_MS`).
 - A budget or payment-count refusal names the open payments that take up the room, oldest
-  first, and says how to list and release them. `BudgetRefused.brief` is the refusal without
-  them, and the Agentic Wallet wrapper, its CLI and its MCP proxy tell the agent only that.
+  first, and says how to list and release them. `BudgetRefused.brief`, and `brief` beside
+  `message` in `budget.check()`, is the refusal without them. The x402 guard (and so AgentKit),
+  the CDP store and the Agentic Wallet wrapper, with its CLI and MCP proxy, tell the agent only
+  that.
 - Python's `pay()` takes `settles_by`, as JavaScript's `pay()` takes `settlesBy`. Python's
   `Reservation` and `Ledger` have `annotate()`.
 - The Agentic Wallet wrapper:
-  - It hands the wallet the terms it priced as `paymentRequirements`: the caller's, or the ones
-    walletcap discovered, with the 402's extensions unless the caller gave some. The wallet then
-    skips its own discovery and signs only a term equal to one of them.
+  - It hands the wallet, as `paymentRequirements`, the terms it can price that are valid an hour
+    or less, from the caller's or the ones walletcap discovered, with the 402's extensions unless
+    the caller gave some. The wallet then skips its own discovery and signs only a term equal to
+    one of them. A `discover` option of one's own may return the 402 answer or its list of terms.
   - Once the wallet answers, a paid request counts until the longest `maxTimeoutSeconds` among
-    its terms (a Solana term at least two minutes, the life of its blockhash), plus a minute,
-    after that answer, plus one window, instead of until it is released. That holds for one the
-    payee calls settled too. One the wallet never answered counts until it is released.
+    the terms it was handed (a Solana term at least two minutes, the life of its blockhash), plus
+    a minute, after that answer, plus one window, instead of until it is released. That holds for
+    one the payee calls settled too. One the wallet never answered counts until it is released.
   - A free endpoint's one-unit hold is released unless the payee confirms a payment, so a free
     endpoint that fails can't use up `maxPayments`.
   - Every ledger write after the wallet answers raises `PaymentNotRecorded` if it fails.
 - `cdpStore()` and `SharedBudgetStore` refuse options they don't take. The docs ask for CDP
-  1.60.0 or later, whose published source refuses a `maxTimeoutSeconds` over 3600.
+  1.60.0 or later, whose published source refuses a `maxTimeoutSeconds` over 3600. A payment CDP
+  rolls back counts as long as it would have settled, an hour and a minute after CDP recorded it
+  plus one window, instead of until it is released.
 - The docs no longer say machines can share a budget through a shared volume. The budget file
   serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts,
   and multiple hosts need a shared service, which isn't shipped yet.

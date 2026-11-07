@@ -275,19 +275,20 @@ command after `--`.
   left out of the tool list: walletcap can't count it. `--allow-tool <name>` lets one through,
   uncounted. JSON-RPC batches are refused.
 - An x402 payment is priced from the endpoint's own 402 answer, and the wallet is capped at exactly
-  that amount, so it refuses to sign for more. The wallet is handed the terms walletcap priced, as
-  `paymentRequirements`: the caller's, or the ones walletcap discovered. With terms handed to it,
-  the wallet skips its own discovery and signs only a term equal to one of them.
-- Terms valid more than an hour, or that don't give a whole number of seconds, are refused before
-  the wallet is asked. Once the wallet answers, the payment counts until the longest
-  `maxTimeoutSeconds` among the terms (a Solana term at least two minutes, the life of its
-  blockhash), plus a minute, after that answer, plus one window, whatever the payee says about it.
+  that amount, so it refuses to sign for more. The wallet is handed, as `paymentRequirements`, the
+  terms walletcap can price that are valid an hour or less, from the caller's or the ones
+  walletcap discovered; the rest are left out. With terms handed to it, the wallet skips its own
+  discovery and signs only a term equal to one of them.
+- With no such terms left, the payment is refused before the wallet is asked. Once the wallet
+  answers, the payment counts until the longest `maxTimeoutSeconds` among the terms it was handed
+  (a Solana term at least two minutes, the life of its blockhash), plus a minute, after that
+  answer, plus one window, whatever the payee says about it.
 - The wallet's own refusal, before it signs, gives the amount back. Any other failure, a send
   included, keeps counting as unknown until you release it: check the chain, then
   `npx walletcap release <id>`. A free endpoint's one-unit hold is given back unless the payee
   confirms a payment.
 - A refusal tells the agent why, not which holds its owner could release: `walletcap holds` and
-  `budget.check()` name them.
+  `budget.check().message` name them. The x402 guard and the CDP store tell the agent the same.
 - Only USDC is counted; a send in any other asset is refused. Amounts are read exactly: `100.5abc`
   is refused, not read as $100.50.
 - It binds the payments that go through it. The wallet app takes requests from any process of
@@ -341,7 +342,8 @@ Python ships the same commands as `walletcap`. Amounts are dollars; leave out th
 sign, which your shell would expand. Add `--wallet` when the file holds more than one budget,
 and `--json` for scripts. A refusal names the open payments that take up the room, and
 `budget.holds()` lists them in code. `release --all-unknown` leaves a payment the payee could
-still settle: it counts until one window past the time it can't.
+still settle: it counts until one window past the time it can't. A payment with no such time, one
+the wallet may have signed as it failed, stays until it is an hour and a minute old.
 
 ## Where the budget lives
 
@@ -398,8 +400,8 @@ wallet become one budget, with the tighter of every limit and every payment.
 | `llms.txt` | a summary of the package and links to the docs, for language models |
 
 ```console
-$ cd js && npm install && node --test            # 104 tests
-$ uv run --with pytest pytest -q                 # 142 tests, from the repository root
+$ cd js && npm install && node --test            # 109 tests
+$ uv run --with pytest pytest -q                 # 143 tests, from the repository root
 $ cd solidity/evm && npm install && node check.mjs ..   # the contract on an EVM, no Foundry needed
 $ cd solidity && forge test                      # the contract's canonical tests, if you have Foundry
 ```

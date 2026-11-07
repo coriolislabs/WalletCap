@@ -41,6 +41,8 @@ const response = await fetchPaid('https://api.example.com/paid');
 - A payee may ask for an authorization valid up to an hour, as Coinbase's CDP spend controls
   allow. Longer terms are passed over for shorter ones on offer; when none are, the payment is
   refused before signing.
+- A refusal tells the agent why, not which open payments take up the room or how to release them:
+  `budget.check().message` and `npx walletcap holds` name them for the owner.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of the
   box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet. Add another USD stablecoin with
   `budget.guard(client, { assets: [{ network, asset, decimals }] })`. List only USD-pegged
