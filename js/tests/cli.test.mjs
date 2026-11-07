@@ -38,7 +38,7 @@ test('an owner sets, reads, freezes and unfreezes a budget from the command line
   assert.match(cli(path, 'history').out, /\$40\.00\s+settled\s+js\s+to 0x4165…5efd\s+tx 0xabab/);
 
   assert.equal(cli(path, 'freeze').code, 0);
-  await assert.rejects(budget.pay('$1', async () => 'x'), { reason: 'revoked' });
+  await assert.rejects(budget.pay('$1', async () => 'x'), { reason: 'frozen' });
   const frozen = JSON.parse(cli(path, 'status', '--json').out);
   assert.equal(frozen.budgets[0].frozen, true);
   assert.equal(frozen.budgets[0].spent, '40000000');
@@ -88,7 +88,7 @@ test('an owner lists the open holds and releases the unknown ones in bulk', asyn
   const recent = budget.reserve('$3');
   const listed = cli(path, 'holds');
   assert.equal(listed.code, 0, listed.err);
-  assert.match(listed.out, /spend-\w+ +\$1\.00 +unknown +2h 0m old +js +counts until released/);
+  assert.match(listed.out, /wc-\w+ +\$1\.00 +unknown +2h 0m old +js +counts until released/);
   assert.match(listed.out, new RegExp(`${recent.id} +\\$3\\.00 +in flight +\\d+s old`));
   assert.equal(JSON.parse(cli(path, 'holds', '--json').out).length, 3);
   assert.equal(cli(path, 'release', '--all-unknown').code, 2);

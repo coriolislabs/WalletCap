@@ -512,7 +512,7 @@ test("the agent is told why a payment was refused, not which holds its owner cou
   const budget = openBudget({ wallet: WALLET, path, perDay: '$0.15', create: true });
   for (let i = 0; i < 3; i += 1) budget.reserve('$0.05').annotate({ outcome: 'unknown' });
   // The owner's own check names the holds and how to release them.
-  assert.match(budget.check('$0.05').message, /3 open payments \(spend-\w+, spend-\w+, spend-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
+  assert.match(budget.check('$0.05').message, /3 open payments \(wc-\w+, wc-\w+, wc-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
   budget.close();
   // 0.3.0 passed all of it to the agent, through the MCP server and the awal CLI alike.
   const { ask, close } = mcpProxy(['--wallet', WALLET, '--path', path, '--', process.execPath, FAKE_MCP], { FAKE_MCP_LOG: log });

@@ -117,7 +117,7 @@ def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
 def test_the_window_cannot_change_after_spend(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "window.sqlite", per_day="$150", create=True)
     _pay(budget, "$1")
-    with pytest.raises(BudgetError, match="window cannot change"):
+    with pytest.raises(BudgetError, match="window can't change while payments count"):
         budget.set_limits(cap="$150", window="1ms")
     assert budget.status().spent == 1_000_000
 
@@ -148,7 +148,8 @@ def test_a_failed_payment_keeps_counting_unless_it_never_left(tmp_path: Path) ->
         raise NotSent("card declined")
     status = budget.status()
     assert (status.spent, status.in_flight) == (0, 50_000_000)
-    assert [payment.status for payment in budget.history()] == ["unknown"]
+    # The ledger keeps every payment: the one that never left is void, and counts nothing.
+    assert [payment.status for payment in budget.history()] == ["void", "unknown"]
 
 
 def test_an_error_never_settles_a_payment(tmp_path: Path, clock: Clock) -> None:
@@ -187,10 +188,10 @@ def test_a_payment_that_went_through_but_was_not_recorded(
 ) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
 
-    def locked(spend_id: str, *, reference: str | None = None) -> None:
+    def locked(payment: str, *, evidence: str | None = None) -> None:
         raise BudgetError("the budget file is locked")
 
-    monkeypatch.setattr(budget._ledger, "commit", locked)
+    monkeypatch.setattr(budget._ledger, "settle", locked)
     with pytest.raises(PaymentNotRecorded) as raised, budget.pay("$5") as payment:
         payment.tx = TX
     # Code that retries on BudgetError must not pay twice.
@@ -222,11 +223,11 @@ def test_a_refusal_names_the_open_payments_and_holds_lists_them(
     assert holds[0].error == "rpc timeout"
     # 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
     used = budget.check("$1")
-    assert used.reason == "uses"
+    assert used.reason == "max_payments"
     assert used.message is not None
     assert re.search(
         r"has 3 payments counting in the last 24h, the most its budget allows, and 3 of them "
-        r"are still open \(spend-\w+, spend-\w+, spend-\w+; walletcap holds lists them",
+        r"are still open \(wc-\w+, wc-\w+, wc-\w+; walletcap holds lists them",
         used.message,
     )
     other = open_budget(WALLET, path=tmp_path / "other.sqlite", per_day="$150", create=True)
@@ -236,7 +237,7 @@ def test_a_refusal_names_the_open_payments_and_holds_lists_them(
     assert over is not None
     assert re.search(
         r"over its \$150\.00 limit \(\$50\.00 left\); \$100\.00 of it is 1 open payment "
-        r"\(spend-\w+; walletcap holds lists them",
+        r"\(wc-\w+; walletcap holds lists them",
         over,
     )
 
@@ -255,7 +256,7 @@ def test_an_owner_lists_holds_and_releases_the_unknown_ones_in_bulk(
     listed = _cli(path, "holds")
     assert listed.returncode == 0, listed.stderr
     assert re.search(
-        r"spend-\w+ +\$1\.00 +unknown +2h 0m old +python +counts until released", listed.stdout
+        r"wc-\w+ +\$1\.00 +unknown +2h 0m old +python +counts until released", listed.stdout
     )
     assert re.search(rf"{recent.id} +\$3\.00 +in flight +\d+s old", listed.stdout)
     assert len(json.loads(_cli(path, "holds", "--json").stdout)) == 3
@@ -381,10 +382,10 @@ def test_freeze_check_and_mistakes(tmp_path: Path) -> None:
     assert budget.check("$150").ok
     budget.freeze()
     check = budget.check("$1")
-    assert (check.ok, check.reason) == (False, "revoked")
+    assert (check.ok, check.reason) == (False, "frozen")
     budget.unfreeze()
     _pay(budget, "$1")
-    assert budget.check("$1").reason == "uses"
+    assert budget.check("$1").reason == "max_payments"
     with pytest.raises(BudgetError, match="not 40 hex digits"):
         open_budget(WALLET[:-1], path=path, per_day="$1")
     with pytest.raises(BudgetError, match="has no declared budget"):
@@ -587,29 +588,24 @@ def test_the_clock_is_not_an_option(tmp_path: Path) -> None:
         _pay(open_budget(WALLET, path=path), "$150")
 
 
-def test_a_0_2_file_is_upgraded_on_open(tmp_path: Path, clock: Clock) -> None:
-    path = tmp_path / "old.sqlite"
-    hour = 3_600_000
-    now = int(clock.at * 1000)
-    caip10 = f"eip155:8453:{CHECKSUMMED}"
-    # The file as 0.2.x left it: schema 1, where Ledger and the JavaScript SharedBudgetStore kept
-    # the names they were given. 0.3.0 before this upgrade opened a fresh lowercase budget beside.
-    Ledger(path)
-    with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("UPDATE budget_meta SET value = '1' WHERE key = 'schema'")
-        budget_row = "INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)"
-        connection.execute(budget_row, (CHECKSUMMED, "usd", 150_000_000, 86_400_000, None, None))
-        connection.execute(budget_row, (caip10, "usdc", 300_000_000, 86_400_000, 50_000_000, None))
-        connection.execute(budget_row, (WALLET, "usd", 200_000_000, hour, None, 10))
-        spend_row = "INSERT INTO spend VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)"
-        for spend in (
-            ("spend-a", CHECKSUMMED, 100_000_000, "committed", "cdp", now - hour),
-            ("spend-b", caip10, 20_000_000, "reserved", "js", now - 2 * hour),
-            ("spend-c", WALLET, 10_000_000, "committed", "python", now - hour // 6),
-        ):
-            connection.execute(spend_row, spend)
+FIXTURES = ROOT / "spec" / "fixtures"
+T0 = 1_800_000_000_000
+APP = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+MERGED = "0x4165cb72De51A67aac32DC33197d779552205efD"
 
-    upgraded = open_budget(CHECKSUMMED, path=path)
+
+def _fixture(tmp_path: Path, name: str) -> Path:
+    path = tmp_path / name
+    shutil.copyfile(FIXTURES / name, path)
+    return path
+
+
+def test_a_0_2_file_is_upgraded_on_open(tmp_path: Path, clock: Clock) -> None:
+    clock.at = T0 / 1000
+    path = _fixture(tmp_path, "schema-1.sqlite")
+    # 0.2.4 kept budgets under the names it was given: the checksummed address, its CAIP-10
+    # form and the lowercase address each held one. They are one budget now.
+    upgraded = open_budget(MERGED, path=path)
     status = upgraded.status()
     # The tighter of every limit: the smallest cap and per-payment limit, and the longest window.
     assert (status.cap, status.window_ms, status.per_payment, status.max_payments) == (
@@ -627,49 +623,34 @@ def test_a_0_2_file_is_upgraded_on_open(tmp_path: Path, clock: Clock) -> None:
         _pay(upgraded, "$20.01")
     _pay(upgraded, "$20")
     assert {"spend-a", "spend-b", "spend-c"} <= {payment.id for payment in upgraded.history()}
-    assert [budget.instrument for budget in Ledger(path).budgets()] == [WALLET]
     with closing(sqlite3.connect(path)) as connection:
         schema = connection.execute("SELECT value FROM budget_meta WHERE key = 'schema'")
-        assert schema.fetchone() == ("2",)
+        assert schema.fetchone() == ("3",)
 
 
 def test_the_upgrade_says_what_it_did(tmp_path: Path, clock: Clock) -> None:
-    path = tmp_path / "old.sqlite"
-    app = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
-    Ledger(path)
-    with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("UPDATE budget_meta SET value = '1' WHERE key = 'schema'")
-        budget_row = "INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)"
-        # A CDP app declared $150 a day under the checksummed address; its owner set $100 under
-        # the lowercase one. Another wallet kept a budget in wei beside its dollar one.
-        connection.execute(budget_row, (app, "usd", 150_000_000, 86_400_000, None, None))
-        connection.execute(budget_row, (app.lower(), "usd", 100_000_000, 86_400_000, None, None))
-        connection.execute(budget_row, (CHECKSUMMED, "wei", 10**15, 86_400_000, None, None))
-        connection.execute(budget_row, (WALLET, "usd", 150_000_000, 86_400_000, None, None))
-
-    # 0.3.0 said only "instrument budget is already declared with other limits".
-    ledger = Ledger(path)
-    with pytest.raises(BudgetError) as declared:
-        ledger.declare(app, unit="usd", cap=150_000_000, window_seconds=DAY)
-    assert str(declared.value) == (
-        "0x5aae…eaed's budget is already declared with other limits: $100.00 per 24h, not "
-        "$150.00 per 24h. The 0.3.0 upgrade merged the budget 0.2.x kept under "
+    clock.at = T0 / 1000
+    path = _fixture(tmp_path, "schema-1.sqlite")
+    # 0.2.4 kept $150 a day under the app's checksummed address and $100 under the lowercase one:
+    # the upgrade kept $100. Code that asks for $150 is told why the stored limit is lower.
+    messages: list[str] = []
+    open_budget(APP, path=path, per_day="$150", on_warning=messages.append)
+    assert messages[0].endswith(
+        "The 0.3.0 upgrade merged the budget 0.2.x kept under "
         "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed into this one, with the tighter of each "
         "limit; its owner can change them with 'walletcap set'"
     )
-    ledger.set_limits(app, cap=150_000_000, window_ms=86_400_000)
-    ledger.declare(app, unit="usd", cap=150_000_000, window_seconds=DAY)
-
-    # 0.3.0 refused to open the file at all. Now that wallet alone is refused, and says why.
+    # Another wallet kept a budget in wei beside its dollar one: that wallet alone is frozen,
+    # and says why.
     frozen = open_budget(WALLET, path=path)
     with pytest.raises(BudgetRefused) as refused:
         _pay(frozen, "$1")
-    assert refused.value.reason == "revoked"
+    assert refused.value.reason == "frozen"
     assert str(refused.value).endswith(
         f"The 0.3.0 upgrade froze it: 0.2.x also kept a budget in wei under {CHECKSUMMED} for "
         "this wallet, which can't be merged with this one in usd, so that budget no longer counts"
     )
-    _pay(open_budget(app, path=path), "$1")
+    _pay(open_budget(APP, path=path), "$1")
     status = _cli(path, "status")
     assert status.returncode == 0, status.stderr
     assert status.stdout.count("0xd797") == 1

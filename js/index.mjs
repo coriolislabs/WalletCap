@@ -8,13 +8,13 @@
 // every process on the host shares, over a rolling window. Changing a limit
 // never resets what has been spent, a restart can lower a limit but never raise
 // one, and if the count cannot be read, nothing is paid.
-import { existsSync, mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { SharedBudgetStore } from './cdp.mjs';
 import { BudgetError, BudgetRefused, isNotSent, notSent, PaymentNotRecorded } from './errors.mjs';
-import { checkKeys, Ledger, SCHEMA_VERSION, SETTLES_BY } from './ledger.mjs';
+import { Ledger, mergedNoteOf, SCHEMA_VERSION, SETTLES_BY } from './ledger.mjs';
 import {
-  defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
+  checkKeys, defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
   normalizeWallet, parseLimits, shortWallet, toMicros,
 } from './money.mjs';
 import { guardX402ActionProvider, guardX402Client, MAX_PAYMENT_TIMEOUT_SECONDS, USD_ASSETS } from './x402.mjs';
@@ -30,6 +30,7 @@ const CDP_STORE_KEYS = new Set(['asset', 'scale']);
 const TO_LIMIT = 256;
 const NOTE_LIMIT = 1024;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+const OPEN = (1n << 63n) - 1n;
 
 const positive = micros => {
   if (micros === 0n) throw new BudgetError('the amount must be more than $0');
@@ -72,10 +73,14 @@ const parseInfo = text => {
 };
 
 const label = (row, info) => {
-  if (row.status === 'committed') return info.outcome === 'unknown' ? 'unknown' : 'settled';
+  if (row.state === 'settled') return info.outcome === 'unknown' ? 'unknown' : 'settled';
+  if (row.state === 'void') return 'void';
   if (!row.counting) return 'expired';
-  return info.outcome === 'refused' || info.outcome === 'unknown' ? info.outcome : 'in flight';
+  return row.outcome ?? 'in flight';
 };
+
+// When a payment stops counting, or null while only evidence can end it.
+const countsUntil = row => (row.counts_from === null || row.counts_from === OPEN ? null : new Date(Number(row.counts_from + row.window_ms)));
 
 /** An amount taken from the budget for one payment, until it is committed or released. */
 export class Reservation {
@@ -104,17 +109,16 @@ export class Reservation {
    * The payment settled. It counts for one rolling window from now, and, with a
    * settlesBy, at least until one window past it: a commit never shortens a hold.
    */
-  commit({ tx, outcome, error } = {}) {
+  commit({ tx } = {}) {
     if (!this.open) throw new BudgetError(`reservation ${this.#id} is already ${this.#state}`);
-    const info = { ...this.#info, ...(tx ? { tx } : {}), ...(outcome ? { outcome } : {}), ...(error ? { error } : {}) };
-    this.#ledger.commit(this.#id, { reference: Object.keys(info).length > 0 ? JSON.stringify(info) : undefined });
+    this.#ledger.settle(this.#id, { evidence: tx ?? null });
     this.#state = 'committed';
   }
 
   /** The payment never left the wallet: give its amount back. */
   release() {
     if (!this.open) throw new BudgetError(`reservation ${this.#id} is already ${this.#state}`);
-    this.#ledger.release(this.#id);
+    this.#ledger.void(this.#id, { evidence: 'not sent' });
     this.#state = 'released';
   }
 
@@ -122,12 +126,12 @@ export class Reservation {
   annotate(fields) {
     if (!this.open) return;
     this.#info = { ...this.#info, ...fields };
-    this.#ledger.annotate(this.#id, JSON.stringify(this.#info));
+    if (fields.outcome !== undefined) this.#ledger.note(this.#id, fields.outcome, { evidence: fields.error ?? null });
   }
 
   // Internal (the key is not exported): an open payment learns, once, the last moment it could settle.
-  [SETTLES_BY](settlesByMs) {
-    if (this.open) this.#ledger.settlesBy(this.#id, settlesByMs);
+  [SETTLES_BY](bound) {
+    if (this.open) this.#ledger.bound(this.#id, bound);
   }
 }
 
@@ -161,15 +165,48 @@ export class Budget {
     if (!create && !existsSync(this.#path)) {
       throw new BudgetError(`no budget file at ${this.#path}; its owner creates one with: npx walletcap set --wallet ${this.#wallet}${this.#pathFlag()} --per-day <dollars>`);
     }
-    if (create) mkdirSync(dirname(this.#path), { recursive: true, mode: 0o700 });
-    this.#ledger = new Ledger(this.#path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000 });
+    this.#ledger = new Ledger(this.#path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000, create });
     try {
-      const { looser, row } = this.#ledger.ensure(this.#wallet, limits, { unit: 'usd', create });
-      if (looser.length > 0) this.#warnKept(options.onWarning, row, limits);
+      this.#ensure(limits, create, options.onWarning);
     } catch (error) {
       this.#ledger.close();
       throw error;
     }
+  }
+
+  // Create the budget with `limits`, or move its stored limits toward them: a tighter limit is
+  // stored, a looser one is reported and left alone. A restart can lower a limit; only
+  // setLimits() raises one.
+  #ensure(limits, create, onWarning) {
+    let row = this.#ledger.budget(this.#wallet);
+    if (row === null) {
+      if (!create) throw new BudgetError(`${shortWallet(this.#wallet)} has no budget in ${this.#path}`);
+      if (limits.cap === undefined) throw new BudgetError(`${shortWallet(this.#wallet)} has no budget yet: give it a rolling limit, like perDay: '$150'`);
+      const { maxUses = null, ...rest } = limits;
+      this.#ledger.createBudget(this.#wallet, { ...rest, maxPayments: maxUses });
+      return;
+    }
+    if (row.unit !== 'usd' && row.unit !== 'usdc') throw new BudgetError(`${shortWallet(this.#wallet)}'s budget counts in ${row.unit}, not usd`);
+    const lowered = {};
+    let looser = false;
+    const sameWindow = limits.windowMs === undefined || limits.windowMs === row.window_ms;
+    if (limits.cap !== undefined) {
+      if (!sameWindow) looser = true;
+      else if (limits.cap < row.cap) lowered.cap = limits.cap;
+      else if (limits.cap > row.cap) looser = true;
+    }
+    if (limits.perPayment !== undefined) {
+      const asked = limits.perPayment;
+      if (asked !== null && (row.per_payment === null || asked < row.per_payment)) lowered.perPayment = asked;
+      else if (row.per_payment !== null && (asked === null || asked > row.per_payment)) looser = true;
+    }
+    if (limits.maxUses !== undefined && limits.maxUses !== row.max_payments) {
+      const asked = limits.maxUses;
+      if (sameWindow && asked !== null && (row.max_payments === null || asked < row.max_payments)) lowered.maxPayments = asked;
+      else looser = true;
+    }
+    if (Object.keys(lowered).length > 0) row = this.#ledger.setLimits(this.#wallet, lowered);
+    if (looser) this.#warnKept(onWarning, row, limits);
   }
 
   /** The name the budget is kept under: an EVM address, lowercased. */
@@ -183,10 +220,12 @@ export class Budget {
   }
 
   #warnKept(onWarning, row, asked) {
-    const stored = { cap: row.cap, windowMs: row.window_ms, perPayment: row.per_payment, maxUses: row.max_uses };
+    const stored = { cap: row.cap, windowMs: row.window_ms, perPayment: row.per_payment, maxUses: row.max_payments };
+    const merged = mergedNoteOf(row.merged_from);
     const message = `walletcap: ${shortWallet(this.#wallet)} keeps its stored limits (${describeLimits(stored)}); `
       + `your code asks for ${describeLimits(asked, { window: row.window_ms, nulls: true })}. A restart can lower a limit but never raise one. `
-      + `To raise it, its owner runs: npx walletcap set --wallet ${this.#wallet}${this.#pathFlag()} ${limitFlags(asked)}`.trimEnd();
+      + `To raise it, its owner runs: npx walletcap set --wallet ${this.#wallet}${this.#pathFlag()} ${limitFlags(asked)}`.trimEnd()
+      + (merged === null ? '' : `. ${merged}`);
     if (typeof onWarning === 'function') onWarning(message);
     else process.emitWarning(message, { type: 'BudgetWarning', code: 'WALLETCAP_LIMIT_KEPT' });
   }
@@ -205,15 +244,17 @@ export class Budget {
    * `settlesBy` is the last moment the payment could still settle, if known: an
    * open reservation stops counting one window after it. It must be after now.
    */
-  reserve(amount, { to, note, details, rail = 'js', settlesBy } = {}) {
+  reserve(amount, { to, note, details, rail = 'js', settlesBy, settlesWithinMs, id } = {}) {
     const micros = positive(toMicros(amount));
     const info = describe(to, note, details);
-    const id = this.#ledger.reserve(this.#wallet, micros, {
+    const held = this.#ledger.hold(this.#wallet, micros, {
+      payment: id ?? null,
       rail,
-      reference: info === null ? null : JSON.stringify(info),
-      settlesByMs: settlesBy === undefined || settlesBy === null ? null : millis(settlesBy, 'settlesBy'),
+      info: info === null ? null : JSON.stringify(info),
+      until: settlesBy === undefined || settlesBy === null ? null : millis(settlesBy, 'settlesBy'),
+      withinMs: settlesWithinMs ?? null,
     });
-    return new Reservation(this.#ledger, id, micros, info);
+    return new Reservation(this.#ledger, held.payment, micros, info);
   }
 
   /**
@@ -260,14 +301,14 @@ export class Budget {
       wallet: this.#wallet,
       path: this.#path,
       cap: s.cap,
-      window: s.windowMs,
-      perPayment: s.perPayment,
-      maxPayments: s.maxUses,
+      window: s.window_ms,
+      perPayment: s.per_payment,
+      maxPayments: s.max_payments,
       spent: s.spent,
-      inFlight: s.reserved,
+      inFlight: s.in_flight,
       remaining: s.remaining,
-      payments: s.uses,
-      frozen: s.revoked,
+      payments: s.payments,
+      frozen: s.frozen_at !== null,
     };
     return { ...status, summary: summarize(status) };
   }
@@ -277,14 +318,15 @@ export class Budget {
     checkKeys(limits, new Set(LIMIT_KEYS), 'setLimits');
     const parsed = parseLimits(limits);
     if (Object.keys(parsed).length === 0) throw new BudgetError("setLimits needs a limit, like { perDay: '$150' }");
-    this.#ledger.setLimits(this.#wallet, parsed, { unit: 'usd' });
+    const { maxUses, ...rest } = parsed;
+    this.#ledger.setLimits(this.#wallet, { ...rest, ...(maxUses === undefined ? {} : { maxPayments: maxUses }) });
     return this.status();
   }
 
   /** Refuse every payment from this wallet, on every rail and in every process, until unfreeze(). */
-  freeze() { this.#ledger.revoke(this.#wallet); }
+  freeze() { this.#ledger.freeze(this.#wallet); }
 
-  unfreeze() { this.#ledger.unrevoke(this.#wallet); }
+  unfreeze() { this.#ledger.unfreeze(this.#wallet); }
 
   /**
    * The open payments that still count, oldest first, with why each is open:
@@ -294,19 +336,19 @@ export class Budget {
    * only a release ends it. Its owner releases one that never left the wallet.
    */
   holds() {
-    return this.#ledger.holds(this.#wallet).map(row => {
-      const info = parseInfo(row.reference);
+    return this.#ledger.counting(this.#wallet, { heldOnly: true }).map(row => {
+      const info = parseInfo(row.info);
       return {
-        id: row.spend_id,
+        id: row.payment,
         amount: row.amount,
-        reason: info.outcome === 'refused' || info.outcome === 'unknown' ? info.outcome : 'in flight',
-        at: new Date(Number(row.at_ms)),
-        ageMs: row.now - row.at_ms,
-        until: row.expires_at_ms === null ? null : new Date(Number(row.expires_at_ms - 1n)),
+        reason: row.outcome ?? 'in flight',
+        at: new Date(Number(row.held_at)),
+        ageMs: row.now - row.held_at,
+        until: countsUntil(row),
         rail: row.rail,
         to: info.to ?? info.payTo,
         note: info.note ?? (info.network ? `${info.network}` : undefined),
-        error: info.error,
+        error: row.noted ?? info.error,
       };
     });
   }
@@ -314,17 +356,17 @@ export class Budget {
   /** The newest payments first. */
   history({ limit = 20 } = {}) {
     return this.#ledger.history(this.#wallet, { limit }).map(row => {
-      const info = parseInfo(row.reference);
+      const info = parseInfo(row.info);
       return {
-        id: row.spend_id,
+        id: row.payment,
         amount: row.amount,
         status: label(row, info),
-        counting: row.counting,
-        at: new Date(Number(row.at_ms)),
+        counting: row.counting === 1n,
+        at: new Date(Number(row.held_at)),
         rail: row.rail,
         to: info.to ?? info.payTo,
         note: info.note ?? (info.network ? `${info.network}` : undefined),
-        tx: info.tx,
+        tx: row.settled_by ?? info.tx,
       };
     });
   }

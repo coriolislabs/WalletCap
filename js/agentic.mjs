@@ -16,7 +16,6 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { now } from './_clock.mjs';
 import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { SETTLES_BY } from './ledger.mjs';
@@ -260,7 +259,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     // The wallet has answered, so it has signed if it ever will. The hold learns when that
     // authorization expires before anything else: a commit never shortens a hold, so the payee's
     // own word that the payment settled can't free the budget early.
-    recorded(reservation, () => reservation[SETTLES_BY](BigInt(now()) + settlesWithin));
+    recorded(reservation, () => reservation[SETTLES_BY]({ withinMs: settlesWithin }));
     const answer = paymentResponseOf(result);
     if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
     else recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));

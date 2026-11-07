@@ -49,12 +49,15 @@
     "ledger.mjs",
     "money.mjs",
     "x402.mjs",
+    "spec/schema.sql",
+    "spec/upgrade.sql",
     "README.md",
     "LICENSE",
     "NOTICE"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node scripts/copy-spec.mjs && node --test",
+    "prepack": "node scripts/copy-spec.mjs"
   },
   "engines": {
     "node": ">=22.13"

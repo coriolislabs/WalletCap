@@ -13,7 +13,7 @@ jobs:
           command: |
             cd js
             npm install --no-audit --no-fund --no-package-lock
-            node --test
+            npm test
       - run:
           name: Python
           command: |
@@ -36,6 +36,7 @@ jobs:
       - run:
           name: Crash test
           command: |
+            node js/scripts/copy-spec.mjs
             cd crash-test
             npm install --no-save --no-audit --no-fund --no-package-lock ../js
             node contracts/build.mjs --check

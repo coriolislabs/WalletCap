@@ -3,41 +3,28 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 
 class BudgetError(ValueError):
     """A request is malformed, or the ledger file cannot be trusted."""
 
 
 class BudgetRefused(BudgetError):
-    """Granting the reservation would break the budget."""
+    """The budget refused a payment.
 
-    reason: ClassVar[str] = "budget"
+    ``reason`` is one of ``"budget"`` (the rolling cap), ``"per_payment"``,
+    ``"max_payments"`` and ``"frozen"``, the codes spec/schema.sql gives. ``source`` is
+    ``"budget"`` for the owner's limits and ``"process"`` for the paying process's own.
+    ``brief`` is the message without the ids of open payments or what their owner can do
+    about them: what an agent is told.
+    """
 
-
-class OverBudget(BudgetRefused):
-    """The rolling window's spend plus this amount would pass the cap."""
-
-    reason: ClassVar[str] = "budget"
-
-
-class OverPerPayment(BudgetRefused):
-    """This one payment is larger than the per-payment max."""
-
-    reason: ClassVar[str] = "per_payment"
-
-
-class OverUses(BudgetRefused):
-    """The rolling window already holds the most payments allowed."""
-
-    reason: ClassVar[str] = "uses"
-
-
-class BudgetRevoked(BudgetRefused):
-    """The instrument's budget was revoked (frozen); nothing more may be reserved."""
-
-    reason: ClassVar[str] = "revoked"
+    def __init__(
+        self, reason: str, message: str, *, brief: str | None = None, source: str = "budget"
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.brief = message if brief is None else brief
+        self.source = source
 
 
 class BudgetWarning(UserWarning):

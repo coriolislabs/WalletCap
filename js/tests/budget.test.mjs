@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
@@ -76,7 +76,7 @@ test('raising a limit keeps what was spent: the total stays a total', async () =
 test('the window cannot change after spend, so the count cannot be reset', async () => {
   const { budget } = fixture({ perPayment: '$0.05', perDay: '$0.15' });
   await paid(budget, '$0.05');
-  assert.throws(() => budget.setLimits({ cap: '$0.15', window: '1ms' }), /window cannot change/);
+  assert.throws(() => budget.setLimits({ cap: '$0.15', window: '1ms' }), /window can't change while payments count/);
   assert.equal(budget.status().spent, 50_000n);
 });
 
@@ -109,8 +109,8 @@ test('a payment that fails halfway keeps counting; one tagged notSent is given b
   await assert.rejects(budget.pay('$50', async () => { throw notSent(new Error('card declined')); }), /card declined/);
   await assert.rejects(budget.pay('$50', async () => { throw notSent('never broadcast'); }), /never broadcast/);
   assert.deepEqual([budget.status().spent, budget.status().inFlight], [0n, 50_000_000n]);
-  const [newest] = budget.history();
-  assert.equal(newest.status, 'unknown');
+  // The ledger keeps every payment: the two that never left are void, and count nothing.
+  assert.deepEqual(budget.history().map(row => row.status), ['void', 'void', 'unknown']);
 });
 
 test('an error never settles a payment: an unknown outcome counts until its owner releases it', async () => {
@@ -146,7 +146,7 @@ test('pay() returns what the payment returns and keeps its transaction hash', as
     return { hash: TX, ok: true };
   }, { to: '0x4165cb72De51A67aac32DC33197d779552205efD', note: 'one API call' });
   assert.deepEqual(result, { hash: TX, ok: true });
-  assert.match(seen.id, /^spend-[0-9a-f]{32}$/);
+  assert.match(seen.id, /^wc-[0-9a-f]{32}$/);
   assert.equal(seen.open, false);
   const [entry] = budget.history();
   assert.deepEqual([entry.status, entry.amount, entry.tx, entry.to, entry.note], ['settled', 5_000_000n, TX, '0x4165cb72De51A67aac32DC33197d779552205efD', 'one API call']);
@@ -181,11 +181,11 @@ test('a refusal names the open payments that take up the room, and holds() lists
   assert.equal(holds[2].until.getTime(), clock.now + 300_000 + DAY);
   // 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
   const used = budget.check('$1');
-  assert.equal(used.reason, 'uses');
-  assert.match(used.message, /has 3 payments counting in the last 24h, the most its budget allows, and 3 of them are still open \(spend-\w+, spend-\w+, spend-\w+; walletcap holds lists them/);
+  assert.equal(used.reason, 'max_payments');
+  assert.match(used.message, /has 3 payments counting in the last 24h, the most its budget allows, and 3 of them are still open \(wc-\w+, wc-\w+, wc-\w+; walletcap holds lists them/);
   const { budget: other } = fixture({ perDay: '$150' });
   await assert.rejects(other.pay('$100', async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
-  assert.match(other.check('$60').message, /over its \$150\.00 limit \(\$50\.00 left\); \$100\.00 of it is 1 open payment \(spend-\w+; walletcap holds lists them/);
+  assert.match(other.check('$60').message, /over its \$150\.00 limit \(\$50\.00 left\); \$100\.00 of it is 1 open payment \(wc-\w+; walletcap holds lists them/);
 });
 
 test('a payment that went through but cannot be recorded throws PaymentNotRecorded, not a BudgetError', async () => {
@@ -266,7 +266,7 @@ test('the per-payment limit and the payment count hold too', async () => {
   await assert.rejects(paid(budget, '$50.01'), refusedFor('per_payment'));
   await paid(budget, '$1');
   await paid(budget, '$1');
-  await assert.rejects(paid(budget, '$1'), refusedFor('uses'));
+  await assert.rejects(paid(budget, '$1'), refusedFor('max_payments'));
 });
 
 test('check() answers without taking anything', () => {
@@ -281,7 +281,7 @@ test('check() answers without taking anything', () => {
 test('freezing stops every payment in every process until unfrozen', async () => {
   const { budget, open } = fixture();
   open().freeze();
-  await assert.rejects(paid(budget, '$1'), refusedFor('revoked'));
+  await assert.rejects(paid(budget, '$1'), refusedFor('frozen'));
   assert.equal(budget.status().frozen, true);
   assert.equal(budget.status().remaining, 0n);
   budget.unfreeze();
@@ -342,39 +342,29 @@ test('the clock is not an option: no process can move its own time to empty the 
   await assert.rejects(paid(openBudget({ wallet: WALLET, path }), '$150'), refusedFor('budget'));
 });
 
-test('the upgrade says what it did: declare() names the merged limits, and a wallet in two units is frozen, not the file', async () => {
-  fixture();
+const FIXTURES = new URL('../../spec/fixtures/', import.meta.url);
+const T0 = 1_800_000_000_000;
+const APP = '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed';
+const MERGED = '0x4165cb72De51A67aac32DC33197d779552205efD';
+const CHECKSUMMED = '0xd797ead28C38575FDf4fC523866287372340Ca02';
+const fromFixture = name => {
   const path = join(DIR, `budget-${files++}.sqlite`);
-  const APP = '0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed';
-  const CHECKSUMMED = '0xd797ead28C38575FDf4fC523866287372340Ca02';
-  const old = new Ledger(path);
-  old.statement("UPDATE budget_meta SET value = '1' WHERE key = 'schema'").run();
-  const budgetRow = old.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)');
-  // A CDP app declared $150 a day under the checksummed address; its owner set $100 under the
-  // lowercase one. Another wallet kept a budget in wei beside its dollar one.
-  budgetRow.run(APP, 'usd', 150_000_000n, 86_400_000n, null, null);
-  budgetRow.run(APP.toLowerCase(), 'usd', 100_000_000n, 86_400_000n, null, null);
-  budgetRow.run(CHECKSUMMED, 'wei', 10n ** 15n, 86_400_000n, null, null);
-  budgetRow.run(WALLET, 'usd', 150_000_000n, 86_400_000n, null, null);
-  old.close();
+  copyFileSync(new URL(name, FIXTURES), path);
+  return path;
+};
 
-  // 0.3.0 said only "instrument budget is already declared with other limits".
-  const store = new SharedBudgetStore({ path, instrument: APP, asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' });
-  const declared = () => store.declare({ unit: 'usd', cap: 150_000_000n, windowMs: 86_400_000n });
-  assert.throws(declared, {
-    message: "0x5aae…eaed's budget is already declared with other limits: $100.00 per 24h, not $150.00 per 24h. The 0.3.0 upgrade "
-      + "merged the budget 0.2.x kept under 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed into this one, with the tighter of each limit; "
-      + "its owner can change them with 'walletcap set'",
-  });
-  const owner = new Ledger(path);
-  owner.setLimits(APP, { cap: 150_000_000n });
-  owner.close();
-  declared();
-  store.close();
-
-  // 0.3.0 refused to open the file at all. Now that wallet alone is refused, and says why.
-  const frozen = openBudget({ wallet: WALLET, path });
-  await assert.rejects(paid(frozen, '$1'), error => refusedFor('revoked')(error) && error.message.endsWith(
+test('the upgrade says what it did: a warning names the merged limits, and a wallet in two units is frozen, not the file', async () => {
+  setClock(() => T0);
+  const path = fromFixture('schema-1.sqlite');
+  // 0.2.4 kept $150 a day under the app's checksummed address and $100 under the lowercase one:
+  // the upgrade kept $100. Code that asks for $150 is told why the stored limit is lower.
+  const warnings = [];
+  openBudget({ wallet: APP, path, perDay: '$150', onWarning: message => warnings.push(message) }).close();
+  assert.ok(warnings[0].endsWith("The 0.3.0 upgrade merged the budget 0.2.x kept under 0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed into this one, "
+    + "with the tighter of each limit; its owner can change them with 'walletcap set'"), warnings[0]);
+  // Another wallet kept a budget in wei beside its dollar one: that wallet alone is refused, and says why.
+  const frozen = openBudget({ wallet: CHECKSUMMED, path });
+  await assert.rejects(paid(frozen, '$1'), error => refusedFor('frozen')(error) && error.message.endsWith(
     'The 0.3.0 upgrade froze it: 0.2.x also kept a budget in wei under 0xd797ead28C38575FDf4fC523866287372340Ca02 for this wallet, '
       + "which can't be merged with this one in usd, so that budget no longer counts",
   ));
@@ -382,30 +372,13 @@ test('the upgrade says what it did: declare() names the merged limits, and a wal
   frozen.unfreeze();
   await paid(frozen, '$1');
   frozen.freeze();
-  await assert.rejects(paid(frozen, '$1'), error => refusedFor('revoked')(error) && !/0\.3\.0 upgrade/.test(error.message));
+  await assert.rejects(paid(frozen, '$1'), error => refusedFor('frozen')(error) && !/0\.3\.0 upgrade/.test(error.message));
 });
 
 test('a 0.2.x file is upgraded on open: every spelling of a wallet becomes one budget, and every payment still counts', async () => {
-  const { clock } = fixture();
-  const path = join(DIR, `budget-${files++}.sqlite`);
-  const CHECKSUMMED = '0xd797ead28C38575FDf4fC523866287372340Ca02';
-  const HOUR = 3_600_000n;
-  const now = BigInt(clock.now);
-  // The file as 0.2.x left it: schema 1, where SharedBudgetStore and Python's Ledger kept the
-  // names they were given. 0.3.0 before this upgrade opened a fresh lowercase budget beside them.
-  const old = new Ledger(path);
-  old.statement("UPDATE budget_meta SET value = '1' WHERE key = 'schema'").run();
-  const budgetRow = old.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, NULL)');
-  budgetRow.run(CHECKSUMMED, 'usd', 150_000_000n, 86_400_000n, null, null);
-  budgetRow.run(`eip155:8453:${CHECKSUMMED}`, 'usdc', 300_000_000n, 86_400_000n, 50_000_000n, null);
-  budgetRow.run(WALLET, 'usd', 200_000_000n, HOUR, null, 10n);
-  const spendRow = old.statement('INSERT INTO spend VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)');
-  spendRow.run('spend-a', CHECKSUMMED, 100_000_000n, 'committed', 'cdp', now - HOUR);
-  spendRow.run('spend-b', `eip155:8453:${CHECKSUMMED}`, 20_000_000n, 'reserved', 'python', now - 2n * HOUR);
-  spendRow.run('spend-c', WALLET, 10_000_000n, 'committed', 'js', now - HOUR / 6n);
-  old.close();
-
-  const upgraded = openBudget({ wallet: CHECKSUMMED, path });
+  setClock(() => T0);
+  const path = fromFixture('schema-1.sqlite');
+  const upgraded = openBudget({ wallet: MERGED, path });
   const status = upgraded.status();
   // The tighter of every limit: the smallest cap and per-payment limit, and the longest window.
   assert.deepEqual([status.cap, status.window, status.perPayment, status.maxPayments], [150_000_000n, 86_400_000n, 50_000_000n, 10n]);
@@ -415,12 +388,11 @@ test('a 0.2.x file is upgraded on open: every spelling of a wallet becomes one b
   assert.deepEqual(upgraded.history().map(row => row.id).sort(), ['spend-a', 'spend-b', 'spend-c', upgraded.history()[0].id].sort());
   const ledger = new Ledger(path);
   try {
-    assert.deepEqual(ledger.budgets().map(row => row.instrument), [WALLET]);
-    assert.equal(ledger.statement("SELECT value FROM budget_meta WHERE key = 'schema'").get().value, '2');
+    assert.deepEqual(ledger.budgets().map(row => row.wallet).filter(wallet => wallet.startsWith('0x41')), [MERGED.toLowerCase()]);
   } finally {
     ledger.close();
   }
-  const store = new SharedBudgetStore({ path, instrument: CHECKSUMMED, asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' });
+  const store = new SharedBudgetStore({ path, instrument: MERGED, asset: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913' });
   try {
     assert.equal(store.status().remaining, 0n);
   } finally {

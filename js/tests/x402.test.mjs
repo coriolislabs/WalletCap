@@ -168,14 +168,14 @@ test("the agent is told why the guard refused, not which holds its owner could r
   const { budget, client } = setup({ perDay: '$0.05' });
   budget.reserve('$0.05').annotate({ outcome: 'unknown' });
   const owner = budget.check('$0.01');
-  assert.match(owner.message, /1 open payment \(spend-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
+  assert.match(owner.message, /1 open payment \(wc-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
   // 0.3.0's guard (and so AgentKit's) passed the owner's message to the agent.
-  const brief = error => refusedFor('budget')(error) && error.message === owner.brief && !/spend-|release/.test(error.message);
+  const brief = error => refusedFor('budget')(error) && error.message === owner.brief && !/wc-|release/.test(error.message);
   await assert.rejects(client.createPaymentPayload(kit.required(10_000)), brief);
   // The same when another process takes the room between the check and the reservation.
   const raced = setup({ perDay: '$0.05' });
   raced.client.onBeforePaymentCreation(async () => { raced.budget.reserve('$0.05').annotate({ outcome: 'unknown' }); });
-  await assert.rejects(raced.client.createPaymentPayload(kit.required(10_000)), error => refusedFor('budget')(error) && !/spend-|release/.test(error.message));
+  await assert.rejects(raced.client.createPaymentPayload(kit.required(10_000)), error => refusedFor('budget')(error) && !/wc-|release/.test(error.message));
   assert.equal(raced.budget.status().inFlight, 50_000n);
 });
 

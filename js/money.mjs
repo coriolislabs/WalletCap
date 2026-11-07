@@ -30,6 +30,17 @@ const CAIP10_EVM = /^eip155:[0-9]+:(0x[0-9a-fA-F]{40})$/;
 const CAIP10_SOLANA = /^solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const IDENTIFIER = /^[A-Za-z0-9_.:@/-]{1,128}$/;
 
+/** Refuse an option `what` doesn't take, naming the one that was probably meant. */
+export const checkKeys = (source, known, what) => {
+  if (source === null || typeof source !== 'object') throw new BudgetError(`${what} takes an options object`);
+  for (const key of Object.keys(source)) {
+    if (known.has(key)) continue;
+    const plain = key.toLowerCase().replaceAll(/[-_]/g, '');
+    const match = [...known].find(candidate => candidate.toLowerCase() === plain);
+    throw new BudgetError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
+  }
+};
+
 export const WINDOWS = { perHour: DURATION_WORDS.hour, perDay: DURATION_WORDS.day, perWeek: DURATION_WORDS.week };
 
 const ASCII_SPACE = new Set([' ', '\t', '\n', '\v', '\f', '\r']);

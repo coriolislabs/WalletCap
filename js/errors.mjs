@@ -10,26 +10,28 @@ export class BudgetError extends Error {
 }
 
 /**
- * The budget refused a payment. `reason` is one of 'budget', 'per_payment',
- * 'uses' and 'revoked' (the budget is frozen), the codes the Python ledger uses
- * too, or, from the x402 guard, 'asset' (an asset the budget cannot price) or
- * 'timeout' (the payee asks for an authorization valid longer than an hour, or
- * doesn't say how long). `brief` is the message without the ids of open
- * payments or what their owner can do about them: what an agent is told.
+ * The budget refused a payment. `reason` is one of 'budget' (the rolling cap),
+ * 'per_payment', 'max_payments' and 'frozen', the codes spec/schema.sql gives, or,
+ * from the x402 guard, 'asset' (an asset the budget cannot price) or 'timeout' (the
+ * payee asks for an authorization valid longer than an hour, or doesn't say how
+ * long). `source` is 'budget' for the owner's limits and 'process' for the paying
+ * process's own. `brief` is the message without the ids of open payments or what
+ * their owner can do about them: what an agent is told.
  */
 export class BudgetRefused extends BudgetError {
-  constructor(reason, message, { brief = message } = {}) {
+  constructor(reason, message, { brief = message, source = 'budget' } = {}) {
     super(message);
     this.name = 'BudgetRefused';
     this.reason = reason;
     this.code = `budget_${reason}`;
     this.brief = brief;
+    this.source = source;
   }
 }
 
 /** `error` as an agent should be told it: a BudgetRefused's brief form, anything else as it is. */
 export const forAgent = error => (error instanceof BudgetRefused && error.brief !== error.message
-  ? new BudgetRefused(error.reason, error.brief)
+  ? new BudgetRefused(error.reason, error.brief, { source: error.source })
   : error);
 
 /**

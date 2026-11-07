@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 build/
 *.egg-info/
@@ -16,3 +16,7 @@ examples/quickstart/demo.sqlite
 # needs its dist/ layout, and the dist/ rule above would hide it.
 !js/tests/support/fake-awal/dist/
 !js/tests/support/fake-awal/dist/**
+
+# Copies of spec/*.sql, made by the build: the files at spec/ are the source.
+js/spec/
+src/walletcap/spec/

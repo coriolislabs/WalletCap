@@ -63,7 +63,7 @@ test('CDP entries use the cdp rail and load back with their own metadata', async
       [rows[0].atomicAmount, rows[0].asset, rows[0].network, rows[0].payTo],
       [50_000n, USDC, NETWORK, PAY_TO],
     );
-    assert.equal(budget.status().spent, 50_000n);
+    assert.equal(budget.status().inFlight, 50_000n);
   } finally {
     store.close();
     budget.close();
@@ -83,27 +83,21 @@ test('the store refuses an entry in another asset', async () => {
       }),
       /counts .* not/,
     );
-    assert.equal(budget.status().spent, 0n);
+    assert.equal(budget.status().inFlight, 0n);
   } finally {
     store.close();
     budget.close();
   }
 });
 
-test('a 0.2.0 CDP row on the x402 rail still loads after the rail split', async () => {
+test('a CDP row on the x402 rail, as 0.2.0 wrote them, still loads after the rail split', async () => {
   const { path, budget, store } = fixture();
   try {
     const ledger = new Ledger(path);
     try {
-      ledger.record(WALLET, 50_000n, {
+      ledger.hold(WALLET, 50_000n, {
         rail: 'x402',
-        reference: JSON.stringify({
-          atomicAmount: '50000',
-          asset: USDC,
-          network: NETWORK,
-          payTo: '0xlegacy',
-          at: Date.now(),
-        }),
+        info: JSON.stringify({ atomicAmount: '50000', asset: USDC, network: NETWORK, payTo: '0xlegacy', at: Date.now() }),
       });
     } finally {
       ledger.close();
@@ -125,11 +119,12 @@ test("an entry CDP backdates still counts from the ledger's own time", async () 
     // CDP's entry carries its own `at`. 0.2.x recorded the payment then, so an entry dated
     // 1970 had already aged out, and a second full $1 passed the $1 cap.
     await store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 });
-    assert.equal(budget.status().spent, 1_000_000n);
+    // CDP's record isn't evidence that the payment settled: it is held, and counts as in flight.
+    assert.equal(budget.status().inFlight, 1_000_000n);
     const [row] = await store.load();
     assert.ok(row.at >= Date.now() - 60_000, `the entry is dated ${row.at}, not when CDP said`);
     await assert.rejects(store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 }), { reason: 'budget' });
-    assert.equal(budget.status().spent, 1_000_000n);
+    assert.equal(budget.status().inFlight, 1_000_000n);
   } finally {
     store.close();
     budget.close();
@@ -156,7 +151,7 @@ test('a checksummed or CAIP-10 instrument spends from the one lowercase budget',
   assert.throws(() => new SharedBudgetStore({ path, instrument: '0xD797ead28C38575FDf4fC523866287372340Ca02', asset: USDC }), /EIP-55/);
   const ledger = new Ledger(path);
   try {
-    assert.deepEqual(ledger.budgets().map(row => row.instrument), [WALLET]);
+    assert.deepEqual(ledger.budgets().map(row => row.wallet), [WALLET]);
   } finally {
     ledger.close();
     budget.close();
@@ -170,7 +165,7 @@ test("a refusal CDP passes on to the agent names no holds and no release instruc
     // 0.3.0 passed the owner's message, with the hold's id, through CDP to the agent.
     await assert.rejects(store.append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }),
       error => error.reason === 'budget' && /\$1\.00 of it is 1 open payment$/.test(error.message));
-    assert.match(budget.check('$0.01').message, /\(spend-\w+; walletcap holds lists them/);
+    assert.match(budget.check('$0.01').message, /\(wc-\w+; walletcap holds lists them/);
   } finally {
     store.close();
     budget.close();
@@ -192,9 +187,9 @@ test('a CDP payment counts until an hour after it is recorded, plus one window: 
     const [counted] = await store.load();
     assert.ok(counted.at >= clock.now - DAY, "CDP's own window keeps it too");
     clock.now = recorded + HOUR + 60_000 + DAY;
-    assert.equal(budget.status().spent, 1_000_000n);
+    assert.equal(budget.status().inFlight, 1_000_000n);
     clock.now += 1;
-    assert.equal(budget.status().spent, 0n);
+    assert.equal(budget.status().inFlight, 0n);
     await store.append(entry(1_000_000n));
   } finally {
     store.close();

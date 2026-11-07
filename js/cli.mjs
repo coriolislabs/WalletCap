@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // npx walletcap: see, set and freeze an agent's spend budget.
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { BudgetError } from './errors.mjs';
 import { openBudget } from './index.mjs';
@@ -89,7 +89,7 @@ const wallets = path => {
   const ledger = new Ledger(path);
   try {
     // A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
-    return [...new Set(ledger.budgets().map(row => storedWalletName(row.instrument)))];
+    return [...new Set(ledger.budgets().map(row => storedWalletName(row.wallet)))];
   } finally {
     ledger.close();
   }
@@ -126,8 +126,8 @@ function releaseUnknown(values, path, id) {
   const wallet = walletOf(values, path);
   const ledger = new Ledger(path);
   try {
-    const released = ledger.releaseUnknown(wallet, olderThan);
-    if (values.json) return json(released.map(row => ({ id: row.spend_id, amount: row.amount })));
+    const released = ledger.voidUnknown(wallet, olderThan);
+    if (values.json) return json(released.map(row => ({ id: row.payment, amount: row.amount })));
     if (released.length === 0) {
       return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be released yet. One goes once it is older than `
         + `${formatWindow(olderThan)} and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old.`;
@@ -165,10 +165,13 @@ const commands = {
     if (Object.keys(limits).length === 0) throw new Usage('set needs a limit, like --per-day 150 or --per-payment 50');
     if (values.wallet === undefined && wallets(path).length !== 1) throw new Usage('set needs --wallet <address>');
     const wallet = walletOf(values, path);
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const ledger = new Ledger(path);
+    const ledger = new Ledger(path, { create: true });
     try {
-      ledger.setLimits(wallet, limits, { unit: 'usd', create: true });
+      const { maxUses, ...rest } = limits;
+      const owned = { ...rest, ...(maxUses === undefined ? {} : { maxPayments: maxUses }) };
+      if (ledger.budget(wallet) !== null) ledger.setLimits(wallet, owned);
+      else if (owned.cap === undefined) throw new BudgetError(`${shortWallet(wallet)} has no budget yet: give it a rolling limit too, like --per-day 150`);
+      else ledger.createBudget(wallet, owned);
     } finally {
       ledger.close();
     }
@@ -251,12 +254,12 @@ const commands = {
     try {
       const row = ledger.payment(id);
       if (row === null) throw new BudgetError(`no payment ${id} in ${path}`);
-      if (values.wallet !== undefined && row.instrument !== normalizeWallet(values.wallet)) {
-        throw new BudgetError(`${id} is ${shortWallet(row.instrument)}'s payment, not ${shortWallet(normalizeWallet(values.wallet))}'s`);
+      if (values.wallet !== undefined && row.wallet !== normalizeWallet(values.wallet)) {
+        throw new BudgetError(`${id} is ${shortWallet(row.wallet)}'s payment, not ${shortWallet(normalizeWallet(values.wallet))}'s`);
       }
-      if (row.status === 'committed') throw new BudgetError(`${id} is recorded as settled; only an in-flight payment can be released`);
-      ledger.release(id);
-      return `Released ${id} (${formatUsd(row.amount)} from ${shortWallet(row.instrument)}): it no longer counts. Only do this for a payment you know never left the wallet.`;
+      if (row.state !== 'held') throw new BudgetError(`${id} is recorded as ${row.state}; only an in-flight payment can be released`);
+      ledger.void(id, { evidence: 'released by its owner' });
+      return `Released ${id} (${formatUsd(row.amount)} from ${shortWallet(row.wallet)}): it no longer counts. Only do this for a payment you know never left the wallet.`;
     } finally {
       ledger.close();
     }

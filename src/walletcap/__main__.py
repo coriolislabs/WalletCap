@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from walletcap import __version__
-from walletcap.budget import Budget, Status, _limits
+from walletcap.budget import UNSET, Budget, Status, _limits
 from walletcap.errors import BudgetError
-from walletcap.ledger import UNSET, Ledger
+from walletcap.ledger import Ledger
 from walletcap.money import (
     default_budget_path,
     describe_limits,
@@ -111,7 +111,7 @@ def _wallets(path: Path) -> list[str]:
     if not path.exists():
         return []
     # A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
-    names = [stored_wallet_name(budget.instrument) for budget in Ledger(path).budgets()]
+    names = [stored_wallet_name(budget["wallet"]) for budget in Ledger(path).budgets()]
     return list(dict.fromkeys(names))
 
 
@@ -196,8 +196,16 @@ def _set(args: argparse.Namespace, path: Path) -> str:
     if args.wallet is None and len(_wallets(path)) != 1:
         raise _Usage("set needs --wallet <address>")
     wallet = _wallet(args, path)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    Ledger(path).set_limits(wallet, unit="usd", create=True, **limits)
+    ledger = Ledger(path, create=True)
+    if ledger.budget(wallet) is None:
+        if "cap" not in limits:
+            raise BudgetError(
+                f"{short_wallet(wallet)} has no budget yet: give it a rolling limit too, "
+                "like --per-day 150"
+            )
+        ledger.create_budget(wallet, **limits)
+    else:
+        ledger.set_limits(wallet, **limits)
     status = Budget(wallet, path=path, create=False).status()
     if args.json:
         return _json(status)
@@ -295,9 +303,9 @@ def _release_unknown(args: argparse.Namespace, path: Path) -> str:
     if not path.exists():
         raise BudgetError(f"no budget file at {path}")
     wallet = _wallet(args, path)
-    released = Ledger(path).release_unknown(wallet, older_than)
+    released = Ledger(path).void_unknown(wallet, older_than)
     if args.json:
-        return _json([{"id": spend.spend_id, "amount": spend.amount} for spend in released])
+        return _json([{"id": row["payment"], "amount": row["amount"]} for row in released])
     window = format_window(older_than)
     if not released:
         return (
@@ -306,7 +314,7 @@ def _release_unknown(args: argparse.Namespace, path: Path) -> str:
             "one with no settle-by time, once it is also an hour and a minute old."
         )
     plural = "" if len(released) == 1 else "s"
-    total = sum(spend.amount for spend in released)
+    total = sum(row["amount"] for row in released)
     return (
         f"Released {len(released)} payment{plural} of unknown or refused outcome older than {window} "
         f"({format_usd(total)} from {short_wallet(wallet)}): they no longer count. "
@@ -325,19 +333,19 @@ def _release(args: argparse.Namespace, path: Path) -> str:
     payment = ledger.payment(args.id)
     if payment is None:
         raise BudgetError(f"no payment {args.id} in {path}")
-    if args.wallet is not None and payment.instrument != normalize_wallet(args.wallet):
+    if args.wallet is not None and payment["wallet"] != normalize_wallet(args.wallet):
         raise BudgetError(
-            f"{args.id} is {short_wallet(payment.instrument)}'s payment, "
+            f"{args.id} is {short_wallet(payment['wallet'])}'s payment, "
             f"not {short_wallet(normalize_wallet(args.wallet))}'s"
         )
-    if payment.status == "committed":
+    if payment["state"] != "held":
         raise BudgetError(
-            f"{args.id} is recorded as settled; only an in-flight payment can be released"
+            f"{args.id} is recorded as {payment['state']}; only an in-flight payment can be released"
         )
-    ledger.release(args.id)
+    ledger.void(args.id, evidence="released by its owner")
     return (
-        f"Released {args.id} ({format_usd(payment.amount)} from "
-        f"{short_wallet(payment.instrument)}): it no longer counts. "
+        f"Released {args.id} ({format_usd(payment['amount'])} from "
+        f"{short_wallet(payment['wallet'])}): it no longer counts. "
         "Only do this for a payment you know never left the wallet."
     )
 

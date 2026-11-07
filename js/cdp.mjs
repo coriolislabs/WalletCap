@@ -8,21 +8,22 @@
 // one write transaction, so two processes that both pass the SDK's own
 // in-memory check cannot both record a payment past the cap.
 import { BudgetError, forAgent } from './errors.mjs';
-import { checkKeys, instrumentName, integer, Ledger } from './ledger.mjs';
-import { MAX_AMOUNT } from './money.mjs';
+import { Ledger, walletKey } from './ledger.mjs';
+import { checkKeys, formatAmount, formatWindow, MAX_AMOUNT, shortWallet } from './money.mjs';
 import { MAX_PAYMENT_TIMEOUT_SECONDS } from './x402.mjs';
 
-// The CDP store is its own rail. The x402 guard also writes rail 'x402',
-// and a shared rail let a guard row reach the CDP loader with the wrong
-// reference shape.
+// The CDP store is its own rail. The x402 guard also writes rail 'x402', and a shared rail let a
+// guard row reach the CDP loader with the wrong reference shape.
 const RAIL = 'cdp';
 const OPTION_KEYS = new Set(['path', 'instrument', 'asset', 'scale', 'busyTimeoutMs']);
+const OPEN = (1n << 63n) - 1n;
 
 // How long after CDP records a payment it can still settle. CDP records a payment just before
 // it signs it, and its applySpendControls refuses a requirement whose maxTimeoutSeconds is over
 // 3600 (MAX_PAYMENT_TIMEOUT_SECONDS in @coinbase/cdp-sdk 1.60.0 and 1.61.0), so the signed
 // authorization can be redeemed for up to an hour. 60 seconds more covers the time between the
-// record and the signature. The payment counts until one window after that.
+// record and the signature. The payment is held that long from the ledger's own time, and counts
+// until one window after.
 const SETTLES_WITHIN_MS = BigInt(MAX_PAYMENT_TIMEOUT_SECONDS) * 1000n + 60_000n;
 
 // CDP compares assets after this normalization (EVM addresses lowercased).
@@ -31,11 +32,11 @@ const normalizeAsset = asset => {
   return /^0x[0-9a-fA-F]{40}$/.test(trimmed) ? trimmed.toLowerCase() : trimmed;
 };
 
-const parseReference = text => {
+const parseInfo = text => {
   try { return text ? JSON.parse(text) : null; } catch { return null; }
 };
 
-const reference = entry => JSON.stringify({
+const fingerprint = entry => JSON.stringify({
   atomicAmount: String(entry.atomicAmount),
   asset: entry.asset,
   network: entry.network,
@@ -46,126 +47,127 @@ const reference = entry => JSON.stringify({
 const ceilDiv = (numerator, denominator) => (numerator + denominator - 1n) / denominator;
 
 /**
- * A CDP SpendStore whose count lives in the budget file shared by every
- * process on the host, for every rail. Pass it as `store` to applySpendControls, and set
- * maxCumulativeSpend there too: the SDK only records through its store when a
- * cumulative cap is configured. A payment CDP rolls back keeps counting here
- * as long as it would have settled, unless its owner releases it sooner.
+ * A CDP SpendStore whose count lives in the budget file shared by every process on the host,
+ * for every rail. Pass it as `store` to applySpendControls, and set maxCumulativeSpend there too:
+ * the SDK only records through its store when a cumulative cap is configured. append() holds the
+ * payment through the ledger's admission, so two processes that both pass the SDK's own check
+ * can't both record a payment past the cap. A payment CDP rolls back keeps counting as long as it
+ * would have settled.
  */
 export class SharedBudgetStore {
   #ledger;
   #instrument;
   #asset;
   #scale;
+  // The payments this store appended, by CDP's entry, so removeEntry() can find one.
+  #appended = new Map();
 
   constructor(options) {
     checkKeys(options, OPTION_KEYS, 'SharedBudgetStore');
     const { path, instrument, asset, scale = 1n, busyTimeoutMs = 30_000 } = options;
     if (typeof path !== 'string' || path.length === 0) throw new BudgetError('path is required');
-    this.#instrument = instrumentName(instrument);
+    this.#instrument = walletKey(instrument);
     if (typeof asset !== 'string' || asset.trim().length === 0) throw new BudgetError('asset is required');
     this.#asset = normalizeAsset(asset);
-    this.#scale = integer(scale, 'scale');
-    this.#ledger = new Ledger(path, { busyTimeoutMs });
+    if (!(typeof scale === 'bigint' || Number.isSafeInteger(scale)) || BigInt(scale) <= 0n) throw new BudgetError('scale must be a positive integer');
+    this.#scale = BigInt(scale);
+    this.#ledger = new Ledger(path, { busyTimeoutMs, create: true });
   }
 
   get instrument() { return this.#instrument; }
 
   /** Record the instrument's budget once; declaring it again with other limits is refused. */
   declare({ unit, cap, windowMs, perPayment = null, maxUses = null }) {
-    this.#ledger.declare(this.#instrument, { unit, cap, windowMs, perPayment, maxUses });
+    const row = this.#ledger.budget(this.#instrument);
+    if (row === null) {
+      this.#ledger.createBudget(this.#instrument, { unit, cap, windowMs, perPayment, maxPayments: maxUses });
+      return;
+    }
+    const asked = { unit, cap: BigInt(cap), window_ms: BigInt(windowMs), per_payment: perPayment === null ? null : BigInt(perPayment), max_payments: maxUses === null ? null : BigInt(maxUses) };
+    if (Object.keys(asked).some(key => row[key] !== asked[key])) {
+      const text = limits => [`${formatAmount(limits.cap, limits.unit)} per ${formatWindow(limits.window_ms)}`,
+        ...(limits.per_payment === null ? [] : [`at most ${formatAmount(limits.per_payment, limits.unit)} a payment`]),
+        ...(limits.max_payments === null ? [] : [`${limits.max_payments} payments per ${formatWindow(limits.window_ms)}`]),
+      ].join(', ') + (row.unit === asked.unit ? '' : ` in ${limits.unit}`);
+      let merged = null;
+      try { merged = row.merged_from === null ? null : JSON.parse(row.merged_from); } catch { merged = null; }
+      const note = merged === null ? '' : `. The 0.3.0 upgrade merged the budget${merged.length === 1 ? '' : 's'} 0.2.x kept under ${merged.join(', ')} `
+        + "into this one, with the tighter of each limit; its owner can change them with 'walletcap set'";
+      throw new BudgetError(`${shortWallet(this.#instrument)}'s budget is already declared with other limits: ${text(row)}, not ${text(asked)}${note}`);
+    }
   }
 
   // --- CDP SpendStore -------------------------------------------------------
 
   async size() {
-    return Number(this.#ledger.counted(this.#instrument).uses);
+    return this.#ledger.counting(this.#instrument).length;
   }
 
   async load() {
-    const { now, rows } = this.#ledger.countedRows(this.#instrument);
-    const { window_ms: windowMs } = this.#ledger.budget(this.#instrument) ?? {};
-    // A settled payment that still counts past its window (its reservation's expiry) is dated
-    // to the moment it counts from, so CDP's own window check keeps it while walletcap does.
-    const countsFrom = row => (row.expires_at_ms !== null && windowMs !== undefined && row.expires_at_ms - windowMs - 1n > row.at_ms
-      ? row.expires_at_ms - windowMs - 1n
-      : row.at_ms);
-    return rows.map(row => {
-      const own = parseReference(row.reference);
-      // A CDP entry carries atomicAmount. 0.2.0 wrote those on rail 'x402'; accept
-      // both so an existing budget keeps counting after the rail split. A guard
-      // row has no atomicAmount and falls through to the synthetic entry below.
-      let atomic = null;
-      if (own && own.atomicAmount !== undefined && normalizeAsset(own.asset) === this.#asset) {
-        try { atomic = integer(own.atomicAmount, 'atomicAmount', { allowZero: true }); } catch { atomic = null; }
-      }
-      if (atomic !== null) {
-        // A payment the payee refused stays open, and counts as of now for as long as it does. A
-        // settled one is dated by the ledger, not by the time CDP put in its entry.
-        const at = row.status === 'reserved' ? Number(now) : Number(countsFrom(row));
-        return { atomicAmount: atomic, asset: this.#asset, network: own.network, payTo: own.payTo, at };
+    return this.#ledger.counting(this.#instrument).map(row => {
+      // Dated to the moment its window counts from, so CDP's own window check keeps it as long
+      // as walletcap does: now, for a payment that counts until evidence ends it.
+      const at = Number(row.counts_from === OPEN || row.counts_from > row.now ? row.now : row.counts_from);
+      const own = parseInfo(row.info);
+      if (own?.atomicAmount !== undefined && normalizeAsset(own.asset) === this.#asset) {
+        try {
+          return { atomicAmount: BigInt(own.atomicAmount), asset: this.#asset, network: own.network, payTo: own.payTo, at };
+        } catch { /* not a CDP entry after all */ }
       }
       // Spend from another rail (or another asset) counts in this asset's units, rounded up.
-      return {
-        atomicAmount: ceilDiv(row.amount, this.#scale),
-        asset: this.#asset,
-        network: `ledger:${row.rail}`,
-        payTo: `ledger:${row.spend_id}`,
-        // The SDK drops an entry older than its own window; a reservation still
-        // open counts as of now, however long ago it was taken.
-        at: row.status === 'reserved' ? Number(now) : Number(countsFrom(row)),
-      };
+      return { atomicAmount: ceilDiv(row.amount, this.#scale), asset: this.#asset, network: `ledger:${row.rail}`, payTo: `ledger:${row.payment}`, at };
     });
   }
 
   async append(entry) {
     const asset = normalizeAsset(entry.asset);
-    if (asset !== this.#asset) {
-      throw new BudgetError(`this CDP store counts ${this.#asset}, not ${asset}`);
-    }
-    const atomic = integer(entry.atomicAmount, 'atomicAmount', { allowZero: true });
+    if (asset !== this.#asset) throw new BudgetError(`this CDP store counts ${this.#asset}, not ${asset}`);
+    let atomic;
+    try { atomic = BigInt(entry.atomicAmount); } catch { throw new BudgetError('atomicAmount must be an integer'); }
+    if (atomic < 0n) throw new BudgetError('atomicAmount must be an integer');
     if (atomic === 0n) return;
     const spend = atomic * this.#scale;
     if (spend > MAX_AMOUNT) throw new BudgetError('payment does not fit in the budget unit');
-    // The SDK records a payment when it creates it and removes it if settlement
-    // fails, so the row counts at once: an unknown outcome keeps counting. It counts
-    // from the ledger's own time, until one window past the last moment the signed
-    // authorization can be redeemed (SETTLES_WITHIN_MS). The entry's `at` is CDP's, so
-    // it is kept only in the reference, which is how removeEntry() finds the row again.
+    // CDP records a payment when it creates it and removes it if settlement fails, so it is held
+    // at once, from the ledger's own time, until the signed authorization can no longer be
+    // redeemed. The entry's own `at` is CDP's, kept only with the payment.
+    let held;
     try {
-      this.#ledger.record(this.#instrument, spend, { rail: RAIL, reference: reference(entry), settlesWithinMs: SETTLES_WITHIN_MS });
+      held = this.#ledger.hold(this.#instrument, spend, { rail: RAIL, info: fingerprint(entry), withinMs: SETTLES_WITHIN_MS });
     } catch (error) {
       throw forAgent(error); // CDP passes it on to the agent: no hold ids, no release instructions
     }
+    const key = fingerprint(entry);
+    this.#appended.set(key, [...(this.#appended.get(key) ?? []), held.payment]);
   }
 
-  async prune(olderThanMs) {
-    // Only settled payments that no longer count go, whatever window the caller uses.
-    this.#ledger.prune(this.#instrument, olderThanMs);
+  async prune() {
+    // The ledger keeps every payment; one that no longer counts is never read.
   }
 
   async removeEntry(entry) {
-    // CDP removes a payment from its store in cases the store can't tell apart, and
-    // a signed authorization may still be out there. So the payment keeps counting,
-    // as an open reservation marked refused, for as long as it would have settled:
-    // until one window past the last moment the authorization can be redeemed.
-    // Someone who has checked the chain can release it sooner.
-    const ref = reference(entry);
-    this.#ledger.reopenByReference(this.#instrument, RAIL, ref, { outcome: 'refused' });
-    // 0.2.0 wrote CDP entries on the x402 rail; try the old rail too. A guard
-    // entry has a different reference, so it cannot match this one.
-    this.#ledger.reopenByReference(this.#instrument, 'x402', ref, { outcome: 'refused' });
+    // CDP removes a payment from its store in cases the store can't tell apart, and a signed
+    // authorization may still be out there. So the payment keeps counting for as long as it
+    // would have settled, noted refused. Someone who has checked the chain can void it sooner.
+    const key = fingerprint(entry);
+    const [payment, ...rest] = this.#appended.get(key) ?? [];
+    if (payment === undefined) return;
+    if (rest.length === 0) this.#appended.delete(key);
+    else this.#appended.set(key, rest);
+    this.#ledger.note(payment, 'refused', { evidence: 'removed by CDP' });
   }
 
   // --- Budget -----------------------------------------------------------------
 
   /** Refuse every later payment for the instrument, on every rail. */
-  revoke() { this.#ledger.revoke(this.#instrument); }
+  revoke() { this.#ledger.freeze(this.#instrument); }
 
   /** What counts against the instrument's budget right now, in budget units. */
   status() {
-    const { instrument, unit, cap, spent, reserved, uses, revoked, remaining } = this.#ledger.status(this.#instrument);
-    return { instrument, unit, cap, spent, reserved, uses, revoked, remaining };
+    const s = this.#ledger.status(this.#instrument);
+    return {
+      instrument: this.#instrument, unit: s.unit, cap: s.cap, spent: s.spent, reserved: s.in_flight, uses: s.payments, revoked: s.frozen_at !== null, remaining: s.remaining,
+    };
   }
 
   close() { this.#ledger.close(); }

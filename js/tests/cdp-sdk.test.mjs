@@ -32,7 +32,7 @@ test('the published CDP SDK records a payment through walletcap cdpStore', { ski
     });
     const payload = await client.createPaymentPayload(kit.required(50_000));
     assert.ok(payload);
-    assert.equal(budget.status().spent, 50_000n);
+    assert.equal(budget.status().inFlight, 50_000n);
     const rows = await store.load();
     assert.equal(rows.length, 1);
     assert.equal(rows[0].atomicAmount, 50_000n);
@@ -78,7 +78,7 @@ test('CDP controls added after the guard are refused before signing', { skip }, 
       client.createPaymentPayload(kit.required(50_000)),
       /CDP spend controls|Use one/,
     );
-    assert.equal(budget.status().spent, 0n);
+    assert.equal(budget.status().inFlight, 0n);
     assert.equal(budget.status().inFlight, 0n);
   } finally {
     store.close();

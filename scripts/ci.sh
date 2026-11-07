@@ -8,7 +8,7 @@ export npm_config_cache="${npm_config_cache:-${TMPDIR:-/tmp}/walletcap-npm-cache
 mkdir -p "$npm_config_cache"
 
 echo "== JavaScript =="
-(cd js && npm install --no-audit --no-fund --no-package-lock && node --test)
+(cd js && npm install --no-audit --no-fund --no-package-lock && npm test)
 
 echo "== Python =="
 if python3 -c "import pytest" >/dev/null 2>&1; then
@@ -36,6 +36,7 @@ echo "== Solidity (EVM check) =="
 (cd solidity/evm && npm install --no-audit --no-fund --no-package-lock && node check.mjs ..)
 
 echo "== Crash test =="
+node js/scripts/copy-spec.mjs
 (cd crash-test \
   && npm install --no-save --no-audit --no-fund --no-package-lock ../js \
   && node contracts/build.mjs --check \
