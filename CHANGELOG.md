@@ -1,7 +1,15 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.1 — 2026-11-07
+
+### Fixed
+
+- 0.4.0 reached PyPI but not npm. The publish workflow ran `npm publish out/walletcap-*.tgz`,
+  which npm reads as a GitHub repository, not a file. The three npm publish steps now pass
+  `./out/…`. The packages are otherwise the same as 0.4.0.
+
+## 0.4.0 — 2026-11-07
 
 This release gives the spend rule one owner: SQL in `spec/schema.sql`, which the JavaScript and
 Python packages ship and run as written, so neither language implements admission or counting.
