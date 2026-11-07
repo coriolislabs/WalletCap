@@ -1,0 +1,330 @@
+{
+  "about": "Admission sequences both test suites run against the ledger, through the payer and owner handles. Each case starts with a fresh file whose clock reads `start` and one budget. Amounts are micro-dollars; times are milliseconds. A step's `expect` is checked exactly where given. Hold expectations: {held: id or *}, {refused: code, source, brief}, or {error: usage}. A hold step may name its rail. Moves act as the process that held the payment, with its token, unless `as` says `other` (another process, with no token) or `owner` (the owner's reconciliation). The expectations were worked out from spec/ledger.md, not from running either package.",
+  "start": 1800000000000,
+  "wallet": "0xd797ead28c38575fdf4fc523866287372340ca02",
+  "cases": [
+    {
+      "name": "the cap holds across payments, and the refusal says by how much",
+      "budget": { "cap": 150000000, "window_ms": 86400000, "per_payment": 50000000 },
+      "steps": [
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "settle", "id": "b", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 50000000, "id": "c", "expect": { "held": "c" } },
+        { "op": "settle", "id": "c", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $150.000001 in the last 24h, over its $150.00 limit ($0.00 left)" } },
+        { "op": "status", "expect": { "spent": 150000000, "in_flight": 0, "remaining": 0, "payments": 3, "frozen": false } }
+      ]
+    },
+    {
+      "name": "a payment over the per-payment limit is refused first",
+      "budget": { "cap": 150000000, "window_ms": 86400000, "per_payment": 50000000 },
+      "steps": [
+        { "op": "hold", "amount": 50000001, "expect": { "refused": "per_payment", "source": "budget", "brief": "$50.000001 is over 0xd797…ca02's $50.00 limit per payment" } },
+        { "op": "status", "expect": { "payments": 0, "remaining": 150000000 } }
+      ]
+    },
+    {
+      "name": "a settled payment counts through one window from its settlement, inclusive",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 100000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "advance", "ms": 43200000 },
+        { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "settle", "id": "b", "expect": { "state": "settled" } },
+        { "op": "advance", "ms": 43200000 },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $150.000001 in the last 24h, over its $150.00 limit ($0.00 left)" } },
+        { "op": "advance", "ms": 1 },
+        { "op": "hold", "amount": 100000000, "id": "c", "expect": { "held": "c" } },
+        { "op": "status", "expect": { "spent": 50000000, "in_flight": 100000000, "remaining": 0, "payments": 2 } }
+      ]
+    },
+    {
+      "name": "an open hold counts until evidence settles or voids it, however long",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 150000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "advance", "ms": 2592000000 },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $150.000001 in the last 24h, over its $150.00 limit ($0.00 left); $150.00 of it is 1 open payment" } },
+        { "op": "status", "expect": { "spent": 0, "in_flight": 150000000, "remaining": 0, "payments": 1 } },
+        { "op": "note", "id": "a", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "void", "id": "a", "expect": { "state": "void" } },
+        { "op": "hold", "amount": 150000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "status", "expect": { "in_flight": 150000000, "payments": 1 } }
+      ]
+    },
+    {
+      "name": "a held payment with a settle-by time counts through it plus one window",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 100000000, "id": "a", "until_from_now": 300000, "expect": { "held": "a" } },
+        { "op": "advance", "ms": 86700000 },
+        { "op": "status", "expect": { "in_flight": 100000000, "payments": 1 } },
+        { "op": "advance", "ms": 1 },
+        { "op": "status", "expect": { "in_flight": 0, "payments": 0, "remaining": 150000000 } }
+      ]
+    },
+    {
+      "name": "a settlement never shortens a hold",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 150000000, "id": "a", "until_from_now": 172800000, "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "evidence": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "expect": { "state": "settled" } },
+        { "op": "advance", "ms": 86400001 },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $150.000001 in the last 24h, over its $150.00 limit ($0.00 left)" } },
+        { "op": "advance", "ms": 172799999 },
+        { "op": "status", "expect": { "spent": 150000000, "payments": 1 } },
+        { "op": "advance", "ms": 1 },
+        { "op": "status", "expect": { "spent": 0, "payments": 0 } },
+        { "op": "hold", "amount": 150000000, "id": "b", "expect": { "held": "b" } }
+      ]
+    },
+    {
+      "name": "a late settlement counts one window from when it settled",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 150000000, "id": "a", "until_from_now": 1, "expect": { "held": "a" } },
+        { "op": "advance", "ms": 86400002 },
+        { "op": "status", "expect": { "in_flight": 0, "payments": 0 } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $150.000001 in the last 24h, over its $150.00 limit ($0.00 left)" } },
+        { "op": "advance", "ms": 86400000 },
+        { "op": "status", "expect": { "spent": 150000000 } },
+        { "op": "advance", "ms": 1 },
+        { "op": "status", "expect": { "spent": 0 } }
+      ]
+    },
+    {
+      "name": "states only move forward: held to void or settled, void to settled",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 100000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "void", "id": "a", "expect": { "error": "usage" } },
+        { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "void", "id": "b", "expect": { "state": "void" } },
+        { "op": "status", "expect": { "spent": 100000000, "in_flight": 0, "payments": 1 } },
+        { "op": "hold", "amount": 50000000, "id": "c", "expect": { "held": "c" } },
+        { "op": "settle", "id": "b", "expect": { "state": "settled" } },
+        { "op": "status", "expect": { "spent": 150000000, "in_flight": 50000000, "remaining": 0, "payments": 3 } },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $200.000001 in the last 24h, over its $150.00 limit ($0.00 left); $50.00 of it is 1 open payment" } }
+      ]
+    },
+    {
+      "name": "settling is idempotent, and one identity is one payment, held once",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 50000000, "id": "order-1", "expect": { "held": "order-1" } },
+        { "op": "hold", "amount": 50000000, "id": "order-1", "expect": { "error": "usage" } },
+        { "op": "hold", "amount": 40000000, "id": "order-1", "expect": { "error": "usage" } },
+        { "op": "settle", "id": "order-1", "expect": { "state": "settled" } },
+        { "op": "settle", "id": "order-1", "expect": { "state": "settled" } },
+        { "op": "void", "id": "nobody", "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "spent": 50000000, "payments": 1 } }
+      ]
+    },
+    {
+      "name": "a settle-by time that isn't after now is refused",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 150000000, "until_from_now": 0, "expect": { "error": "usage" } },
+        { "op": "hold", "amount": 150000000, "until_from_now": -1, "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "payments": 0 } },
+        { "op": "hold", "amount": 150000000, "id": "a", "until_from_now": 1, "expect": { "held": "a" } }
+      ]
+    },
+    {
+      "name": "a frozen budget refuses every payment until unfrozen",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "freeze" },
+        { "op": "hold", "amount": 1, "expect": { "refused": "frozen", "source": "budget", "brief": "0xd797…ca02's budget is frozen: nothing can be paid until its owner unfreezes it" } },
+        { "op": "status", "expect": { "frozen": true, "remaining": 0 } },
+        { "op": "unfreeze" },
+        { "op": "hold", "amount": 1, "expect": { "held": "*" } }
+      ]
+    },
+    {
+      "name": "the payment count holds, and says how many are still open",
+      "budget": { "cap": 150000000, "window_ms": 86400000, "max_payments": 2 },
+      "steps": [
+        { "op": "hold", "amount": 1000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 1000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "hold", "amount": 1000000, "expect": { "refused": "max_payments", "source": "budget", "brief": "0xd797…ca02 has 2 payments counting in the last 24h, the most its budget allows, and 1 of them is still open" } },
+        { "op": "void", "id": "b", "expect": { "state": "void" } },
+        { "op": "hold", "amount": 1000000, "id": "c", "expect": { "held": "c" } },
+        { "op": "settle", "id": "c", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 1000000, "expect": { "refused": "max_payments", "source": "budget", "brief": "0xd797…ca02 already made 2 payments in the last 24h, the most its budget allows" } }
+      ]
+    },
+    {
+      "name": "the window changes only while nothing counts",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 1000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "set_limits", "window_ms": 3600000, "expect": { "error": "usage" } },
+        { "op": "set_limits", "cap": 200000000, "expect": {} },
+        { "op": "status", "expect": { "cap": 200000000, "window_ms": 86400000, "remaining": 199000000 } },
+        { "op": "advance", "ms": 86400001 },
+        { "op": "set_limits", "window_ms": 3600000, "expect": {} },
+        { "op": "status", "expect": { "cap": 200000000, "window_ms": 3600000, "payments": 0 } }
+      ]
+    },
+    {
+      "name": "a paying process's own limits bind that process only",
+      "budget": { "cap": 150000000, "window_ms": 86400000, "per_payment": 50000000 },
+      "steps": [
+        { "op": "hold", "amount": 20000000, "limits": { "per_payment": 10000000 }, "expect": { "refused": "per_payment", "source": "process", "brief": "$20.00 is over the $10.00 limit per payment this process set" } },
+        { "op": "hold", "amount": 20000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 10000000, "limits": { "cap": 25000000, "window_ms": 3600000 }, "expect": { "refused": "budget", "source": "process", "brief": "$10.00 would bring 0xd797…ca02 to $30.00 in the last 1h, over the $25.00 limit this process set ($5.00 left)" } },
+        { "op": "hold", "amount": 5000000, "id": "b", "limits": { "cap": 25000000, "window_ms": 3600000 }, "expect": { "held": "b" } },
+        { "op": "advance", "ms": 3600001 },
+        { "op": "hold", "amount": 10000000, "id": "c", "limits": { "cap": 25000000, "window_ms": 3600000 }, "expect": { "held": "c" } },
+        { "op": "hold", "amount": 1000000, "limits": { "max_payments": 3 }, "expect": { "refused": "max_payments", "source": "process", "brief": "0xd797…ca02 already made 3 payments in the last 24h, the most this process allows" } },
+        { "op": "status", "expect": { "spent": 20000000, "in_flight": 15000000, "payments": 3 } }
+      ]
+    },
+    {
+      "name": "the owner's bulk release voids only what can no longer settle",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "a", "rail": "x402", "expect": { "held": "a" } },
+        { "op": "note", "id": "a", "outcome": "unknown", "evidence": "rpc timeout", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 20000000, "id": "b", "until_from_now": 7200000, "expect": { "held": "b" } },
+        { "op": "note", "id": "b", "outcome": "refused", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 30000000, "id": "c", "until_from_now": 600000, "expect": { "held": "c" } },
+        { "op": "note", "id": "c", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 40000000, "id": "d", "expect": { "held": "d" } },
+        { "op": "advance", "ms": 3600000 },
+        { "op": "void_unknown", "older_than_ms": 1800000, "expect": { "voided": ["c"] } },
+        { "op": "advance", "ms": 60001 },
+        { "op": "void_unknown", "older_than_ms": 1800000, "expect": { "voided": ["a"] } },
+        { "op": "advance", "ms": 3600000 },
+        { "op": "void_unknown", "older_than_ms": 1800000, "expect": { "voided": ["b"] } },
+        { "op": "holds", "expect": { "ids": ["d"] } },
+        { "op": "status", "expect": { "in_flight": 40000000, "payments": 1 } }
+      ]
+    },
+    {
+      "name": "an open hold learns its settle-by time once",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "bound", "id": "a", "within_ms": 300000, "expect": { "state": "held" } },
+        { "op": "bound", "id": "a", "within_ms": 3600000, "expect": { "state": "held" } },
+        { "op": "advance", "ms": 86700000 },
+        { "op": "status", "expect": { "in_flight": 50000000 } },
+        { "op": "advance", "ms": 1 },
+        { "op": "status", "expect": { "in_flight": 0 } },
+        { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "bound", "id": "b", "until_from_now": 0, "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "in_flight": 50000000 } }
+      ]
+    },
+    {
+      "name": "two payments of the most a budget holds count at once without overflow",
+      "budget": { "cap": 1000000000000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 1000000000000000, "id": "a", "until_from_now": 1, "expect": { "held": "a" } },
+        { "op": "advance", "ms": 86400002 },
+        { "op": "hold", "amount": 1000000000000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "settle", "id": "a", "expect": { "state": "settled" } },
+        { "op": "status", "expect": { "spent": 1000000000000000, "in_flight": 1000000000000000, "remaining": 0, "payments": 2 } },
+        { "op": "hold", "amount": 1, "expect": { "refused": "budget", "source": "budget", "brief": "$0.000001 would bring 0xd797…ca02 to $2,000,000,000.000001 in the last 24h, over its $1,000,000,000.00 limit ($0.00 left); $1,000,000,000.00 of it is 1 open payment" } }
+      ]
+    },
+    {
+      "name": "the bulk release takes a payment at exactly its until, or at exactly an hour and a minute",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "open", "rail": "x402", "expect": { "held": "open" } },
+        { "op": "note", "id": "open", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 10000000, "id": "bounded", "until_from_now": 1000, "expect": { "held": "bounded" } },
+        { "op": "note", "id": "bounded", "outcome": "refused", "expect": { "state": "held" } },
+        { "op": "advance", "ms": 999 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "advance", "ms": 1 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["bounded"] } },
+        { "op": "advance", "ms": 3658999 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "advance", "ms": 1 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["open"] } },
+        { "op": "status", "expect": { "in_flight": 0, "payments": 0 } }
+      ]
+    },
+    {
+      "name": "a voided id is spent: holding it again is refused",
+      "budget": { "cap": 10000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "order-17", "expect": { "held": "order-17" } },
+        { "op": "void", "id": "order-17", "expect": { "state": "void" } },
+        { "op": "hold", "amount": 10000000, "id": "x", "expect": { "held": "x" } },
+        { "op": "settle", "id": "x", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 10000000, "id": "order-17", "expect": { "error": "usage" } },
+        { "op": "settle", "id": "order-17", "as": "other", "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "spent": 10000000, "in_flight": 0, "payments": 1, "remaining": 0 } }
+      ]
+    },
+    {
+      "name": "a process without a payment's token can't move it; the owner can",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "error": "usage" } },
+        { "op": "void", "id": "a", "as": "other", "expect": { "error": "usage" } },
+        { "op": "note", "id": "a", "as": "other", "outcome": "unknown", "expect": { "error": "usage" } },
+        { "op": "bound", "id": "a", "as": "other", "within_ms": 300000, "expect": { "error": "usage" } },
+        { "op": "settle", "id": "a", "as": "other", "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "in_flight": 50000000, "payments": 1 } },
+        { "op": "void", "id": "a", "as": "owner", "evidence": "the chain shows it never moved", "expect": { "state": "void" } },
+        { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "settle", "id": "b", "expect": { "state": "settled" } },
+        { "op": "settle", "id": "b", "as": "other", "expect": { "error": "usage" } },
+        { "op": "void", "id": "b", "as": "owner", "expect": { "error": "usage" } },
+        { "op": "settle", "id": "a", "as": "owner", "evidence": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "expect": { "state": "settled" } },
+        { "op": "status", "expect": { "spent": 100000000, "in_flight": 0, "payments": 2 } }
+      ]
+    },
+    {
+      "name": "with no settle-by time, only an x402 hold is bulk-released after an hour and a minute",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "x402", "rail": "x402", "expect": { "held": "x402" } },
+        { "op": "note", "id": "x402", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 20000000, "id": "send", "rail": "awal", "expect": { "held": "send" } },
+        { "op": "note", "id": "send", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 30000000, "id": "pay", "rail": "js", "expect": { "held": "pay" } },
+        { "op": "note", "id": "pay", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "advance", "ms": 3660001 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["x402"] } },
+        { "op": "advance", "ms": 2592000000 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "holds", "expect": { "ids": ["send", "pay"] } },
+        { "op": "void", "id": "send", "as": "owner", "evidence": "the chain shows it was never mined", "expect": { "state": "void" } },
+        { "op": "holds", "expect": { "ids": ["pay"] } }
+      ]
+    },
+    {
+      "name": "an x402 hold's hour and a minute counts from its failure, when the wallet may last have signed",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "late", "rail": "awal-x402", "expect": { "held": "late" } },
+        { "op": "advance", "ms": 1800000 },
+        { "op": "note", "id": "late", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "advance", "ms": 1860000 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "advance", "ms": 1799999 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "status", "expect": { "in_flight": 10000000, "payments": 1 } },
+        { "op": "advance", "ms": 1 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["late"] } },
+        { "op": "status", "expect": { "in_flight": 0, "payments": 0 } }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Publish server.json to the official MCP Registry (registry.modelcontextprotocol.io), by hand.
 # Run it once the npm release that server.json names is out: the registry checks that
-# walletcap@<version> on npm carries "mcpName": "io.github.coriolislabs/walletcap".
+# walletcap-mcp@<version> on npm carries "mcpName": "io.github.coriolislabs/walletcap".
 # GitHub OIDC proves the io.github.coriolislabs namespace, so no token is stored.
 # (mcp-publisher's interactive GitHub login can't publish to an organization namespace.)
 name: MCP Registry
@@ -23,9 +23,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Check server.json names the npm package's version and mcpName
         run: |
-          test "$(jq -r .version server.json)" = "$(jq -r .version js/package.json)"
-          test "$(jq -r '.packages[0].version' server.json)" = "$(jq -r .version js/package.json)"
-          test "$(jq -r .name server.json)" = "$(jq -r .mcpName js/package.json)"
+          test "$(jq -r .version packages/mcp/server.json)" = "$(jq -r .version packages/mcp/package.json)"
+          test "$(jq -r '.packages[0].version' packages/mcp/server.json)" = "$(jq -r .version packages/mcp/package.json)"
+          test "$(jq -r '.packages[0].identifier' packages/mcp/server.json)" = "$(jq -r .name packages/mcp/package.json)"
+          test "$(jq -r .name packages/mcp/server.json)" = "$(jq -r .mcpName packages/mcp/package.json)"
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Download mcp-publisher and verify its Sigstore bundle
         run: |
@@ -44,4 +45,5 @@ jobs:
       - name: Log in to the registry with GitHub OIDC
         run: ./mcp-publisher login github-oidc
       - name: Publish server.json
-        run: ./mcp-publisher publish
+        working-directory: packages/mcp
+        run: ../../mcp-publisher publish

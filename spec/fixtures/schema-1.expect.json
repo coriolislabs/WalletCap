@@ -1,0 +1,497 @@
+{
+  "made": "walletcap 0.3.0 counted these after opening the file",
+  "T0": 1800000000000,
+  "probes": [
+    {
+      "at": 1800000000000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 30000000,
+          "remaining": 70000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-d"
+          ]
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 110000000,
+          "inFlight": 20000000,
+          "remaining": 20000000,
+          "payments": 3,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 2500000,
+          "inFlight": 0,
+          "remaining": 22500000,
+          "payments": 1,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    },
+    {
+      "at": 1800000360000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 30000000,
+          "remaining": 70000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-d"
+          ]
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 110000000,
+          "inFlight": 20000000,
+          "remaining": 20000000,
+          "payments": 3,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 2500000,
+          "inFlight": 0,
+          "remaining": 22500000,
+          "payments": 1,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    },
+    {
+      "at": 1800003660000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 30000000,
+          "remaining": 70000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-d"
+          ]
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 110000000,
+          "inFlight": 20000000,
+          "remaining": 20000000,
+          "payments": 3,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 2500000,
+          "inFlight": 0,
+          "remaining": 22500000,
+          "payments": 1,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    },
+    {
+      "at": 1800085740000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 30000000,
+          "remaining": 70000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-d"
+          ]
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 10000000,
+          "inFlight": 20000000,
+          "remaining": 120000000,
+          "payments": 2,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 2500000,
+          "inFlight": 0,
+          "remaining": 22500000,
+          "payments": 1,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    },
+    {
+      "at": 1800093600000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 100000000,
+          "payments": 0,
+          "frozen": false,
+          "holds": []
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 0,
+          "inFlight": 20000000,
+          "remaining": 130000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 25000000,
+          "payments": 0,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    },
+    {
+      "at": 1800259260000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 100000000,
+          "payments": 0,
+          "frozen": false,
+          "holds": []
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 0,
+          "inFlight": 20000000,
+          "remaining": 130000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 25000000,
+          "payments": 0,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    },
+    {
+      "at": 1802592000000,
+      "budgets": {
+        "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": {
+          "cap": 100000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 100000000,
+          "payments": 0,
+          "frozen": false,
+          "holds": []
+        },
+        "0xd797ead28c38575fdf4fc523866287372340ca02": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 0,
+          "payments": 0,
+          "frozen": true,
+          "holds": []
+        },
+        "0x4165cb72de51a67aac32dc33197d779552205efd": {
+          "cap": 150000000,
+          "window": 86400000,
+          "perPayment": 50000000,
+          "maxPayments": 10,
+          "spent": 0,
+          "inFlight": 20000000,
+          "remaining": 130000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-b"
+          ]
+        },
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": {
+          "cap": 50000000,
+          "window": 86400000,
+          "perPayment": null,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 5000000,
+          "remaining": 45000000,
+          "payments": 1,
+          "frozen": false,
+          "holds": [
+            "spend-f"
+          ]
+        },
+        "card-visa-4242": {
+          "cap": 25000000,
+          "window": 86400000,
+          "perPayment": 10000000,
+          "maxPayments": null,
+          "spent": 0,
+          "inFlight": 0,
+          "remaining": 25000000,
+          "payments": 0,
+          "frozen": false,
+          "holds": []
+        }
+      }
+    }
+  ]
+}

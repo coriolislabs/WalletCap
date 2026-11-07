@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "workspaces": [
+    "packages/js",
+    "packages/mcp",
+    "bench/crash-test",
+    "contracts/evm"
+  ],
+  "scripts": {
+    "build": "npm run build -w walletcap -w walletcap-mcp",
+    "test": "npm test -w walletcap -w walletcap-mcp",
+    "lint": "biome check"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.2"
+  }
+}

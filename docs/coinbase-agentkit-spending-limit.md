@@ -1,14 +1,14 @@
 ---
 title: Coinbase AgentKit spending limit
-description: "Limit what a Coinbase AgentKit agent pays over x402. budget.guardAgentKit() checks every payment against a per-payment and 24-hour budget before it is signed."
+description: "Limit what a Coinbase AgentKit agent pays over x402. guardAgentKit() from walletcap/agentkit checks every payment against a per-payment and 24-hour budget before it is signed."
 ---
 
 # Coinbase AgentKit spending limit
 
 Your AgentKit agent pays for resources through AgentKit's x402 actions, and you want a limit in
 dollars, per payment and per day, on what it can sign. AgentKit's x402 actions build their own
-x402 client on every call. `budget.guardAgentKit()` puts the budget on every client the provider
-builds, so each payment is checked against the wallet's budget before it is signed, whatever
+x402 client on every call. `guardAgentKit()` from `walletcap/agentkit` puts the budget on every
+client the provider builds, so each payment is checked against the wallet's budget before it is signed, whatever
 terms the merchant sends.
 
 ## Add it in 3 lines
@@ -21,9 +21,10 @@ $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 0.02 --per-day 1
 ```js
 import { X402ActionProvider } from '@coinbase/agentkit';
 import { openBudget } from 'walletcap';
+import { guardAgentKit } from 'walletcap/agentkit';
 
-const budget = openBudget({ wallet: '0xYourAgentWallet' }); // the budget `walletcap set` created
-const x402 = budget.guardAgentKit(new X402ActionProvider());
+const budget = await openBudget({ wallet: '0xYourAgentWallet' }); // the budget `walletcap set` created
+const x402 = guardAgentKit(new X402ActionProvider(), budget);
 // AgentKit.from({ walletProvider, actionProviders: [x402] })
 ```
 
@@ -64,9 +65,9 @@ AgentKit 0.10.4: signed $1.00 on Base mainnet, reported $0.01 on Base Sepolia; w
 ## Links
 
 - [README: Coinbase AgentKit](https://github.com/coriolislabs/WalletCap#coinbase-agentkit)
-- Tests: [agentkit.test.mjs](https://github.com/coriolislabs/WalletCap/blob/main/js/tests/agentkit.test.mjs)
-  and the type-checked [recipe](https://github.com/coriolislabs/WalletCap/blob/main/js/tests/types/recipe.ts)
-- [The crash test](https://github.com/coriolislabs/WalletCap/tree/main/crash-test), which says
+- Tests: [agentkit.test.mjs](https://github.com/coriolislabs/WalletCap/blob/main/packages/js/test/agentkit.test.mjs)
+  and the type-checked [recipe](https://github.com/coriolislabs/WalletCap/blob/main/packages/js/test/types/recipe.ts)
+- [The crash test](https://github.com/coriolislabs/WalletCap/tree/main/bench/crash-test), which says
   exactly what runs, and [all pages](index.md)
 - Other stacks: [any x402 client](x402-spending-limit.md),
   [Coinbase CDP x402 spend controls](coinbase-cdp-spend-controls.md),
