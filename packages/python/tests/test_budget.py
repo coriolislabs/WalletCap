@@ -561,6 +561,21 @@ def _cli(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_the_python_cli_writes_utf8_whatever_the_console_encoding(tmp_path: Path) -> None:
+    # A Windows console's code page isn't UTF-8; the summary's … and · must still arrive as the
+    # npm CLI writes them.
+    path = tmp_path / "utf8.sqlite"
+    open_budget(WALLET, path=path, per_day="$150", create=True).close()
+    result = subprocess.run(
+        [sys.executable, "-m", "walletcap", "--path", str(path), "status"],
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(SOURCE), "PYTHONIOENCODING": "cp1252"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "0xd797…ca02".encode() in result.stdout
+
+
 def test_the_python_cli_sets_reads_and_freezes(tmp_path: Path) -> None:
     path = tmp_path / "cli.sqlite"
     assert "No budget in" in _cli(path).stdout

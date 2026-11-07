@@ -411,7 +411,17 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace, Path], str]] = {
 }
 
 
+def _utf8(stream: object) -> None:
+    """Write UTF-8, as the npm CLI does, whatever the console's code page."""
+
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(encoding="utf-8")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _utf8(sys.stdout)
+    _utf8(sys.stderr)
     args = _parser().parse_args(argv)
     path = expand_home(args.path if args.path is not None else default_budget_path()).absolute()
     try:
