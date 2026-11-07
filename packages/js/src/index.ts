@@ -14,4 +14,4 @@ export type { Outcome, PaymentState } from './core/ledger.js';
 export { defaultBudgetPath, formatUsd, MAX_AMOUNT, toMicros } from './core/money.js';
 export type { Dollars, LimitOptions, Micros, Window } from './core/money.js';
 export { openOwner, Owner } from './core/owner.js';
-export type { BudgetLimits, OwnerOptions } from './core/owner.js';
+export type { BudgetLimits, OwnerOptions, VoidedPayment } from './core/owner.js';

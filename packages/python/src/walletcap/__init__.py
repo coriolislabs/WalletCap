@@ -18,9 +18,11 @@ from walletcap.budget import (
     Check,
     HeldPayment,
     Hold,
+    Outcome,
     Paying,
     Payment,
     PaymentRecord,
+    PaymentState,
     Status,
     open_budget,
 )
@@ -30,9 +32,19 @@ from walletcap.errors import (
     BudgetWarning,
     NotSent,
     PaymentNotRecorded,
+    RefusalCode,
+    RefusalSource,
     UsageError,
 )
-from walletcap.money import MAX_AMOUNT, Micros, default_budget_path, format_usd, to_micros
+from walletcap.money import (
+    MAX_AMOUNT,
+    Dollars,
+    Micros,
+    Window,
+    default_budget_path,
+    format_usd,
+    to_micros,
+)
 from walletcap.owner import BudgetLimits, Owner, VoidedPayment, open_owner
 
 __version__ = "0.4.0"
@@ -47,18 +59,24 @@ __all__ = [
     "BudgetUnavailable",
     "BudgetWarning",
     "Check",
+    "Dollars",
     "HeldPayment",
     "Hold",
     "Micros",
     "NotSent",
+    "Outcome",
     "Owner",
     "Paying",
     "Payment",
     "PaymentNotRecorded",
     "PaymentRecord",
+    "PaymentState",
+    "RefusalCode",
+    "RefusalSource",
     "Status",
     "UsageError",
     "VoidedPayment",
+    "Window",
     "__version__",
     "default_budget_path",
     "format_usd",

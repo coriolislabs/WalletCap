@@ -24,7 +24,7 @@ Each entry point, and the names it exports. Exported TypeScript types are public
 
 | Entry point | Exports |
 |---|---|
-| `walletcap` | `openBudget`, `Budget`, `Hold`, `openOwner`, `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `notSent`, `toMicros`, `formatUsd`, `defaultBudgetPath`, `MAX_AMOUNT`, `SCHEMA_VERSION`, `MIN_SQLITE_VERSION`; types `BudgetOptions`, `HoldOptions`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`, `OwnerOptions`, `LimitOptions`, `Dollars`, `Micros`, `Window`, `RefusalCode`, `RefusalSource`, `Outcome`, `PaymentState`, `NotSent` |
+| `walletcap` | `openBudget`, `Budget`, `Hold`, `openOwner`, `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `notSent`, `toMicros`, `formatUsd`, `defaultBudgetPath`, `MAX_AMOUNT`, `SCHEMA_VERSION`, `MIN_SQLITE_VERSION`; types `BudgetOptions`, `HoldOptions`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`, `VoidedPayment`, `OwnerOptions`, `LimitOptions`, `Dollars`, `Micros`, `Window`, `RefusalCode`, `RefusalSource`, `Outcome`, `PaymentState`, `NotSent` |
 | `walletcap/x402` | `guard`, `MAX_PAYMENT_TIMEOUT_SECONDS`, `USD_ASSETS`; types `AssetEntry`, `PaymentRequirements`, `PaymentContext`, `X402HookedClient` |
 | `walletcap/cdp` | `cdpStore`; types `SpendStore`, `SpendLedgerEntry` |
 | `walletcap/agentkit` | `guardAgentKit`; type `AssetEntry` |
@@ -38,13 +38,24 @@ dependencies, and adding one is a breaking change.
 Every name in `walletcap.__all__`: `open_budget`, `Budget`, `Hold`, `Paying`, `open_owner`,
 `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `NotSent`,
 `BudgetWarning`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`,
-`VoidedPayment`, `Micros`, `to_micros`, `format_usd`, `default_budget_path`, `MAX_AMOUNT`,
-`SCHEMA_VERSION`, `MIN_SQLITE_VERSION` and `__version__`. The package has no dependencies.
+`VoidedPayment`, `Micros`, `Dollars`, `Window`, `RefusalCode`, `RefusalSource`, `PaymentState`,
+`Outcome`, `to_micros`, `format_usd`, `default_budget_path`, `MAX_AMOUNT`, `SCHEMA_VERSION`,
+`MIN_SQLITE_VERSION` and `__version__`. The package has no dependencies.
 
 The Python names match the JavaScript ones, in Python's naming convention: `open_budget` for
 `openBudget`, `set_limits` for `setLimits`, `void_unknown` for `voidUnknown`, `payment_id` for
-`paymentId`. The async forms of the payer's methods are `acheck`, `ahold`, `astatus`, `aholds`
-and `ahistory`, and a hold's are `asettle`, `avoid` and `anote`.
+`paymentId`, `windowMs` for `window_ms`, `busyTimeoutMs` for `busy_timeout_ms` (milliseconds in
+both). The async forms of the payer's methods are `acheck`, `ahold`, `astatus`, `aholds` and
+`ahistory`, and a hold's are `asettle`, `avoid`, `asettles_by`, `asettles_within` and `anote`.
+Where a value's type differs, each takes its language's own: a hold's `settlesWithin` is
+milliseconds in JavaScript and a `timedelta` in Python, and `settlesBy` a `Date` or milliseconds
+in JavaScript and an aware `datetime` in Python. `code`, `source`, `state` and `outcome` are
+string unions in JavaScript and `Literal` types in Python, with the same values.
+[spec/vectors/names.json](spec/vectors/names.json) lists the names, fields, options and values
+the two share, and both test suites check their package against it. Each package also has a few
+of its own: npm's `notSent()` and the option types (`BudgetOptions`, `HoldOptions`,
+`OwnerOptions`, `LimitOptions`); Python's `NotSent`, `BudgetWarning`, `Paying` and a hold's
+writable `tx` inside `with budget.pay(...)`.
 
 ### Amounts
 

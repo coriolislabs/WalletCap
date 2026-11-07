@@ -202,13 +202,13 @@ interface SignedPayload {
 // authorization's validBefore or a Permit2 deadline (x402's exact and upto schemes, and the
 // escrow's), or else its terms' validity from now, the ledger's own time, which is after it was
 // signed (settlesWithinSeconds).
-const settlesBy = (payload: SignedPayload | undefined, requirements: PaymentRequirements): { settlesBy?: bigint; settlesWithinMs?: bigint } => {
+const settlesBy = (payload: SignedPayload | undefined, requirements: PaymentRequirements): { settlesBy?: bigint; settlesWithin?: bigint } => {
   const signed = payload?.payload;
   const expiries = [unixMs(signed?.authorization?.validBefore), unixMs(signed?.permit2Authorization?.deadline)].filter((ms): ms is bigint => ms !== null);
   // biome-ignore lint/complexity/useMathMinMax: these are bigints, which Math.max refuses
   if (expiries.length > 0) return { settlesBy: expiries.reduce((latest, ms) => (ms > latest ? ms : latest)) };
   const within = settlesWithinSeconds(payload?.accepted ?? requirements);
-  return within === null ? {} : { settlesWithinMs: BigInt(within) * 1000n };
+  return within === null ? {} : { settlesWithin: BigInt(within) * 1000n };
 };
 
 // The payment's identity on its rail, when the signed payload carries one: an EIP-3009
@@ -318,7 +318,7 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     // An early refusal, before anything is signed. The hold that binds comes after. The
     // agent is told why, not which holds its owner could void: that is for the owner's CLI.
     const check = await budget.check(amount);
-    if (!check.ok) throw new BudgetRefused(check.code ?? 'budget', check.brief ?? check.message ?? 'refused');
+    if (!check.ok) throw new BudgetRefused(check.code ?? 'budget', check.brief ?? check.message ?? 'refused', { source: check.source ?? 'budget' });
     // The policy above has already set aside longer terms; this holds for a client without one.
     const tooLong = timeoutRefusal(context.selectedRequirements);
     if (tooLong !== null) throw tooLong;
@@ -357,7 +357,7 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     const slot = context[SLOT] as Slot | undefined;
     if (slot?.hold?.state === 'held' && slot.hold.created) {
       forget(slot.payload);
-      await slot.hold.void({ reason: 'not sent: a later x402 hook failed' });
+      await slot.hold.void({ evidence: 'not sent: a later x402 hook failed' });
     }
     return undefined;
   });

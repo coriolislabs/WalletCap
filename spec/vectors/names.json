@@ -1,0 +1,48 @@
+{
+  "about": "The public names both packages share, in JavaScript's spelling. Python's is the same name in snake_case (openBudget is open_budget, windowMs is window_ms); class names and UPPER_CASE constants are spelled the same. Both suites check their package against this list: packages/js/test/names.test.mjs and packages/python/tests/test_names.py. STABILITY.md says what else each package has of its own.",
+  "exports": [
+    "openBudget", "Budget", "Hold", "openOwner", "Owner",
+    "BudgetUnavailable", "BudgetRefused", "PaymentNotRecorded", "UsageError",
+    "toMicros", "formatUsd", "defaultBudgetPath",
+    "MAX_AMOUNT", "SCHEMA_VERSION", "MIN_SQLITE_VERSION"
+  ],
+  "methods": {
+    "Budget": ["check", "hold", "pay", "status", "history", "holds", "close"],
+    "Hold": ["settle", "void", "settlesBy", "settlesWithin", "note"],
+    "Owner": ["budgets", "status", "history", "holds", "payment", "setLimits", "freeze", "unfreeze", "void", "settle", "voidUnknown", "close"]
+  },
+  "properties": {
+    "Budget": ["wallet", "path"],
+    "Hold": ["id", "amount", "state", "created"],
+    "Owner": ["path"],
+    "Status": ["summary"]
+  },
+  "fields": {
+    "Check": ["ok", "remaining", "code", "source", "message", "brief"],
+    "Status": ["wallet", "path", "cap", "windowMs", "perPayment", "maxPayments", "spent", "inFlight", "remaining", "payments", "frozen"],
+    "Payment": ["id", "amount", "status", "counting", "at", "rail", "to", "note", "tx"],
+    "PaymentRecord": ["id", "amount", "status", "counting", "at", "rail", "to", "note", "tx", "wallet", "state", "settlesBy", "countsUntil"],
+    "HeldPayment": ["id", "amount", "reason", "at", "ageMs", "settlesBy", "countsUntil", "rail", "to", "note", "error"],
+    "BudgetLimits": ["wallet", "unit", "cap", "windowMs", "perPayment", "maxPayments", "frozen"],
+    "VoidedPayment": ["id", "amount"]
+  },
+  "errors": {
+    "BudgetRefused": ["code", "brief", "source"],
+    "PaymentNotRecorded": ["paymentId", "cause"]
+  },
+  "options": {
+    "openBudget": ["wallet", "path", "create", "perPayment", "perHour", "perDay", "perWeek", "cap", "window", "maxPayments", "busyTimeoutMs", "onWarning"],
+    "openOwner": ["path", "create", "busyTimeoutMs"],
+    "hold": ["id", "to", "note", "details", "rail", "settlesBy", "settlesWithin"],
+    "setLimits": ["perPayment", "perHour", "perDay", "perWeek", "cap", "window", "maxPayments"],
+    "void": ["evidence"],
+    "settle": ["evidence"],
+    "voidUnknown": ["olderThan"]
+  },
+  "values": {
+    "RefusalCode": ["budget", "per_payment", "max_payments", "frozen", "asset", "timeout", "terms"],
+    "RefusalSource": ["budget", "process"],
+    "PaymentState": ["held", "settled", "void"],
+    "Outcome": ["unknown", "refused"]
+  }
+}

@@ -13,7 +13,7 @@ for (;;) {
   const open = Math.random() < 0.1;
   let hold;
   try {
-    hold = await budget.hold(amount, open ? {} : { settlesWithinMs: random(200, 1700) });
+    hold = await budget.hold(amount, open ? {} : { settlesWithin: random(200, 1700) });
   } catch (error) {
     if (!expected(error)) throw error;
     await new Promise(done => setTimeout(done, 5));
@@ -23,7 +23,7 @@ for (;;) {
     if (open) await hold.settlesWithin(random(200, 1700));
     const roll = Math.random();
     if (roll < 0.5) await hold.settle({ tx: `0x${random(0, 0xffffff).toString(16).padStart(64, '0')}` });
-    else if (roll < 0.7) await hold.void({ reason: 'race: not sent' });
+    else if (roll < 0.7) await hold.void({ evidence: 'race: not sent' });
     else if (roll < 0.85) await hold.note('unknown', 'race');
   } catch (error) {
     if (!(error instanceof BudgetUnavailable)) throw error;

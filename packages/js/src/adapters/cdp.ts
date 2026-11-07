@@ -130,7 +130,7 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
       const key = fingerprint(entry);
       let held: Hold;
       try {
-        held = await budget.hold(spend, { rail: RAIL, details: JSON.parse(key) as Record<string, unknown>, settlesWithinMs: SETTLES_WITHIN_MS });
+        held = await budget.hold(spend, { rail: RAIL, details: JSON.parse(key) as Record<string, unknown>, settlesWithin: SETTLES_WITHIN_MS });
       } catch (error) {
         throw forAgent(error); // CDP passes it on to the agent: no hold ids, no void instructions
       }

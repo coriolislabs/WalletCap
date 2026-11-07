@@ -8,6 +8,17 @@ package has the same four.
 
 from __future__ import annotations
 
+from typing import Literal
+
+RefusalCode = Literal[
+    "budget", "per_payment", "max_payments", "frozen", "asset", "timeout", "terms"
+]
+"""Which limit refused: the ledger's ``budget`` (the rolling cap), ``per_payment``,
+``max_payments`` and ``frozen``, or an adapter's ``asset``, ``timeout`` and ``terms``."""
+
+RefusalSource = Literal["budget", "process"]
+"""Whose limit refused: the owner's (``budget``) or the paying process's own (``process``)."""
+
 
 class BudgetUnavailable(Exception):  # noqa: N818 - the same name as in JavaScript
     """The budget can't be read or written.
@@ -29,12 +40,17 @@ class BudgetRefused(Exception):  # noqa: N818 - the same name as in JavaScript
     """
 
     def __init__(
-        self, code: str, message: str, *, brief: str | None = None, source: str = "budget"
+        self,
+        code: RefusalCode,
+        message: str,
+        *,
+        brief: str | None = None,
+        source: RefusalSource = "budget",
     ) -> None:
         super().__init__(message)
-        self.code = code
+        self.code: RefusalCode = code
         self.brief = message if brief is None else brief
-        self.source = source
+        self.source: RefusalSource = source
 
 
 class PaymentNotRecorded(Exception):  # noqa: N818 - the same name as in JavaScript

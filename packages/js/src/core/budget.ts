@@ -11,7 +11,7 @@
 // tighten things for its own process, and if the count cannot be read, nothing is paid.
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, UsageError } from './errors.js';
+import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, UsageError } from './errors.js';
 import {
   type BudgetRow, Ledger, mergedNoteOf, OPEN, type Outcome, type PaymentRow, type PaymentState, type ProcessLimits, type StatusRow,
   heldElsewhere,
@@ -33,7 +33,7 @@ export function ledgerOf(budget: Budget): Ledger {
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
 const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
-const HOLD_KEYS = new Set(['id', 'to', 'note', 'details', 'rail', 'settlesBy', 'settlesWithinMs']);
+const HOLD_KEYS = new Set(['id', 'to', 'note', 'details', 'rail', 'settlesBy', 'settlesWithin']);
 const TO_LIMIT = 256;
 const NOTE_LIMIT = 1024;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -57,12 +57,16 @@ export interface BudgetOptions extends LimitOptions {
 /** Whether an amount would be paid right now. */
 export interface Check {
   ok: boolean;
-  code?: RefusalCode;
-  message?: string;
-  /** The message without the ids of open payments or what their owner can do about them. */
-  brief?: string;
   /** Micro-dollars left in the window. */
   remaining: Micros;
+  /** Which limit would refuse, or null when the payment would be paid. */
+  code: RefusalCode | null;
+  /** Whose limit: the owner's ('budget') or this process's own ('process'); null when ok. */
+  source: RefusalSource | null;
+  /** The refusal, with the ids of the open payments that take up the room; null when ok. */
+  message: string | null;
+  /** The message without the ids of open payments or what their owner can do about them. */
+  brief: string | null;
 }
 
 /** A payment's identity, what it is for, and how long it can still settle. */
@@ -86,7 +90,7 @@ export interface HoldOptions {
    */
   settlesBy?: Date | number | bigint;
   /** The same, as a time from now by the ledger's clock, in milliseconds. */
-  settlesWithinMs?: number | bigint;
+  settlesWithin?: number | bigint;
 }
 
 /** What has been spent, what is in flight and what is left. Amounts are micro-dollars. */
@@ -95,7 +99,7 @@ export interface Status {
   path: string;
   cap: Micros;
   /** Milliseconds. */
-  window: bigint;
+  windowMs: bigint;
   perPayment: Micros | null;
   maxPayments: bigint | null;
   /** Settled payments that count in the window. */
@@ -118,9 +122,9 @@ export interface Payment {
   counting: boolean;
   at: Date;
   rail: string;
-  to?: string;
-  note?: string;
-  tx?: string;
+  to: string | null;
+  note: string | null;
+  tx: string | null;
 }
 
 /** A held payment that still counts against the budget. */
@@ -140,9 +144,9 @@ export interface HeldPayment {
   /** When it stops counting, or null if only evidence ends it. */
   countsUntil: Date | null;
   rail: string;
-  to?: string;
-  note?: string;
-  error?: string;
+  to: string | null;
+  note: string | null;
+  error: string | null;
 }
 
 /** One payment as its owner sees it. */
@@ -228,16 +232,17 @@ const noteOf = (info: Info): string | undefined => textOf(info.note) ?? (info.ne
 /** Internal: a history row as a Payment. */
 export function paymentOf(row: PaymentRow): Payment {
   const info = parseInfo(row.info);
-  const payment: Payment = {
-    id: row.payment, amount: row.amount, status: label(row, info), counting: row.counting === 1n, at: new Date(Number(row.held_at)), rail: row.rail,
+  return {
+    id: row.payment,
+    amount: row.amount,
+    status: label(row, info),
+    counting: row.counting === 1n,
+    at: new Date(Number(row.held_at)),
+    rail: row.rail,
+    to: textOf(info.to) ?? textOf(info.payTo) ?? null,
+    note: noteOf(info) ?? null,
+    tx: row.settled_by ?? textOf(info.tx) ?? null,
   };
-  const to = textOf(info.to) ?? textOf(info.payTo);
-  const note = noteOf(info);
-  const tx = row.settled_by ?? textOf(info.tx);
-  if (to !== undefined) payment.to = to;
-  if (note !== undefined) payment.note = note;
-  if (tx !== undefined) payment.tx = tx;
-  return payment;
 }
 
 /** Internal: a payment row as its owner sees it. */
@@ -248,7 +253,7 @@ export function recordOf(row: PaymentRow): PaymentRecord {
 /** Internal: a counting row of a held payment. */
 export function heldPaymentOf(row: PaymentRow): HeldPayment {
   const info = parseInfo(row.info);
-  const held: HeldPayment = {
+  return {
     id: row.payment,
     amount: row.amount,
     reason: row.outcome ?? 'in flight',
@@ -257,14 +262,10 @@ export function heldPaymentOf(row: PaymentRow): HeldPayment {
     settlesBy: settlesByOf(row),
     countsUntil: countsUntilOf(row),
     rail: row.rail,
+    to: textOf(info.to) ?? textOf(info.payTo) ?? null,
+    note: noteOf(info) ?? null,
+    error: row.noted ?? textOf(info.error) ?? null,
   };
-  const to = textOf(info.to) ?? textOf(info.payTo);
-  const note = noteOf(info);
-  const error = row.noted ?? textOf(info.error);
-  if (to !== undefined) held.to = to;
-  if (note !== undefined) held.note = note;
-  if (error !== undefined) held.error = error;
-  return held;
 }
 
 /** Internal: a status row as a Status. */
@@ -273,7 +274,7 @@ export function statusOf(row: StatusRow, path: string): Status {
     wallet: row.wallet,
     path,
     cap: row.cap,
-    window: row.window_ms,
+    windowMs: row.window_ms,
     perPayment: row.per_payment,
     maxPayments: row.max_payments,
     spent: row.spent,
@@ -285,11 +286,11 @@ export function statusOf(row: StatusRow, path: string): Status {
   return { ...status, summary: summarize(status) };
 }
 
-function summarize({ wallet, cap, window, perPayment, maxPayments, spent, inFlight, remaining, frozen }: Omit<Status, 'summary' | 'path' | 'payments'>): string {
-  const parts = [`${shortWallet(wallet)}: ${formatUsd(spent)} spent of ${formatUsd(cap)} per ${formatWindow(window)}, ${formatUsd(remaining)} left`];
+function summarize({ wallet, cap, windowMs, perPayment, maxPayments, spent, inFlight, remaining, frozen }: Omit<Status, 'summary' | 'path' | 'payments'>): string {
+  const parts = [`${shortWallet(wallet)}: ${formatUsd(spent)} spent of ${formatUsd(cap)} per ${formatWindow(windowMs)}, ${formatUsd(remaining)} left`];
   if (inFlight > 0n) parts.push(`${formatUsd(inFlight)} in flight`);
   if (perPayment !== null) parts.push(`at most ${formatUsd(perPayment)} a payment`);
-  if (maxPayments !== null) parts.push(`at most ${maxPayments} payments per ${formatWindow(window)}`);
+  if (maxPayments !== null) parts.push(`at most ${maxPayments} payments per ${formatWindow(windowMs)}`);
   if (frozen) parts.push('FROZEN');
   return parts.join(' · ');
 }
@@ -393,8 +394,8 @@ export class Hold {
   }
 
   /** The payment never left the wallet, and never will: it stops counting. A settled payment can't be voided. */
-  async void({ reason }: { reason?: string | undefined } = {}): Promise<void> {
-    this.#state = (await this.#ledger.void(this.#id, { evidence: reason ?? 'not sent', holder: this.#token('void') })).state;
+  async void({ evidence }: { evidence?: string | undefined } = {}): Promise<void> {
+    this.#state = (await this.#ledger.void(this.#id, { evidence: evidence ?? 'not sent', holder: this.#token('void') })).state;
   }
 
   /** The last moment the payment could still settle, after now. A hold learns it once. */
@@ -486,8 +487,8 @@ export class Budget {
   async check(amount: Dollars): Promise<Check> {
     const { refusal, remaining } = await this.#ledger.check(this.#wallet, positive(toMicros(amount)), { limits: this.#limits });
     return refusal === null
-      ? { ok: true, remaining }
-      : { ok: false, code: refusal.code, message: refusal.message, brief: refusal.brief, remaining };
+      ? { ok: true, remaining, code: null, source: null, message: null, brief: null }
+      : { ok: false, remaining, code: refusal.code, source: refusal.source, message: refusal.message, brief: refusal.brief };
   }
 
   /**
@@ -498,7 +499,7 @@ export class Budget {
    */
   async hold(amount: Dollars, options: HoldOptions = {}): Promise<Hold> {
     checkKeys(options, HOLD_KEYS, 'hold');
-    const { to, note, details, rail = 'js', settlesBy, settlesWithinMs, id } = options;
+    const { to, note, details, rail = 'js', settlesBy, settlesWithin, id } = options;
     const micros = positive(toMicros(amount));
     const info = describe(to, note, details);
     const held = await this.#ledger.hold(this.#wallet, micros, {
@@ -506,7 +507,7 @@ export class Budget {
       rail,
       info: info === null ? null : JSON.stringify(info),
       until: settlesBy === undefined || settlesBy === null ? null : momentMs(settlesBy, 'settlesBy'),
-      withinMs: settlesWithinMs === undefined || settlesWithinMs === null ? null : durationMs(settlesWithinMs, 'settlesWithinMs'),
+      withinMs: settlesWithin === undefined || settlesWithin === null ? null : durationMs(settlesWithin, 'settlesWithin'),
       limits: this.#limits,
     });
     return new Hold(this.#ledger, held.payment, micros, held.state, held.created, held.holder);
@@ -530,7 +531,7 @@ export class Budget {
     } catch (error) {
       if (hold.state === 'held') {
         try {
-          if (isNotSent(error)) await hold.void({ reason: `not sent: ${errorText(error)}` });
+          if (isNotSent(error)) await hold.void({ evidence: `not sent: ${errorText(error)}` });
           else await hold.note('unknown', errorText(error));
         } catch {
           // Recording failed; the payment stays held, and keeps counting.

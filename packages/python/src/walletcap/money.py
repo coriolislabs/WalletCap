@@ -239,6 +239,13 @@ class Micros:
         return str(self._value)
 
 
+Dollars = str | int | float | Decimal | Micros
+"""An amount: a string ("$12.50", "12.50 USDC"), an int of whole dollars, a float or Decimal of
+dollars, or a Micros of micro-dollars."""
+
+Window = str | int
+"""A rolling window: "24h", "7d", "30m", "day", or an int of milliseconds."""
+
 MICROS: Final = 1_000_000
 MAX_AMOUNT: Final = Micros(10**15)
 """The most a budget, a limit or one payment can be, in the budget's own unit.

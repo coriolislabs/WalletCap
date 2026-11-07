@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from walletcap import _clock
-from walletcap.errors import BudgetRefused, BudgetUnavailable, UsageError
+from walletcap.errors import BudgetRefused, BudgetUnavailable, RefusalCode, UsageError
 from walletcap.money import (
     MAX_AMOUNT,
     Micros,
@@ -311,7 +311,7 @@ def refusal(
     code = why["code"]
     source = why["source"]
 
-    def refused(code: str, message: str, brief: str | None = None) -> BudgetRefused:
+    def refused(code: RefusalCode, message: str, brief: str | None = None) -> BudgetRefused:
         return BudgetRefused(code, message, brief=brief, source=source)
 
     if code == "frozen":
@@ -392,12 +392,16 @@ class Ledger:
     """
 
     def __init__(
-        self, path: str | Path, *, busy_timeout_seconds: float = 30.0, create: bool = False
+        self, path: str | Path, *, busy_timeout_ms: int = 30_000, create: bool = False
     ) -> None:
-        if not busy_timeout_seconds > 0:
-            raise UsageError("busy_timeout_seconds must be positive")
+        if (
+            isinstance(busy_timeout_ms, bool)
+            or not isinstance(busy_timeout_ms, int)
+            or busy_timeout_ms <= 0
+        ):
+            raise UsageError("busy_timeout_ms must be a positive integer")
         self._path = Path(path)
-        self._busy_timeout = float(busy_timeout_seconds)
+        self._busy_timeout = busy_timeout_ms / 1000  # sqlite3.connect takes seconds
         self._names: dict[str, list[str]] = {}
         if not self._path.exists():
             if not create:

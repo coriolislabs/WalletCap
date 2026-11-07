@@ -194,7 +194,7 @@ def _set(args: argparse.Namespace, path: Path) -> str:
         if not count.isascii() or not count.isdigit() or len(count.lstrip("0")) > _INT64_DIGITS:
             raise UsageError("--max-payments must be a whole number of payments, or none")
         max_payments = int(count)
-    limits: dict[str, object] = {
+    limits: dict[str, Any] = {
         "per_payment": none(args.per_payment),
         "per_hour": args.per_hour,
         "per_day": args.per_day,

@@ -30,7 +30,7 @@ while True:
         if roll < 0.5:
             hold.settle(tx="0x" + f"{random.randint(0, 0xFFFFFF):064x}")  # noqa: S311
         elif roll < 0.7:
-            hold.void(reason="race: not sent")
+            hold.void(evidence="race: not sent")
         elif roll < 0.85:
             hold.note("unknown", "race")
     except BudgetUnavailable:

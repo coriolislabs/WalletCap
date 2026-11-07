@@ -22,6 +22,7 @@ from walletcap.budget import (
     PaymentRecord,
     Status,
     _limits,
+    _Unset,
     held_payment_of,
     payment_of,
     record_of,
@@ -30,7 +31,9 @@ from walletcap.budget import (
 from walletcap.errors import UsageError
 from walletcap.money import (
     DOLLAR_UNITS,
+    Dollars,
     Micros,
+    Window,
     default_budget_path,
     expand_home,
     normalize_wallet,
@@ -70,10 +73,10 @@ class Owner:
         path: str | Path | None = None,
         *,
         create: bool = False,
-        busy_timeout_seconds: float = 30.0,
+        busy_timeout_ms: int = 30_000,
     ) -> None:
         self._path = expand_home(path if path is not None else default_budget_path()).absolute()
-        self._ledger = Ledger(self._path, busy_timeout_seconds=busy_timeout_seconds, create=create)
+        self._ledger = Ledger(self._path, busy_timeout_ms=busy_timeout_ms, create=create)
 
     @property
     def path(self) -> Path:
@@ -122,13 +125,13 @@ class Owner:
         self,
         wallet: str,
         *,
-        per_payment: object = UNSET,
-        per_hour: object = None,
-        per_day: object = None,
-        per_week: object = None,
-        cap: object = None,
-        window: object = None,
-        max_payments: object = UNSET,
+        per_payment: Dollars | _Unset | None = UNSET,
+        per_hour: Dollars | None = None,
+        per_day: Dollars | None = None,
+        per_week: Dollars | None = None,
+        cap: Dollars | None = None,
+        window: Window | None = None,
+        max_payments: int | _Unset | None = UNSET,
     ) -> Status:
         """Set ``wallet``'s limits, up or down, creating its budget if it has none.
 
@@ -216,8 +219,8 @@ class Owner:
 
 
 def open_owner(
-    path: str | Path | None = None, *, create: bool = False, busy_timeout_seconds: float = 30.0
+    path: str | Path | None = None, *, create: bool = False, busy_timeout_ms: int = 30_000
 ) -> Owner:
     """Open the budget file as its owner. ``create=True`` creates the file if it is missing."""
 
-    return Owner(path, create=create, busy_timeout_seconds=busy_timeout_seconds)
+    return Owner(path, create=create, busy_timeout_ms=busy_timeout_ms)

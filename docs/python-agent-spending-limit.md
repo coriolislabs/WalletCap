@@ -54,7 +54,7 @@ hold = budget.hold("$5", id=f"order-{order_id}", settles_within=timedelta(minute
 try:
     hold.settle(tx=send_usdc(payee, "5"))
 except BroadcastFailed:
-    hold.void(reason="never broadcast")
+    hold.void(evidence="never broadcast")
 ```
 
 - One id is one payment: holding it again returns that payment (`hold.created` is `False`), and

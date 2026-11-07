@@ -42,8 +42,14 @@ JavaScript:
   owner handles and of a hold. A wait for another process's write lock happens on the event
   loop, for up to `busyTimeoutMs` (30,000 by default).
 - `budget.reserve()` is `budget.hold()`, and returns a `Hold`; `Reservation` is gone. A hold's
-  `commit({ tx })` is `settle({ tx })`, `release()` is `void({ reason })`, and `annotate()` is
-  `note(outcome, detail)`. `hold()` and `pay()` take `id` and `settlesWithinMs`.
+  `commit({ tx })` is `settle({ tx })`, `release()` is `void({ evidence })`, and `annotate()` is
+  `note(outcome, detail)`. `hold()` and `pay()` take `id` and `settlesWithin` (milliseconds).
+- `status()` names the window `windowMs`, as `BudgetLimits` does.
+- `check()` always has `code`, `source`, `message` and `brief`, `null` when the payment would be
+  paid; `source` is new. A `Payment`'s `to`, `note` and `tx`, and a `HeldPayment`'s `to`, `note`
+  and `error`, are always there too, `null` when unknown. The x402 guard keeps a refusal's
+  `source` when it tells the agent.
+- `voidUnknown()` returns `VoidedPayment`s.
 - The vendor adapters are subpath exports, and the core imports none of them:
   `budget.guard(client)` is `guard(client, budget)` from `walletcap/x402`;
   `budget.cdpStore({ asset })` is `cdpStore(budget, { asset })` from `walletcap/cdp`;
@@ -60,9 +66,14 @@ JavaScript:
 Python:
 
 - `Budget.reserve()` is `Budget.hold()`, and returns a `Hold`; `Reservation` is gone. A hold has
-  `settle(tx=…)`, `void(reason=…)`, `settles_by(datetime)`, `settles_within(timedelta)` and
+  `settle(tx=…)`, `void(evidence=…)`, `settles_by(datetime)`, `settles_within(timedelta)` and
   `note(outcome, detail)`. `with budget.pay(...) as payment` yields the hold; `payment.tx` is
   kept as the evidence.
+- `open_budget()`, `Budget()` and `open_owner()` take `busy_timeout_ms` (an int of
+  milliseconds, as JavaScript's `busyTimeoutMs`) in place of `busy_timeout_seconds`, and
+  `open_budget()` lists its keyword arguments: a misspelt one is a `TypeError`.
+- `Check` has `source`. `RefusalCode`, `RefusalSource`, `PaymentState`, `Outcome`, `Dollars` and
+  `Window` are exported types.
 - 0.3's `Hold`, what `budget.holds()` returns, is now `HeldPayment`: `until` is now
   `counts_until`, and `settles_by` is new.
 - `Budget.set_limits()`, `freeze()` and `unfreeze()` moved to the owner's handle,
@@ -117,7 +128,7 @@ Behaviour:
   holds: CDP signed its authorization, which a payee can redeem until an hour and a minute after
   CDP recorded it, so its owner voids it only if the chain shows it was never redeemed.
 - An open hold can learn its settle-by time as a time from the ledger's now: `settlesWithin(ms)`
-  and `settlesWithinMs`, `settles_within(timedelta)`. The x402 guard and the Agentic Wallet
+  and the `settlesWithin` option; in Python `settles_within(timedelta)`. The x402 guard and the Agentic Wallet
   wrapper use it, so neither reads the process's clock to date a payment.
 
 ### Added
@@ -131,7 +142,7 @@ Behaviour:
 - `walletcap settle <id> [--tx <hash>] [--evidence <text>]`, and `--evidence` for
   `walletcap void <id>`: what shows that the payment paid, or never moved.
 - Python's async forms: `acheck`, `ahold`, `astatus`, `aholds` and `ahistory`, and a hold's
-  `asettle`, `avoid` and `anote`. `async with budget.pay()` now waits for a lock in a worker
+  `asettle`, `avoid`, `asettles_by`, `asettles_within` and `anote`. `async with budget.pay()` now waits for a lock in a worker
   thread; 0.3 waited on the event loop. If the caller is cancelled while `ahold()` or `async with
   budget.pay()` waits, the hold the thread takes is voided, with the evidence "cancelled before
   paying", before the cancellation goes on.

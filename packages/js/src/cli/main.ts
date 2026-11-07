@@ -146,10 +146,10 @@ const withWallet = async <T>(values: Values, path: string, work: (owner: Owner, 
 
 const detail = (status: Status): string => [
   `Wallet       ${status.wallet}`,
-  `Limit        ${formatUsd(status.cap)} per ${formatWindow(status.window)}, rolling`,
+  `Limit        ${formatUsd(status.cap)} per ${formatWindow(status.windowMs)}, rolling`,
   `Per payment  ${status.perPayment === null ? 'no limit' : formatUsd(status.perPayment)}`,
-  ...(status.maxPayments === null ? [] : [`Payments     at most ${status.maxPayments} per ${formatWindow(status.window)}`]),
-  `Spent        ${formatUsd(status.spent)} in the last ${formatWindow(status.window)} (${status.payments} payment${status.payments === 1n ? '' : 's'})`,
+  ...(status.maxPayments === null ? [] : [`Payments     at most ${status.maxPayments} per ${formatWindow(status.windowMs)}`]),
+  `Spent        ${formatUsd(status.spent)} in the last ${formatWindow(status.windowMs)} (${status.payments} payment${status.payments === 1n ? '' : 's'})`,
   `In flight    ${formatUsd(status.inFlight)}`,
   `Left         ${formatUsd(status.remaining)}`,
   `State        ${status.frozen ? 'FROZEN: every payment is refused' : 'active'}`,
@@ -214,7 +214,7 @@ const commands: Record<string, Command> = {
     const wallet = await walletOf(values, path);
     const status = await withOwner(path, owner => owner.setLimits(wallet, limits), true);
     if (values.json) return json(status);
-    const now = describeLimits({ cap: status.cap, windowMs: status.window, perPayment: status.perPayment, maxPayments: status.maxPayments });
+    const now = describeLimits({ cap: status.cap, windowMs: status.windowMs, perPayment: status.perPayment, maxPayments: status.maxPayments });
     return `${shortWallet(wallet)}: ${now}.\nWhat was spent still counts: ${formatUsd(status.spent)} spent, ${formatUsd(status.inFlight)} in flight, ${formatUsd(status.remaining)} left.`;
   },
 

@@ -8,7 +8,7 @@ loop. Python agents are written both ways, and Python's `sqlite3` is synchronous
 ## Decision
 
 Python keeps the synchronous API and adds async forms: `acheck`, `ahold`, `astatus`, `aholds`,
-`ahistory`, a hold's `asettle`, `avoid` and `anote`, and `async with budget.pay()`. Each runs the
+`ahistory`, a hold's `asettle`, `avoid`, `asettles_by`, `asettles_within` and `anote`, and `async with budget.pay()`. Each runs the
 synchronous call in a worker thread through `asyncio.to_thread`. Each operation opens its own
 connection, so threads share none.
 

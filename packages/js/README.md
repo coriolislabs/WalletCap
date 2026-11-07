@@ -32,7 +32,7 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150
 - If the payment function throws, the payment may still have left, so it stays held, noted
   unknown, until its owner voids it: an error never settles a payment. `throw notSent(error)`
   says it never left.
-- `budget.hold(amount, { id, settlesWithinMs })` returns a `Hold` to `settle({ tx })`,
+- `budget.hold(amount, { id, settlesWithin })` returns a `Hold` to `settle({ tx })`,
   `void()` or `note()` yourself. One id is one payment, and only the hold that took it can move
   it; a voided id can't be held again.
 - Errors: `BudgetRefused` (`code`, `brief`), `BudgetUnavailable`, `UsageError`, and

@@ -286,11 +286,22 @@ test('the per-payment limit and the payment count hold too', async () => {
 
 test('check() answers without taking anything', async () => {
   const { budget } = await fixture({ perDay: '$150' });
-  assert.deepEqual(await budget.check('$150'), { ok: true, remaining: 150_000_000n });
+  assert.deepEqual(await budget.check('$150'), { ok: true, remaining: 150_000_000n, code: null, source: null, message: null, brief: null });
   const refused = await budget.check('$151');
   assert.equal(refused.ok, false);
   assert.equal(refused.code, 'budget');
+  assert.equal(refused.source, 'budget');
   assert.equal((await budget.status()).inFlight, 0n);
+});
+
+test("check() says whose limit refuses: the owner's or this process's own", async () => {
+  const { path } = await fixture({ perDay: '$150' });
+  const tighter = await openBudget({ wallet: WALLET, path, perPayment: '$10' });
+  const own = await tighter.check('$20');
+  assert.deepEqual([own.ok, own.code, own.source], [false, 'per_payment', 'process']);
+  const owners = await tighter.check('$151');
+  assert.deepEqual([owners.ok, owners.code, owners.source], [false, 'budget', 'budget']);
+  tighter.close();
 });
 
 test('freezing stops every payment in every process until unfrozen', async () => {
@@ -434,7 +445,7 @@ test('a 0.2.x file is upgraded on open: every spelling of a wallet becomes one b
   const upgraded = await openBudget({ wallet: MERGED, path });
   const status = await upgraded.status();
   // The tighter of every limit: the smallest cap and per-payment limit, and the longest window.
-  assert.deepEqual([status.cap, status.window, status.perPayment, status.maxPayments], [150_000_000n, 86_400_000n, 50_000_000n, 10n]);
+  assert.deepEqual([status.cap, status.windowMs, status.perPayment, status.maxPayments], [150_000_000n, 86_400_000n, 50_000_000n, 10n]);
   assert.deepEqual([status.spent, status.inFlight, status.remaining], [110_000_000n, 20_000_000n, 20_000_000n]);
   await assert.rejects(paid(upgraded, '$20.01'), refusedFor('budget'));
   await paid(upgraded, '$20');
@@ -457,7 +468,7 @@ test('a 0.2.x file is upgraded on open: every spelling of a wallet becomes one b
 test('a voided id is spent: holding it again is refused, so a retry cannot bring a payment back', async () => {
   const { budget } = await fixture({ perDay: '$10' });
   const first = await budget.hold('$10', { id: 'order-17' });
-  await first.void({ reason: 'card declined' });
+  await first.void({ evidence: 'card declined' });
   await paid(budget, '$10');
   // 0.4's first draft returned the voided payment, created false, and its settle() took it from
   // void to settled: $20 against a $10 cap.

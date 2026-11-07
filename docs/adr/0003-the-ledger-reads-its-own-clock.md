@@ -11,7 +11,7 @@ written. 0.3 read the system clock in each client. Tests still need to move time
 Every time in a row is the ledger's own: `wc_clock`, `julianday('now')` in milliseconds, read
 inside the statement that writes the row. SQLite keeps `'now'` fixed for a whole statement. The
 `wc_entry_dated` trigger refuses an entry dated any other way. No API takes the present time from
-a caller; a client passes only durations from now (`settlesWithinMs`) or the expiry a signed
+a caller; a client passes only durations from now (`settlesWithin`) or the expiry a signed
 payload carries.
 
 Tests replace `julianday('now')` on their own connections with an application-defined function,

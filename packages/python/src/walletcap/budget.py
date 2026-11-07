@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Final
+from typing import Any, Final, Literal, cast
 
 from walletcap._ledger import Ledger, ProcessLimits, Row, held_elsewhere, merged_note_of
 from walletcap.errors import (
@@ -41,13 +41,17 @@ from walletcap.errors import (
     BudgetWarning,
     NotSent,
     PaymentNotRecorded,
+    RefusalCode,
+    RefusalSource,
     UsageError,
 )
 from walletcap.money import (
     DAY_MS,
     HOUR_MS,
     WEEK_MS,
+    Dollars,
     Micros,
+    Window,
     default_budget_path,
     describe_limits,
     expand_home,
@@ -81,6 +85,18 @@ UNSET: Final = _Unset.UNSET
 """A limit left out: no opinion, as opposed to None (no limit)."""
 
 _OPEN: Final = 2**63 - 1
+
+PaymentState = Literal["held", "settled", "void"]
+"""A payment's state in the ledger: ``held``, ``settled`` or ``void``."""
+
+Outcome = Literal["unknown", "refused"]
+"""What is known about a held payment: the call failed (``unknown``) or the payee said it failed."""
+
+PaymentStatus = Literal["settled", "in flight", "refused", "unknown", "expired", "void"]
+"""How the history shows a payment."""
+
+HoldReason = Literal["in flight", "unknown", "refused"]
+"""Why a held payment is still open."""
 _TO_LIMIT = 256
 _NOTE_LIMIT = 1024
 
@@ -91,7 +107,8 @@ class Check:
 
     ok: bool
     remaining: Micros
-    code: str | None = None
+    code: RefusalCode | None = None
+    source: RefusalSource | None = None
     message: str | None = None
     brief: str | None = None
 
@@ -138,7 +155,7 @@ class Payment:
 
     id: str
     amount: Micros
-    status: str
+    status: PaymentStatus
     counting: bool
     at: datetime
     rail: str
@@ -152,7 +169,7 @@ class PaymentRecord(Payment):
     """One payment as its owner sees it: also its wallet, state and how long it counts."""
 
     wallet: str = ""
-    state: str = "held"
+    state: PaymentState = "held"
     settles_by: datetime | None = None
     counts_until: datetime | None = None
 
@@ -169,7 +186,7 @@ class HeldPayment:
 
     id: str
     amount: Micros
-    reason: str
+    reason: HoldReason
     at: datetime
     age_ms: int
     settles_by: datetime | None
@@ -303,7 +320,7 @@ def _counts_until(row: Row) -> datetime | None:
     return _moment(counts_from + row["window_ms"])
 
 
-def _label(row: Row, info: dict[str, Any]) -> str:
+def _label(row: Row, info: dict[str, Any]) -> PaymentStatus:
     if row["state"] == "settled":
         return "unknown" if info.get("outcome") == "unknown" else "settled"
     if row["state"] == "void":
@@ -311,7 +328,7 @@ def _label(row: Row, info: dict[str, Any]) -> str:
     if not row["counting"]:
         return "expired"
     outcome = row["outcome"]
-    return str(outcome) if outcome in ("refused", "unknown") else "in flight"
+    return cast("Outcome", outcome) if outcome in ("refused", "unknown") else "in flight"
 
 
 def payment_of(row: Row) -> Payment:
@@ -453,7 +470,7 @@ class Hold:
         ledger: Ledger,
         payment_id: str,
         amount: Micros,
-        state: str,
+        state: PaymentState,
         *,
         created: bool,
         holder: str | None = None,
@@ -484,7 +501,7 @@ class Hold:
         return self._amount
 
     @property
-    def state(self) -> str:
+    def state(self) -> PaymentState:
         """The state this handle last saw: ``"held"``, ``"settled"`` or ``"void"``."""
 
         return self._state
@@ -506,13 +523,15 @@ class Hold:
             "state"
         ]
 
-    def void(self, *, reason: str | None = None) -> None:
+    def void(self, *, evidence: str | None = None) -> None:
         """The payment never left the wallet, and never will: it stops counting.
 
-        A settled payment can't be voided.
+        ``evidence`` says how you know. A settled payment can't be voided.
         """
 
-        row = self._ledger.void(self._id, holder=self._token("void"), evidence=reason or "not sent")
+        row = self._ledger.void(
+            self._id, holder=self._token("void"), evidence=evidence or "not sent"
+        )
         self._state = row["state"]
 
     def settles_by(self, moment: datetime) -> None:
@@ -529,7 +548,7 @@ class Hold:
         holder = self._token("bound")
         self._state = self._ledger.bound(self._id, holder=holder, within_ms=within)["state"]
 
-    def note(self, outcome: str, detail: str | None = None) -> None:
+    def note(self, outcome: Outcome, detail: str | None = None) -> None:
         """What is known about a held payment's outcome: ``"unknown"`` or ``"refused"``.
 
         It counts the same.
@@ -544,10 +563,16 @@ class Hold:
     async def asettle(self, *, tx: str | None = None) -> None:
         await asyncio.to_thread(lambda: self.settle(tx=tx))
 
-    async def avoid(self, *, reason: str | None = None) -> None:
-        await asyncio.to_thread(lambda: self.void(reason=reason))
+    async def avoid(self, *, evidence: str | None = None) -> None:
+        await asyncio.to_thread(lambda: self.void(evidence=evidence))
 
-    async def anote(self, outcome: str, detail: str | None = None) -> None:
+    async def asettles_by(self, moment: datetime) -> None:
+        await asyncio.to_thread(self.settles_by, moment)
+
+    async def asettles_within(self, duration: timedelta) -> None:
+        await asyncio.to_thread(self.settles_within, duration)
+
+    async def anote(self, outcome: Outcome, detail: str | None = None) -> None:
         await asyncio.to_thread(self.note, outcome, detail)
 
 
@@ -566,7 +591,7 @@ class _Taken:
 def _void_cancelled(hold: Hold) -> None:
     if hold.created and hold.state == "held":
         with contextlib.suppress(BudgetUnavailable, UsageError):
-            hold.void(reason=_CANCELLED)
+            hold.void(evidence=_CANCELLED)
 
 
 async def _hold_in_thread(take: Callable[[], Hold]) -> Hold:
@@ -660,7 +685,7 @@ class Paying:
         # If recording fails too, the payment stays held and keeps counting.
         with contextlib.suppress(BudgetUnavailable, UsageError):
             if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:
-                hold.void(reason=f"not sent: {_error_text(exc)}")
+                hold.void(evidence=f"not sent: {_error_text(exc)}")
             else:
                 hold.note("unknown", _error_text(exc))
 
@@ -694,14 +719,14 @@ class Budget:
         *,
         path: str | Path | None = None,
         create: bool = False,
-        per_payment: object = UNSET,
-        per_hour: object = None,
-        per_day: object = None,
-        per_week: object = None,
-        cap: object = None,
-        window: object = None,
-        max_payments: object = UNSET,
-        busy_timeout_seconds: float = 30.0,
+        per_payment: Dollars | _Unset | None = UNSET,
+        per_hour: Dollars | None = None,
+        per_day: Dollars | None = None,
+        per_week: Dollars | None = None,
+        cap: Dollars | None = None,
+        window: Window | None = None,
+        max_payments: int | _Unset | None = UNSET,
+        busy_timeout_ms: int = 30_000,
         on_warning: Callable[[str], None] | None = None,
     ) -> None:
         self._wallet = normalize_wallet(wallet)
@@ -721,7 +746,7 @@ class Budget:
                 f"no budget file at {self._path}; its owner creates one with: "
                 f"walletcap set --wallet {self._wallet}{path_flag(self._path)} --per-day <dollars>"
             )
-        self._ledger = Ledger(self._path, busy_timeout_seconds=busy_timeout_seconds, create=create)
+        self._ledger = Ledger(self._path, busy_timeout_ms=busy_timeout_ms, create=create)
         row = self._ledger.budget(self._wallet)
         if row is None:
             if not create:
@@ -794,6 +819,7 @@ class Budget:
             ok=False,
             remaining=Micros(remaining),
             code=refusal.code,
+            source=refusal.source,
             message=str(refusal),
             brief=refusal.brief,
         )
@@ -842,7 +868,7 @@ class Budget:
             self._ledger,
             str(held["payment"]),
             micros,
-            str(held["state"]),
+            cast("PaymentState", held["state"]),
             created=bool(held["created"]),
             holder=held["holder"],
         )
@@ -933,7 +959,21 @@ class Budget:
         self.close()
 
 
-def open_budget(wallet: str, **options: Any) -> Budget:
+def open_budget(
+    wallet: str,
+    *,
+    path: str | Path | None = None,
+    create: bool = False,
+    per_payment: Dollars | _Unset | None = UNSET,
+    per_hour: Dollars | None = None,
+    per_day: Dollars | None = None,
+    per_week: Dollars | None = None,
+    cap: Dollars | None = None,
+    window: Window | None = None,
+    max_payments: int | _Unset | None = UNSET,
+    busy_timeout_ms: int = 30_000,
+    on_warning: Callable[[str], None] | None = None,
+) -> Budget:
     """Open the wallet's budget, to pay from it. Its owner creates it first with ``walletcap set``.
 
     Pass ``create=True`` only to create it on first use (a demo or a first-run setup); by
@@ -943,4 +983,17 @@ def open_budget(wallet: str, **options: Any) -> Budget:
     ``window``, and ``per_payment`` and ``max_payments``.
     """
 
-    return Budget(wallet, **options)
+    return Budget(
+        wallet,
+        path=path,
+        create=create,
+        per_payment=per_payment,
+        per_hour=per_hour,
+        per_day=per_day,
+        per_week=per_week,
+        cap=cap,
+        window=window,
+        max_payments=max_payments,
+        busy_timeout_ms=busy_timeout_ms,
+        on_warning=on_warning,
+    )

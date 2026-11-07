@@ -35,13 +35,20 @@ export interface BudgetLimits {
   unit: string;
   cap: Micros;
   /** Milliseconds. */
-  window: bigint;
+  windowMs: bigint;
   perPayment: Micros | null;
   maxPayments: bigint | null;
   frozen: boolean;
 }
 
 /** Open the budget file as its owner. */
+/** A payment the owner's bulk release voided. */
+export interface VoidedPayment {
+  id: string;
+  /** Micro-dollars. */
+  amount: Micros;
+}
+
 export function openOwner(options: OwnerOptions = {}): Promise<Owner> {
   return Owner.open(options);
 }
@@ -73,7 +80,7 @@ export class Owner {
       wallet: row.wallet,
       unit: row.unit,
       cap: row.cap,
-      window: row.window_ms,
+      windowMs: row.window_ms,
       perPayment: row.per_payment,
       maxPayments: row.max_payments,
       frozen: row.frozen_at !== null,
@@ -159,7 +166,7 @@ export class Owner {
    * with no settle-by time, a transfer say, has no such bound: void it by id, with evidence. Only
    * for payments its owner knows never left.
    */
-  async voidUnknown(wallet: string, { olderThan }: { olderThan: Window }): Promise<{ id: string; amount: Micros }[]> {
+  async voidUnknown(wallet: string, { olderThan }: { olderThan: Window }): Promise<VoidedPayment[]> {
     const age = toWindowMs(olderThan, 'olderThan');
     const voided = await this.#ledger.voidUnknown(wallet, age, { evidence: 'voided by its owner: unknown or refused outcome' });
     return voided.map(row => ({ id: row.payment, amount: row.amount }));

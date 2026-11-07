@@ -226,12 +226,12 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
       try {
         result = await wallet('make-x402-request', { ...data, maxAmountPerRequest: 1 });
       } catch (error) {
-        await recorded(hold, () => hold.void({ reason: 'nothing was signed for value' }));
+        await recorded(hold, () => hold.void({ evidence: 'nothing was signed for value' }));
         throw error;
       }
       const answer = paymentResponseOf(result);
       if (answer?.success === true && typeof answer.transaction === 'string' && TX_HASH.test(answer.transaction)) await settled(hold, answer.transaction);
-      else await recorded(hold, () => hold.void({ reason: 'nothing was signed for value' }));
+      else await recorded(hold, () => hold.void({ evidence: 'nothing was signed for value' }));
       return result;
     }
     const offered = (handed ? data.paymentRequirements : required?.accepts) as unknown[];

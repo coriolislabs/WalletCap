@@ -166,6 +166,16 @@ test("a refusal or a lost answer the guard can't record throws PaymentNotRecorde
   }
 });
 
+test("the guard keeps a refusal's source: a process's own limit says it is the process's", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { path } = await setup({ perDay: '$0.15' });
+  const tighter = await openBudget({ wallet: kit.account.address, path, perPayment: '$0.01' });
+  const client = guard(kit.client(), tighter);
+  await assert.rejects(pay(client, 50_000), error => refusedFor('per_payment')(error) && error.source === 'process');
+  // The owner's limits come first: past the cap, the refusal is the budget's.
+  await assert.rejects(pay(client, 200_000), error => refusedFor('budget')(error) && error.source === 'budget');
+  tighter.close();
+});
+
 test("the agent is told why the guard refused, not which holds its owner could release", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const { budget, client } = await setup({ perDay: '$0.05' });
   await (await budget.hold('$0.05')).note('unknown');

@@ -478,8 +478,14 @@ def test_freeze_check_and_mistakes(tmp_path: Path) -> None:
     owner = open_owner(path)
     owner.freeze(WALLET)
     check = budget.check("$1")
-    assert (check.ok, check.code) == (False, "frozen")
+    assert (check.ok, check.code, check.source) == (False, "frozen", "budget")
     owner.unfreeze(WALLET)
+    ok = open_budget(WALLET, path=path).check("$1")
+    assert (ok.code, ok.source, ok.message, ok.brief) == (None, None, None, None)
+    # A process's own, tighter limit refuses for that process, and says so.
+    tighter = open_budget(WALLET, path=path, per_payment="$0.50")
+    own = tighter.check("$1")
+    assert (own.ok, own.code, own.source) == (False, "per_payment", "process")
     _pay(budget, "$1")
     assert budget.check("$1").code == "max_payments"
     with pytest.raises(UsageError, match="not 40 hex digits"):
@@ -709,7 +715,7 @@ def test_the_clock_is_not_an_option(tmp_path: Path) -> None:
     _pay(budget, "$150")
     # 0.2.x took a clock per process; one running a day ahead saw an empty budget.
     with pytest.raises(TypeError):
-        open_budget(WALLET, path=path, clock=lambda: 1e10)
+        open_budget(WALLET, path=path, clock=lambda: 1e10)  # type: ignore[call-arg]
     with pytest.raises(BudgetRefused):
         _pay(open_budget(WALLET, path=path), "$150")
 
@@ -867,7 +873,7 @@ def test_one_id_is_one_payment_and_pay_never_makes_it_twice(tmp_path: Path) -> N
 def test_a_voided_id_is_spent_so_a_retry_cannot_bring_a_payment_back(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$10", create=True)
     first = budget.hold("$10", id="order-17")
-    first.void(reason="card declined")
+    first.void(evidence="card declined")
     _pay(budget, "$10")
     # 0.4's first draft returned the voided payment, created False, and its settle() took it from
     # void to settled: $20 against a $10 cap.

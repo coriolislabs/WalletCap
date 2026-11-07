@@ -183,12 +183,12 @@ throw notSent(error); // inside the payment function
 For more control, `hold()` gives you the payment's handle:
 
 ```js
-const hold = await budget.hold('$5', { id: `order-${orderId}`, settlesWithinMs: 300_000 });
+const hold = await budget.hold('$5', { id: `order-${orderId}`, settlesWithin: 300_000 });
 try {
   const tx = await sendUsdc(payee, '5');
   await hold.settle({ tx });
 } catch (error) {
-  if (neverBroadcast(error)) await hold.void({ reason: error.message });
+  if (neverBroadcast(error)) await hold.void({ evidence: error.message });
   else await hold.note('unknown', error.message); // it keeps counting
 }
 ```
@@ -202,7 +202,9 @@ try {
 - If the payment went through but the budget can't record it, `pay()` throws
   `PaymentNotRecorded`. It shares no base class with the other errors, so code that retries on
   them won't pay twice. The payment still counts as held.
-- `budget.check('$5')` answers `{ ok, code, brief, remaining }` without spending.
+- `budget.check('$5')` answers `{ ok, remaining, code, source, message, brief }` without spending:
+  `source` says whether the owner's limit (`budget`) or this process's own (`process`) would
+  refuse, and every field but `ok` and `remaining` is `null` when it would be paid.
   `budget.status()`, `budget.history()` and `budget.holds()` read the count.
 - Every method is async. A wait for another process's write lock happens on the event loop, in
   steps of up to 50 ms, never inside a blocking call; `busyTimeoutMs` (30,000 by default) bounds
@@ -231,7 +233,7 @@ hold = budget.hold("$5", id=f"order-{order_id}", settles_within=timedelta(minute
 try:
     hold.settle(tx=send_usdc(payee, "5"))
 except BroadcastFailed:
-    hold.void(reason="never broadcast")
+    hold.void(evidence="never broadcast")
 ```
 
 - Inside `with budget.pay(...)`, set `payment.tx` to keep the transaction hash, and raise
