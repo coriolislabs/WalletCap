@@ -81,6 +81,8 @@ export interface Check {
   ok: boolean;
   reason?: RefusalReason;
   message?: string;
+  /** The message without the ids of open payments or what their owner can do about them. */
+  brief?: string;
   /** Micro-dollars left in the window. */
   remaining: bigint;
 }

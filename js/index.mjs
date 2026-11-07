@@ -196,7 +196,7 @@ export class Budget {
     const { refusal, remaining } = this.#ledger.check(this.#wallet, positive(toMicros(amount)));
     return refusal === null
       ? { ok: true, remaining }
-      : { ok: false, reason: refusal.reason, message: refusal.message, remaining };
+      : { ok: false, reason: refusal.reason, message: refusal.message, brief: refusal.brief, remaining };
   }
 
   /**

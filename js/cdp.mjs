@@ -7,7 +7,7 @@
 // every rail. append() is the authority: it re-checks the shared budget inside
 // one write transaction, so two processes that both pass the SDK's own
 // in-memory check cannot both record a payment past the cap.
-import { BudgetError } from './errors.mjs';
+import { BudgetError, forAgent } from './errors.mjs';
 import { checkKeys, instrumentName, integer, Ledger } from './ledger.mjs';
 import { MAX_AMOUNT } from './money.mjs';
 import { MAX_PAYMENT_TIMEOUT_SECONDS } from './x402.mjs';
@@ -132,7 +132,11 @@ export class SharedBudgetStore {
     // from the ledger's own time, until one window past the last moment the signed
     // authorization can be redeemed (SETTLES_WITHIN_MS). The entry's `at` is CDP's, so
     // it is kept only in the reference, which is how removeEntry() finds the row again.
-    this.#ledger.record(this.#instrument, spend, { rail: RAIL, reference: reference(entry), settlesWithinMs: SETTLES_WITHIN_MS });
+    try {
+      this.#ledger.record(this.#instrument, spend, { rail: RAIL, reference: reference(entry), settlesWithinMs: SETTLES_WITHIN_MS });
+    } catch (error) {
+      throw forAgent(error); // CDP passes it on to the agent: no hold ids, no release instructions
+    }
   }
 
   async prune(olderThanMs) {

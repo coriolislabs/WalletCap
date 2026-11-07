@@ -27,6 +27,11 @@ export class BudgetRefused extends BudgetError {
   }
 }
 
+/** `error` as an agent should be told it: a BudgetRefused's brief form, anything else as it is. */
+export const forAgent = error => (error instanceof BudgetRefused && error.brief !== error.message
+  ? new BudgetRefused(error.reason, error.brief)
+  : error);
+
 /**
  * The budget could not record what happened to a payment that went through,
  * or may have: it still counts as in flight. This is not a BudgetError, so code

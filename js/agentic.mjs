@@ -17,7 +17,7 @@ import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { now } from './_clock.mjs';
-import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
+import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { SETTLES_BY } from './ledger.mjs';
 import { formatUsd, normalizeWallet, trimAscii } from './money.mjs';
@@ -266,8 +266,7 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     try {
       return await pay();
     } catch (error) {
-      if (error instanceof BudgetRefused && error.brief !== error.message) throw new BudgetRefused(error.reason, error.brief);
-      throw error;
+      throw forAgent(error);
     }
   };
 

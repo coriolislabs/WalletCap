@@ -163,6 +163,20 @@ test('a checksummed or CAIP-10 instrument spends from the one lowercase budget',
   }
 });
 
+test("a refusal CDP passes on to the agent names no holds and no release instructions", async () => {
+  const { budget, store } = fixture();
+  budget.reserve('$1').annotate({ outcome: 'unknown' });
+  try {
+    // 0.3.0 passed the owner's message, with the hold's id, through CDP to the agent.
+    await assert.rejects(store.append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }),
+      error => error.reason === 'budget' && /\$1\.00 of it is 1 open payment$/.test(error.message));
+    assert.match(budget.check('$0.01').message, /\(spend-\w+; walletcap holds lists them/);
+  } finally {
+    store.close();
+    budget.close();
+  }
+});
+
 test('a CDP payment counts until an hour after it is recorded, plus one window: its authorization can be redeemed that long', async () => {
   const clock = { now: Date.now() };
   setClock(() => clock.now);

@@ -4,7 +4,7 @@
 // Coinbase's CDP spend controls alike: whatever else is configured, every
 // payment the client creates is counted in the shared budget before it is sent.
 import { now } from './_clock.mjs';
-import { BudgetError, BudgetRefused, PaymentNotRecorded } from './errors.mjs';
+import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.mjs';
 
 const GUARDED = Symbol.for('walletcap/x402-guard');
 // Set by @coinbase/cdp-sdk/x402's applySpendControls. The CDP store and this
@@ -229,9 +229,10 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     const amount = price(context.selectedRequirements);
     context[SLOT] = { amount, reservation: null, payload: null };
     if (amount === 0n) return undefined;
-    // An early refusal, before anything is signed. The reservation that binds comes after.
+    // An early refusal, before anything is signed. The reservation that binds comes after. The
+    // agent is told why, not which holds its owner could release: that is for the owner's CLI.
     const check = budget.check(amount);
-    if (!check.ok) throw new BudgetRefused(check.reason, check.message);
+    if (!check.ok) throw new BudgetRefused(check.reason, check.brief);
     // The policy above has already set aside longer terms; this holds for a client without one.
     const tooLong = timeoutRefusal(context.selectedRequirements);
     if (tooLong !== null) throw tooLong;
@@ -246,13 +247,17 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     // If another process spent the budget since the check, this throws; the
     // client then discards the signed payload and nothing is sent.
     const url = context.paymentRequired?.resource?.url;
-    slot.reservation = budget.reserve(slot.amount, {
-      rail: 'x402',
-      to: requirements.payTo,
-      note: typeof url === 'string' ? url.slice(0, 1024) : undefined,
-      details: { network: requirements.network, asset: requirements.asset, scheme: requirements.scheme },
-      settlesBy: settlesBy(context.paymentPayload, requirements),
-    });
+    try {
+      slot.reservation = budget.reserve(slot.amount, {
+        rail: 'x402',
+        to: requirements.payTo,
+        note: typeof url === 'string' ? url.slice(0, 1024) : undefined,
+        details: { network: requirements.network, asset: requirements.asset, scheme: requirements.scheme },
+        settlesBy: settlesBy(context.paymentPayload, requirements),
+      });
+    } catch (error) {
+      throw forAgent(error);
+    }
     slot.payload = context.paymentPayload;
     remember(context.paymentPayload, slot.reservation);
   });
