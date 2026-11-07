@@ -7,13 +7,13 @@
     "MAX_AMOUNT", "SCHEMA_VERSION", "MIN_SQLITE_VERSION"
   ],
   "methods": {
-    "Budget": ["check", "hold", "pay", "status", "history", "holds", "close"],
+    "Budget": ["check", "hold", "pay", "payment", "status", "history", "holds", "close"],
     "Hold": ["settle", "void", "settlesBy", "settlesWithin", "note"],
     "Owner": ["budgets", "status", "history", "holds", "payment", "setLimits", "freeze", "unfreeze", "void", "settle", "voidUnknown", "close"]
   },
   "properties": {
     "Budget": ["wallet", "path"],
-    "Hold": ["id", "amount", "state", "created"],
+    "Hold": ["id", "amount", "state"],
     "Owner": ["path"],
     "Status": ["summary"]
   },
@@ -28,7 +28,8 @@
   },
   "errors": {
     "BudgetRefused": ["code", "brief", "source"],
-    "PaymentNotRecorded": ["paymentId", "cause"]
+    "PaymentNotRecorded": ["paymentId", "cause"],
+    "UsageError": ["paymentId", "paymentState"]
   },
   "options": {
     "openBudget": ["wallet", "path", "create", "perPayment", "perHour", "perDay", "perWeek", "cap", "window", "maxPayments", "busyTimeoutMs", "onWarning"],

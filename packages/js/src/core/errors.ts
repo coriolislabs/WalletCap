@@ -70,9 +70,16 @@ export class PaymentNotRecorded extends Error {
  * that doesn't exist, or an id already used for another payment. Nothing was paid.
  */
 export class UsageError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  /** When a hold names an id already in the ledger: that payment's id. Otherwise null. */
+  readonly paymentId: string | null;
+  /** When a hold names an id already in the ledger: that payment's state. Otherwise null. */
+  readonly paymentState: 'held' | 'settled' | 'void' | null;
+
+  constructor(message: string, options?: ErrorOptions & { paymentId?: string; paymentState?: 'held' | 'settled' | 'void' }) {
     super(message, options);
     this.name = 'UsageError';
+    this.paymentId = options?.paymentId ?? null;
+    this.paymentState = options?.paymentState ?? null;
   }
 }
 

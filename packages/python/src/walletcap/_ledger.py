@@ -730,28 +730,36 @@ class Ledger:
         with self._transaction() as connection:
             held = self._one(connection, "hold", args)
             if held is not None:
-                return {**held, "state": "held", "created": True, "holder": args["holder"]}
+                return {**held, "state": "held", "holder": args["holder"]}
             why = self._one(connection, "refusal", args)
             if why is None:
                 raise BudgetUnavailable(f"{short_wallet(wallet)} has no budget in {self._path}")
             if why["existing"] is not None:
                 existing = json.loads(why["existing"])
-                # A voided id is spent: holding it again would bring back a payment given up.
-                if existing["state"] == "void":
-                    raise UsageError(f"payment {args['payment']} was voided; retry with a new id")
+                payment = str(args["payment"])
+                state = existing["state"]
+                # An id is one payment, held once. Holding it again, whatever room is left, could
+                # pay it a second time; a voided id would bring back a payment given up. A
+                # process that restarts looks its payment up instead.
+                if state == "void":
+                    raise UsageError(
+                        f"payment {payment} was voided; retry with a new id",
+                        payment_id=payment,
+                        payment_state=state,
+                    )
                 if existing["wallet"] == wallet and existing["amount"] == args["amount"]:
-                    return {
-                        "payment": args["payment"],
-                        "at": None,
-                        "until": None,
-                        "state": existing["state"],
-                        "created": False,
-                        "holder": None,
-                    }
+                    raise UsageError(
+                        f"payment {payment} is already in the ledger ({state}); look it up with "
+                        "payment(id) instead of holding it again",
+                        payment_id=payment,
+                        payment_state=state,
+                    )
                 raise UsageError(
-                    f"payment {args['payment']} is already in the ledger, for "
+                    f"payment {payment} is already in the ledger, for "
                     f"{format_amount(existing['amount'], why['unit'])} from "
-                    f"{short_wallet(existing['wallet'])}"
+                    f"{short_wallet(existing['wallet'])}",
+                    payment_id=payment,
+                    payment_state=state,
                 )
             if why["settles_too_soon"] and until_ms is not None:
                 raise UsageError(
@@ -802,11 +810,12 @@ class Ledger:
     def settle(self, payment: str, *, holder: str | None, evidence: str | None = None) -> Row:
         """held or void -> settled, with the evidence, by the process that held it.
 
-        Settling a settled payment is a no-op, for anyone.
+        Settling a settled payment again is a no-op for that process; without the token it is
+        refused, whatever the payment's state.
         """
 
         def why(current: Row, mine: Callable[[], bool]) -> str | None:
-            if current["state"] == "settled" or mine():
+            if mine():
                 return None
             return held_elsewhere(str(current["payment"]), "settle")
 

@@ -200,10 +200,8 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
         existing = None if step["id"] is None else model.payments.get(step["id"])
         expected: Any
         if existing is not None:
-            # A voided id is spent; any other existing id, same amount, is that payment.
-            expected = ("ok", False)
-            if existing.state == "void" or existing.amount != step["amount"]:
-                expected = ("usage", None)
+            # An id is one payment, held once: an existing id is refused, whatever its state.
+            expected = ("usage", None)
         elif until is not None and until <= model.now:
             expected = ("usage", None)
         elif (refused := model.verdict(step["amount"], limits)) is not None:
@@ -223,7 +221,7 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
         )
         if actual[0] == "ok":
             row = actual[1]
-            if row["created"]:
+            if True:
                 stop = None if within is None else model.now + within
                 bound = until if until is not None else stop
                 model.payments[row["payment"]] = Payment(
@@ -235,7 +233,7 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
                     holder=row["holder"],
                 )
                 known.append(row["payment"])
-            actual = ("ok", expected[1] if not row["created"] else True)
+            actual = ("ok", True)
         return expected, actual
     if op in ("settle", "void", "note", "bound"):
         pid = "missing" if not known or step["pick"] == 7 else known[step["pick"] % len(known)]

@@ -80,7 +80,21 @@ class UsageError(Exception):
     A malformed amount, wallet or option, a settle-by time that isn't after now, a move a
     payment's state doesn't allow (voiding a settled payment), a payment that doesn't exist, or
     an id already used for another payment.
+
+    When a hold names an id already in the ledger, ``payment_id`` and ``payment_state`` say which
+    payment that is and where it stands; otherwise they are None.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        payment_id: str | None = None,
+        payment_state: Literal["held", "settled", "void"] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.payment_id = payment_id
+        self.payment_state = payment_state
 
 
 class NotSent(Exception):  # noqa: N818 - says what happened, not that something failed

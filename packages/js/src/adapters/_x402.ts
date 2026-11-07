@@ -393,9 +393,9 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
 
   client.onPaymentCreationFailure(async (context: PaymentCreationFailureContext) => {
     // A later hook threw after this guard held the payment: the payload is never returned, so
-    // never sent. A hold this guard found already in the ledger is left as it was.
+    // never sent. (A payload whose identity was already in the ledger was refused, not held.)
     const slot = (context as Slotted)[SLOT];
-    if (slot?.hold?.state === 'held' && slot.hold.created) {
+    if (slot?.hold?.state === 'held') {
       forget(slot.payload);
       await slot.hold.void({ evidence: 'not sent: a later x402 hook failed' });
     }

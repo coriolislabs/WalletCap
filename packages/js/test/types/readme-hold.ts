@@ -9,13 +9,17 @@ declare function sendUsdc(to: string, amount: string): Promise<string>;
 declare const payee: string;
 declare function neverBroadcast(error: unknown): boolean;
 // --- README ---
-const hold = await budget.hold('$5', { id: `order-${orderId}`, settlesWithin: 300_000 });
-try {
-  const tx = await sendUsdc(payee, '5');
-  await hold.settle({ tx });
-} catch (error) {
-  if (neverBroadcast(error)) await hold.void({ evidence: String(error) });
-  else await hold.note('unknown', String(error)); // it keeps counting
+const id = `order-${orderId}`;
+// A retry after a restart finds the earlier payment: look, don't pay again.
+if ((await budget.payment(id)) === null) {
+  const hold = await budget.hold('$5', { id, settlesWithin: 300_000 });
+  try {
+    const tx = await sendUsdc(payee, '5');
+    await hold.settle({ tx });
+  } catch (error) {
+    if (neverBroadcast(error)) await hold.void({ evidence: String(error) });
+    else await hold.note('unknown', String(error)); // it keeps counting
+  }
 }
 // --- end ---
 

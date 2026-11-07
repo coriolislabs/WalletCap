@@ -17,7 +17,6 @@ import subprocess
 import sys
 import time
 import warnings
-from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -886,9 +885,10 @@ def test_amounts_come_back_as_micros_that_read_back_as_micros(tmp_path: Path) ->
 def test_one_id_is_one_payment_and_pay_never_makes_it_twice(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
     first = budget.hold("$40", id="order-17")
-    again = budget.hold("$40", id="order-17")
-    assert (first.created, again.created, again.id) == (True, False, "order-17")
-    assert budget.status().payments == 1
+    with pytest.raises(UsageError, match="already in the ledger") as again:
+        budget.hold("$40", id="order-17")
+    assert (again.value.payment_id, again.value.payment_state) == ("order-17", "held")
+    assert (first.id, budget.status().payments) == ("order-17", 1)
     with pytest.raises(UsageError, match="already in the ledger"):
         budget.hold("$41", id="order-17")
     ran = False
@@ -916,30 +916,44 @@ def test_a_voided_id_is_spent_so_a_retry_cannot_bring_a_payment_back(tmp_path: P
     )
 
 
+def test_a_retry_of_a_paid_order_is_refused_not_paid_again(tmp_path: Path) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    for order in ("order-1", "order-2"):
+        budget.hold("$5", id=order).settle(tx=TX)
+    with pytest.raises(BudgetRefused):
+        budget.hold("$5", id="order-3")
+    # The process restarts and retries order 1. 0.4's draft handed back the settled payment, the
+    # caller sent $5 again, and settle() said nothing: $15 sent against a $10 cap.
+    restarted = open_budget(WALLET, path=path)
+    with pytest.raises(UsageError) as again:
+        restarted.hold("$5", id="order-1")
+    assert again.value.payment_state == "settled"
+    record = restarted.payment("order-1")
+    assert record is not None
+    assert record.state == "settled"
+    assert restarted.payment("wc-nobody") is None
+    assert restarted.status().spent == 10_000_000
+
+
 def test_only_the_process_that_held_a_payment_or_the_owner_can_move_it(tmp_path: Path) -> None:
     path = tmp_path / "b.sqlite"
     budget = open_budget(WALLET, path=path, per_day="$20", create=True)
     held = budget.hold("$10", id="order-18")
-    # Another process on the same file reads the id from holds() and holds it again: it gets
-    # the payment (created False), and no way to move it.
+    # Another process on the same file reads the id from holds() and tries to hold it again.
+    # 0.4's first draft let it void the payment and pay itself a full cap. Holding the id is
+    # refused; the process can look it up.
     other = open_budget(WALLET, path=path)
     [seen] = other.holds()
-    borrowed = other.hold("$10", id=seen.id)
-    assert borrowed.created is False
-    message = "order-18 was held by another process: only that process, or the budget's owner"
-    moves: list[Callable[[], object]] = [
-        borrowed.void,
-        borrowed.settle,
-        lambda: borrowed.note("unknown"),
-        lambda: borrowed.settles_within(timedelta(seconds=1)),
-        lambda: borrowed.settles_by(datetime.now(UTC) + timedelta(minutes=1)),
-    ]
-    for move in moves:
-        with pytest.raises(UsageError, match=message):
-            move()
+    with pytest.raises(UsageError) as again:
+        other.hold("$10", id=seen.id)
+    assert again.value.payment_state == "held"
+    record = other.payment(seen.id)
+    assert record is not None
+    assert record.state == "held"
     assert budget.status().in_flight == 10_000_000
     held.settle(tx=TX)
-    borrowed.settle()  # settled already: a no-op, for anyone
+    held.settle()  # settled already: a no-op for the process that holds its token
     assert budget.status().spent == 10_000_000
     # The owner reconciles a payment whoever held it, with evidence; settled stays settled.
     second = other.hold("$5", id="order-19")

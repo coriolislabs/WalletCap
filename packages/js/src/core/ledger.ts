@@ -130,7 +130,6 @@ export interface Held {
   at: bigint | null;
   until: bigint | null;
   state: PaymentState;
-  created: boolean;
   holder: string | null;
 }
 
@@ -823,18 +822,26 @@ export class Ledger {
     };
     return this.#write((): Held => {
       const held = this.#get<{ payment: string; at: bigint; until: bigint | null }>('hold', args);
-      if (held !== null) return { ...held, state: 'held', created: true, holder: args.holder };
+      if (held !== null) return { ...held, state: 'held', holder: args.holder };
       const why = this.#get<RefusalRow>('refusal', args);
       if (why === null) throw this.#noBudget(wallet);
       if (why.existing !== null) {
         const existing = JSON.parse(why.existing) as { wallet: string; amount: number; state: PaymentState };
-        // A voided id is spent: holding it again would bring a payment back that was given up.
-        if (existing.state === 'void') throw new UsageError(`payment ${args.payment} was voided; retry with a new id`);
+        const payment = args.payment as string;
+        const known = { paymentId: payment, paymentState: existing.state };
+        // An id is one payment, held once. Holding it again, whatever room is left, could pay it a
+        // second time; a voided id would bring back a payment given up. A process that restarts
+        // looks its payment up instead.
+        if (existing.state === 'void') throw new UsageError(`payment ${payment} was voided; retry with a new id`, known);
         if (existing.wallet === wallet && BigInt(existing.amount) === args.amount) {
-          return { payment: args.payment as string, at: null, until: null, state: existing.state, created: false, holder: null };
+          throw new UsageError(
+            `payment ${payment} is already in the ledger (${existing.state}); look it up with payment(id) instead of holding it again`,
+            known,
+          );
         }
         throw new UsageError(
-          `payment ${args.payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`,
+          `payment ${payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`,
+          known,
         );
       }
       if (why.settles_too_soon) {
@@ -865,11 +872,12 @@ export class Ledger {
 
   /**
    * held or void -> settled, with the evidence (a transaction hash, the payee's answer), by the
-   * process that held it (`holder`). Settling a settled payment is a no-op, for anyone.
+   * process that held it (`holder`). Settling a settled payment again is a no-op for that process;
+   * without the token it is refused, whatever the payment's state.
    */
   settle(payment: string, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<PaymentRow> {
     return this.#move('settle', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) }, (current, mine) =>
-      current.state === 'settled' || mine() ? null : heldElsewhere(current.payment, 'settle'),
+      mine() ? null : heldElsewhere(current.payment, 'settle'),
     );
   }
 

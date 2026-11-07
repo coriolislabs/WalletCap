@@ -50,16 +50,21 @@ For more control, hold the payment yourself:
 ```python
 from datetime import timedelta
 
-hold = budget.hold("$5", id=f"order-{order_id}", settles_within=timedelta(minutes=5))
-try:
-    hold.settle(tx=send_usdc(payee, "5"))
-except BroadcastFailed:
-    hold.void(evidence="never broadcast")
+order = f"order-{order_id}"
+# A retry after a restart finds the earlier payment: look, don't pay again.
+if budget.payment(order) is None:
+    hold = budget.hold("$5", id=order, settles_within=timedelta(minutes=5))
+    try:
+        hold.settle(tx=send_usdc(payee, "5"))
+    except BroadcastFailed:
+        hold.void(evidence="never broadcast")
 ```
 
-- One id is one payment: holding it again returns that payment (`hold.created` is `False`), and
-  `pay()` refuses an id already in the ledger. Only the hold that took a payment can move it,
-  and a voided id can't be held again: a retry takes a new id.
+- One id is one payment, held once. Holding an id already in the ledger raises `UsageError`,
+  whose `payment_state` says where that payment stands, whatever room the budget has left, and
+  `pay()` refuses it before the block runs. A process that restarts looks its payment up with
+  `budget.payment(id)`. Only the hold that took a payment can move it, and a voided id can't be
+  held again: a retry takes a new id.
 - `hold.settles_by(when)` and `hold.settles_within(duration)` tell an open hold, once, the last
   moment it could settle. `hold.note("unknown", detail)` records what you know; it counts the same.
 - `budget.check("$5")` answers without spending. `budget.status()`, `budget.history()` and

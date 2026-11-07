@@ -77,8 +77,8 @@ class Model {
 
   hold({ id, amount, until, within, limits, rail }) {
     const existing = id === null ? undefined : this.payments.get(id);
-    // A voided id is spent; any other existing id, same amount, is that payment.
-    if (existing !== undefined) return existing.state !== 'void' && existing.amount === amount ? { ok: true, created: false } : { usage: true };
+    // An id is one payment, held once: an existing id is refused, whatever its state.
+    if (existing !== undefined) return { usage: true };
     if (until !== null && until <= this.now) return { usage: true };
     const refused = this.verdict(amount, limits);
     if (refused !== null) return { refused };
@@ -92,7 +92,7 @@ class Model {
       outcome: null,
       order: this.order++,
     };
-    return { ok: true, created: true, payment };
+    return { ok: true, payment };
   }
 
   settle(id) {
@@ -272,12 +272,12 @@ test('the ledger and the model of spec/ledger.md agree on every step of random h
                 limits: { perPayment: big(own.perPayment), cap: big(own.cap), windowMs: big(own.windowMs), maxPayments: big(own.maxPayments) },
               }),
             );
-            if (expected.created && actual.ok) {
+            if (actual.ok) {
               model.payments.set(actual.value.payment, expected.payment);
               known.push(actual.value.payment);
               holders.set(actual.value.payment, actual.value.holder);
             }
-            if (actual.ok) actual = { ok: true, created: actual.value.created };
+            if (actual.ok) actual = { ok: true };
           } else if (['settle', 'void', 'note', 'bound'].includes(step.op)) {
             const id = target(step.pick);
             if (step.op === 'settle') expected = model.settle(id);
@@ -315,7 +315,7 @@ test('the ledger and the model of spec/ledger.md agree on every step of random h
             expected = { voided: model.voidUnknown(step.olderThan) };
             actual = { voided: (await ledger.voidUnknown(WALLET, BigInt(step.olderThan))).map(row => row.payment) };
           }
-          const { payment: _created, ...comparable } = expected;
+          const { payment: _payment, ...comparable } = expected;
           assert.deepEqual(actual, comparable, where);
           const status = await ledger.status(WALLET);
           assert.deepEqual(

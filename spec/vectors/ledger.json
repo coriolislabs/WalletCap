@@ -113,11 +113,11 @@
       ]
     },
     {
-      "name": "transitions are idempotent, and one identity is one payment",
+      "name": "settling is idempotent, and one identity is one payment, held once",
       "budget": { "cap": 150000000, "window_ms": 86400000 },
       "steps": [
         { "op": "hold", "amount": 50000000, "id": "order-1", "expect": { "held": "order-1" } },
-        { "op": "hold", "amount": 50000000, "id": "order-1", "expect": { "held": "order-1" } },
+        { "op": "hold", "amount": 50000000, "id": "order-1", "expect": { "error": "usage" } },
         { "op": "hold", "amount": 40000000, "id": "order-1", "expect": { "error": "usage" } },
         { "op": "settle", "id": "order-1", "expect": { "state": "settled" } },
         { "op": "settle", "id": "order-1", "expect": { "state": "settled" } },
@@ -275,7 +275,7 @@
       "budget": { "cap": 150000000, "window_ms": 86400000 },
       "steps": [
         { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
-        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "error": "usage" } },
         { "op": "void", "id": "a", "as": "other", "expect": { "error": "usage" } },
         { "op": "note", "id": "a", "as": "other", "outcome": "unknown", "expect": { "error": "usage" } },
         { "op": "bound", "id": "a", "as": "other", "within_ms": 300000, "expect": { "error": "usage" } },
@@ -284,7 +284,7 @@
         { "op": "void", "id": "a", "as": "owner", "evidence": "the chain shows it never moved", "expect": { "state": "void" } },
         { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
         { "op": "settle", "id": "b", "expect": { "state": "settled" } },
-        { "op": "settle", "id": "b", "as": "other", "expect": { "state": "settled" } },
+        { "op": "settle", "id": "b", "as": "other", "expect": { "error": "usage" } },
         { "op": "void", "id": "b", "as": "owner", "expect": { "error": "usage" } },
         { "op": "settle", "id": "a", "as": "owner", "evidence": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "expect": { "state": "settled" } },
         { "op": "status", "expect": { "spent": 100000000, "in_flight": 0, "payments": 2 } }

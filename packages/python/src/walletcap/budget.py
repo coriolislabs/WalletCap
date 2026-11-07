@@ -472,14 +472,12 @@ class Hold:
         amount: Micros,
         state: PaymentState,
         *,
-        created: bool,
         holder: str | None = None,
     ) -> None:
         self._ledger = ledger
         self._id = payment_id
         self._amount = amount
         self._state = state
-        self._created = created
         self._holder = holder
         self.tx: str | None = None
 
@@ -506,22 +504,16 @@ class Hold:
 
         return self._state
 
-    @property
-    def created(self) -> bool:
-        """False when the id was already in the ledger, for this wallet and amount."""
-
-        return self._created
-
     def settle(self, *, tx: str | None = None) -> None:
         """The payment settled. It counts through one window from now, or from its settle-by time.
 
         A settlement never shortens a hold. ``tx`` is the evidence, a transaction hash.
         """
 
-        # Settling a payment that is already settled is a no-op, with or without the token.
-        self._state = self._ledger.settle(self._id, holder=self._holder, evidence=tx or self.tx)[
-            "state"
-        ]
+        # Settling a payment this hold already settled is a no-op.
+        self._state = self._ledger.settle(
+            self._id, holder=self._token("settle"), evidence=tx or self.tx
+        )["state"]
 
     def void(self, *, evidence: str | None = None) -> None:
         """The payment never left the wallet, and never will: it stops counting.
@@ -589,7 +581,7 @@ class _Taken:
 
 
 def _void_cancelled(hold: Hold) -> None:
-    if hold.created and hold.state == "held":
+    if hold.state == "held":
         with contextlib.suppress(BudgetUnavailable, UsageError):
             hold.void(evidence=_CANCELLED)
 
@@ -659,11 +651,6 @@ class Paying:
 
     def __enter__(self) -> Hold:
         hold = self._budget._hold(self._request)
-        if not hold.created:
-            raise UsageError(
-                f"payment {hold.id} is already in the ledger ({hold.state}); "
-                "pay() doesn't make it again"
-            )
         self._hold = hold
         return hold
 
@@ -839,8 +826,9 @@ class Budget:
         """Hold ``amount`` before paying, or raise ``BudgetRefused``.
 
         Settle the hold when the payment settles; void it only if the payment never left. An id
-        already in the ledger, for this wallet and amount, returns that payment's hold
-        (``created`` is False). ``settles_by`` (a timezone-aware datetime after now) or
+        is one payment, held once: an id already in the ledger raises ``UsageError``, whose
+        ``payment_state`` says where it stands, and a process that restarts looks its payment up
+        with ``payment(id)``. ``settles_by`` (a timezone-aware datetime after now) or
         ``settles_within`` (a timedelta) bounds how long it can still settle.
         """
 
@@ -869,9 +857,21 @@ class Budget:
             str(held["payment"]),
             micros,
             cast("PaymentState", held["state"]),
-            created=bool(held["created"]),
             holder=held["holder"],
         )
+
+    def payment(self, payment_id: str) -> PaymentRecord | None:
+        """One of this wallet's payments, by its id, or None.
+
+        How a process that restarts finds out what happened to a payment it held, instead of
+        holding the id again.
+        """
+
+        row = self._ledger.payment(payment_id)
+        return None if row is None or row["wallet"] != self._wallet else record_of(row)
+
+    async def apayment(self, payment_id: str) -> PaymentRecord | None:
+        return await asyncio.to_thread(self.payment, payment_id)
 
     def pay(
         self,

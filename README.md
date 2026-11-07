@@ -183,20 +183,26 @@ throw notSent(error); // inside the payment function
 For more control, `hold()` gives you the payment's handle:
 
 ```js
-const hold = await budget.hold('$5', { id: `order-${orderId}`, settlesWithin: 300_000 });
-try {
-  const tx = await sendUsdc(payee, '5');
-  await hold.settle({ tx });
-} catch (error) {
-  if (neverBroadcast(error)) await hold.void({ evidence: String(error) });
-  else await hold.note('unknown', String(error)); // it keeps counting
+const id = `order-${orderId}`;
+// A retry after a restart finds the earlier payment: look, don't pay again.
+if ((await budget.payment(id)) === null) {
+  const hold = await budget.hold('$5', { id, settlesWithin: 300_000 });
+  try {
+    const tx = await sendUsdc(payee, '5');
+    await hold.settle({ tx });
+  } catch (error) {
+    if (neverBroadcast(error)) await hold.void({ evidence: String(error) });
+    else await hold.note('unknown', String(error)); // it keeps counting
+  }
 }
 ```
 
-- One id is one payment: holding an id again returns that payment (`hold.created` is false),
-  and `pay()` refuses an id already in the ledger, so nothing is paid twice. Only the hold that
-  took a payment can settle, void or note it: a second hold of its id can't, and neither can
-  another process. A voided id can't be held again; a retry takes a new id.
+- One id is one payment, held once. Holding an id that is already in the ledger throws
+  `UsageError`, whose `paymentState` says where that payment stands, whatever room the budget
+  has left; `pay()` refuses it before your function runs. A process that restarts looks its
+  payment up with `budget.payment(id)` instead of holding it again. Only the hold that took a
+  payment can settle, void or note it; another process can't. A voided id can't be held again:
+  a retry takes a new id.
 - `hold.settlesBy(date)` or `hold.settlesWithin(ms)` tells an open hold, once, the last moment
   it could settle.
 - If the payment went through but the budget can't record it, `pay()` throws

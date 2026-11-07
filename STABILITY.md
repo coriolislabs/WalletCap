@@ -63,8 +63,8 @@ Every name in `walletcap.__all__`: `open_budget`, `Budget`, `Hold`, `Paying`, `o
 The Python names match the JavaScript ones, in Python's naming convention: `open_budget` for
 `openBudget`, `set_limits` for `setLimits`, `void_unknown` for `voidUnknown`, `payment_id` for
 `paymentId`, `windowMs` for `window_ms`, `busyTimeoutMs` for `busy_timeout_ms` (milliseconds in
-both). The async forms of the payer's methods are `acheck`, `ahold`, `astatus`, `aholds` and
-`ahistory`, and a hold's are `asettle`, `avoid`, `asettles_by`, `asettles_within` and `anote`.
+both). The async forms of the payer's methods are `acheck`, `ahold`, `apayment`, `astatus`, `aholds`
+and `ahistory`, and a hold's are `asettle`, `avoid`, `asettles_by`, `asettles_within` and `anote`.
 Where a value's type differs, each takes its language's own: a hold's `settlesWithin` is
 milliseconds in JavaScript and a `timedelta` in Python, and `settlesBy` a `Date` or milliseconds
 in JavaScript and an aware `datetime` in Python. `code`, `source`, `state` and `outcome` are
@@ -95,6 +95,10 @@ ADR 0015 records why.
 Four classes, the same in both languages, with no common base: `BudgetUnavailable`,
 `BudgetRefused`, `PaymentNotRecorded` and `UsageError`. None of the Python ones is a
 `ValueError`. Moving an error from one class to another is a breaking change.
+
+`UsageError` from a hold of an id already in the ledger carries `paymentId` and `paymentState`
+(Python `payment_id` and `payment_state`): which payment holds the id, and where it stands. They
+are null for every other `UsageError`.
 
 `BudgetRefused.code` is one of:
 

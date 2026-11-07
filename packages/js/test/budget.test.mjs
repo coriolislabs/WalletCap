@@ -216,7 +216,7 @@ test('pay() returns what the payment returns and keeps its transaction hash', as
   );
   assert.deepEqual(result, { hash: TX, ok: true });
   assert.match(seen.id, /^wc-[0-9a-f]{32}$/);
-  assert.deepEqual([seen.state, seen.created], ['settled', true]);
+  assert.equal(seen.state, 'settled');
   const [entry] = await budget.history();
   assert.deepEqual(
     [entry.status, entry.amount, entry.tx, entry.to, entry.note],
@@ -423,11 +423,14 @@ test('the payer handle has no owner methods, and the owner reconciles with evide
   assert.equal(await owner.payment('wc-nobody'), null);
 });
 
-test('one id is one payment: holding it again returns it, and pay() never makes it twice', async () => {
+test('one id is one payment: holding it again is refused, and pay() never makes it twice', async () => {
   const { budget } = await fixture({ perDay: '$150' });
   const first = await budget.hold('$40', { id: 'order-17' });
-  const again = await budget.hold('$40', { id: 'order-17' });
-  assert.deepEqual([first.created, again.created, again.id, (await budget.status()).payments], [true, false, 'order-17', 1n]);
+  await assert.rejects(
+    budget.hold('$40', { id: 'order-17' }),
+    error => error instanceof UsageError && error.paymentId === 'order-17' && error.paymentState === 'held',
+  );
+  assert.deepEqual([first.id, (await budget.status()).payments], ['order-17', 1n]);
   await assert.rejects(budget.hold('$41', { id: 'order-17' }), error => error instanceof UsageError && /already in the ledger/.test(error.message));
   let ran = false;
   await assert.rejects(
@@ -603,32 +606,36 @@ test('a voided id is spent: holding it again is refused, so a retry cannot bring
   assert.deepEqual([status.spent, status.inFlight, status.remaining], [10_000_000n, 0n, 0n]);
 });
 
+test("a retry of a paid order is refused, not paid again: the README's hold() example", async () => {
+  const { budget, path } = await fixture({ perDay: '$10' });
+  for (const id of ['order-1', 'order-2']) {
+    const hold = await budget.hold('$5', { id });
+    await hold.settle({ tx: TX });
+  }
+  await assert.rejects(budget.hold('$5', { id: 'order-3' }), refusedFor('budget'));
+  // The process restarts and retries order 1. 0.4's draft handed back the settled payment, the
+  // caller sent $5 again, and settle() said nothing: $15 sent against a $10 cap.
+  const restarted = await openBudget({ wallet: WALLET, path });
+  await assert.rejects(restarted.hold('$5', { id: 'order-1' }), error => error instanceof UsageError && error.paymentState === 'settled');
+  assert.equal((await restarted.payment('order-1')).state, 'settled');
+  assert.equal(await restarted.payment('wc-nobody'), null);
+  assert.equal((await restarted.status()).spent, 10_000_000n);
+  restarted.close();
+});
+
 test('only the process that held a payment, or the owner, can move it', async () => {
   const { budget, path, owner } = await fixture({ perDay: '$20' });
   const held = await budget.hold('$10', { id: 'order-18' });
-  // Another process on the same file reads the id from holds() and holds it again: it gets the
-  // payment (created false), and no way to move it. 0.4's first draft let it void the payment,
-  // pay itself a full cap, and leave the first process's settle to take it over the cap.
+  // Another process on the same file reads the id from holds() and tries to hold it again. 0.4's
+  // first draft let it void the payment and pay itself a full cap, and the first process's
+  // settle then took the budget past its cap. Holding the id is refused; it can look it up.
   const other = await openBudget({ wallet: WALLET, path });
   const [seen] = await other.holds();
-  const borrowed = await other.hold('$10', { id: seen.id });
-  assert.equal(borrowed.created, false);
-  const moves = [
-    () => borrowed.void(),
-    () => borrowed.settle(),
-    () => borrowed.note('unknown'),
-    () => borrowed.settlesWithin(1_000),
-    () => borrowed.settlesBy(new Date(1_800_000_060_000)),
-  ];
-  for (const move of moves) {
-    await assert.rejects(
-      move(),
-      error => error instanceof UsageError && /order-18 was held by another process: only that process, or the budget's owner, can/.test(error.message),
-    );
-  }
+  await assert.rejects(other.hold('$10', { id: seen.id }), error => error instanceof UsageError && error.paymentState === 'held');
+  assert.equal((await other.payment(seen.id)).state, 'held');
   assert.equal((await budget.status()).inFlight, 10_000_000n);
   await held.settle({ tx: TX });
-  await borrowed.settle(); // settled already: a no-op, for anyone
+  await held.settle(); // settled already: a no-op for the process that holds its token
   assert.equal((await budget.status()).spent, 10_000_000n);
   // The owner reconciles a payment whoever held it, with evidence; a settled one stays settled.
   const second = await other.hold('$5', { id: 'order-19' });

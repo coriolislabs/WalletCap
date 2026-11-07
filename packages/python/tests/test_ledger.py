@@ -397,9 +397,12 @@ def test_one_identity_is_one_payment(tmp_path: Path) -> None:
     ledger = _ledger(tmp_path / "budget.sqlite")
     nonce = "0x" + "11" * 32
     payment = f"eip3009:0xd797ead28c38575fdf4fc523866287372340ca02:{nonce}"
-    assert ledger.hold("agent", 50, rail="x402", payment=payment)["created"] is True
-    # The same signed authorization seen twice is one payment, counted once.
-    assert ledger.hold("agent", 50, rail="x402", payment=payment)["created"] is False
+    ledger.hold("agent", 50, rail="x402", payment=payment)
+    # The same signed authorization seen twice is one payment, counted once: holding it again is
+    # refused, and the error says where the payment stands.
+    with pytest.raises(UsageError, match="already in the ledger") as again:
+        ledger.hold("agent", 50, rail="x402", payment=payment)
+    assert (again.value.payment_id, again.value.payment_state) == (payment, "held")
     with pytest.raises(UsageError, match="already in the ledger"):
         ledger.hold("agent", 40, rail="x402", payment=payment)
     assert ledger.status("agent")["payments"] == 1

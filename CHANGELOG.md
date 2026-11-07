@@ -23,8 +23,9 @@ The ledger and the budget file:
 - A payment's id is its rail's own identity where walletcap reads one (`eip3009:<from>:<nonce>`,
   `permit2:<owner>:<nonce>`), a key the caller passes as `id`, or one the ledger makes: `wc-`
   and 32 hex digits. 0.3's ids were `spend-…` and `cdp-…`. Holding an id that is already in the
-  ledger returns that payment, with `created` false. Holding a voided id is refused with
-  `UsageError`: retry with a new id.
+  ledger is refused with `UsageError`, whose `paymentId` and `paymentState` say which payment it
+  is and where it stands; `budget.payment(id)` looks it up. A voided id can't be held again:
+  retry with a new id. `settle()` needs the hold's token, even on a settled payment.
 - Only the hold that took a payment can settle, void, bound or note it: the ledger gives each
   hold a token that its moves need. A second hold of the same id, or another process, gets
   `UsageError`. The owner's `void(id, evidence)` and `settle(id, evidence)` move any payment, and

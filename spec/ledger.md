@@ -92,10 +92,11 @@ can find it again:
 - a key the caller supplies, such as an order id;
 - otherwise the ledger's own: `wc-` and 32 random hex digits.
 
-Holding an identity that is already in the ledger appends nothing. If that payment is `VOID`,
-the client refuses the hold: a voided identity is spent, and a retry takes a new one, so a
-payment that was given up can't come back. Otherwise it returns the existing payment if the
-wallet and amount match, and refuses the hold otherwise.
+Holding an identity that is already in the ledger appends nothing, and the client refuses the
+hold, whatever room the budget has left, saying where that payment stands. An identity is one
+payment, held once: handing a caller the existing payment would let a retry pay it a second
+time, and a voided identity would bring back a payment that was given up. A process that
+restarts looks its payment up instead.
 
 Each `held` entry carries `holder`, a token of 32 random hex digits that the client makes for
 the hold and hands back only to the call that appended it. The paying process's moves need it,
