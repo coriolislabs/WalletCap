@@ -136,7 +136,9 @@ def test_both_command_lines_print_the_same_json(
     shutil.copyfile(budget_file, python_file)
     npm = _run([NODE, str(JS_CLI)], npm_file, *args)
     python = _run([sys.executable, "-m", "walletcap"], python_file, *args)
-    # Each copy names its own file; everything else is the same.
-    text = json.dumps(npm).replace(str(npm_file), str(python_file))
+    # Each copy names its own file; everything else is the same. The paths are swapped as JSON
+    # writes them, so a Windows path's backslashes match too.
+    escaped = [json.dumps(str(file))[1:-1] for file in (npm_file, python_file)]
+    text = json.dumps(npm).replace(escaped[0], escaped[1])
     _same(json.loads(text), python)
     _shape(python)
