@@ -37,7 +37,8 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150
   it; a voided id can't be held again.
 - Errors: `BudgetRefused` (`code`, `brief`), `BudgetUnavailable`, `UsageError`, and
   `PaymentNotRecorded`, which shares no base with the others: don't pay again.
-- Every method is async, and a wait for another process's lock never blocks the event loop.
+- Every method is async. A wait for another process's lock happens on the event loop between
+  tries; each try can hold the loop for up to about 10 ms, SQLite's own wait.
 
 | Integration | Import | Use |
 |---|---|---|

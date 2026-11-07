@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { after, test } from 'node:test';
 import { openBudget } from 'walletcap';
 import { race, run } from './support/race.mjs';
@@ -75,7 +76,7 @@ test("the ledger reads the time once it holds the write lock, so waiting for ano
   budget.close();
 });
 
-test("a wait for another process's write lock never blocks the event loop", async () => {
+test("while another process holds the write lock, the event loop is never stalled for long", async () => {
   const path = join(DIR, 'event-loop.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, ...LIMITS, create: true });
   // Another process takes the write lock and holds it for about 500 ms.
@@ -88,16 +89,21 @@ test("a wait for another process's write lock never blocks the event loop", asyn
   ].join(' '), path], { stdio: ['ignore', 'pipe', 'ignore'] });
   const exited = new Promise(resolve => holder.on('exit', resolve));
   await new Promise(resolve => holder.stdout.once('data', resolve));
-  let ticks = 0;
-  const ticker = setInterval(() => { ticks += 1; }, 10);
+  const delay = monitorEventLoopDelay({ resolution: 10 });
+  delay.enable();
+  const started = performance.now();
   try {
     await budget.pay('$1', async () => 'paid');
   } finally {
-    clearInterval(ticker);
+    delay.disable();
   }
-  // 0.3.0 waited inside SQLite on this thread, so no timer ran until the lock came free. A
-  // CI runner's timers can be coarse, so this asks for a few ticks, not one per 10 ms.
-  assert.ok(ticks >= 5, `the event loop ran ${ticks} ticks while the payment waited`);
+  const waited = performance.now() - started;
+  const stalled = delay.max / 1e6;
+  // The payment waited for the lock, so the measure covers the wait. 0.3.0 waited inside SQLite on
+  // this thread, so the loop stalled for the whole 500 ms. Each try now blocks at most SQLite's own
+  // 10 ms wait; the margin is for a slow CI runner.
+  assert.ok(waited >= 300, `the payment waited ${waited} ms for the lock`);
+  assert.ok(stalled < 200, `the event loop stalled for ${stalled} ms while the payment waited`);
   assert.equal((await budget.status()).spent, 1_000_000n);
   await exited;
   budget.close();

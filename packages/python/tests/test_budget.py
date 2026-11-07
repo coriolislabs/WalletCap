@@ -400,26 +400,32 @@ def test_async_paths_wait_for_the_lock_in_a_thread_not_on_the_event_loop(tmp_pat
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "locked"
 
-    async def run() -> int:
-        ticks = 0
+    async def run() -> tuple[float, float]:
+        gaps: list[float] = []
 
         async def tick() -> None:
-            nonlocal ticks
+            last = time.monotonic()
             while True:
                 await asyncio.sleep(0.01)
-                ticks += 1
+                now = time.monotonic()
+                gaps.append(now - last)
+                last = now
 
         ticker = asyncio.create_task(tick())
+        started = time.monotonic()
         async with budget.pay("$5") as payment:
             payment.tx = TX
+        waited = time.monotonic() - started
         status = await budget.astatus()
         ticker.cancel()
         assert status.spent == 5_000_000
-        return ticks
+        return waited, max(gaps)
 
-    # While the payment waited half a second for the other process's lock, the loop kept
-    # running. A CI runner's timers can be coarse, so this asks for a few ticks.
-    assert asyncio.run(run()) >= 5
+    # The payment waited about half a second for the other process's lock, in a worker thread:
+    # the loop's longest stall stays far below it. The margin is for a slow CI runner.
+    waited, stalled = asyncio.run(run())
+    assert waited >= 0.3, f"the payment waited {waited:.3f} s for the lock"
+    assert stalled < 0.2, f"the event loop stalled for {stalled:.3f} s while the payment waited"
     assert holder.wait(timeout=30) == 0
 
 

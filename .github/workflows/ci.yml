@@ -54,11 +54,44 @@ jobs:
           package-manager-cache: false
       - name: Install the workspace from the lockfile
         run: npm ci --no-audit --no-fund
-      # Each builds first. On Windows the tests that need SIGKILL skip themselves.
+      # It builds first. On Windows the tests that need SIGKILL skip themselves. walletcap-mcp's
+      # suite runs once, in its own job.
       - name: walletcap
         run: npm test -w walletcap
-      - name: walletcap-mcp
-        run: npm test -w walletcap-mcp
+
+  engines-floor:
+    name: walletcap (ubuntu-latest, Node 22.13.0, the engines floor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.13.0"
+          package-manager-cache: false
+      - name: Install the workspace from the lockfile
+        run: npm ci --no-audit --no-fund
+      - name: walletcap, on the oldest Node its engines field takes
+        run: npm test -w walletcap
+
+  quickstarts:
+    name: Quickstarts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install the workspace and build walletcap
+        run: npm ci --no-audit --no-fund && npm run build -w walletcap
+      # As the README says to run them: no wallet, chain, keys or network.
+      - name: The JavaScript quickstart
+        run: node examples/quickstart/quickstart.mjs
+      - name: The Python quickstart
+        run: python examples/quickstart/quickstart.py
 
   mcp:
     name: walletcap-mcp

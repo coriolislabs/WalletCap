@@ -206,9 +206,10 @@ try {
   `source` says whether the owner's limit (`budget`) or this process's own (`process`) would
   refuse, and every field but `ok` and `remaining` is `null` when it would be paid.
   `budget.status()`, `budget.history()` and `budget.holds()` read the count.
-- Every method is async. A wait for another process's write lock happens on the event loop, in
-  steps of up to 50 ms, never inside a blocking call; `busyTimeoutMs` (30,000 by default) bounds
-  it.
+- Every method is async. Each try at the file can hold the event loop for up to about 10 ms, the
+  wait SQLite itself makes for a lock; between tries, a wait for another process's write lock
+  happens on the event loop, in steps of up to 50 ms, for at most `busyTimeoutMs` (30,000 by
+  default).
 
 Errors are four classes with no common base:
 

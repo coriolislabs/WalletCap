@@ -46,7 +46,8 @@ JavaScript:
   given.
 - The API is async. `openBudget()` returns a Promise, and so does every method of the payer and
   owner handles and of a hold. A wait for another process's write lock happens on the event
-  loop, for up to `busyTimeoutMs` (30,000 by default).
+  loop between tries, for up to `busyTimeoutMs` (30,000 by default); each try can hold the loop
+  for up to about 10 ms, SQLite's own wait.
 - `budget.reserve()` is `budget.hold()`, and returns a `Hold`; `Reservation` is gone. A hold's
   `commit({ tx })` is `settle({ tx })`, `release()` is `void({ evidence })`, and `annotate()` is
   `note(outcome, detail)`. `hold()` and `pay()` take `id` and `settlesWithin` (milliseconds).

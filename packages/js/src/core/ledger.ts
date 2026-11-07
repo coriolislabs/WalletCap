@@ -2,7 +2,8 @@
 // The budget file's client. The rule is not in this module: spec/schema.sql holds the tables,
 // the counting rule and admission, and this module runs its statements by name, as the Python
 // package does. What it adds is reading input, opening and upgrading the file, waiting for
-// another process's write lock without blocking the event loop, and wording refusals. The file
+// another process's write lock on the event loop (each try holds it for at most SQLite's own
+// 10 ms wait), and wording refusals. The file
 // serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts.
 import { randomBytes } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync } from 'node:fs';

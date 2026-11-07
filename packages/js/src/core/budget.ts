@@ -41,7 +41,7 @@ export interface BudgetOptions extends LimitOptions {
    * its owner creates them (`walletcap set`). Pass true only for a demo or a first-run setup.
    */
   create?: boolean;
-  /** How long to wait for another process's write, in milliseconds. Defaults to 30000. The wait never blocks the event loop. */
+  /** How long to wait for another process's write, in milliseconds. Defaults to 30000. Between tries the wait is on the event loop; each try can hold it for up to about 10 ms, SQLite's own wait. */
   busyTimeoutMs?: number;
   /** Called instead of process.emitWarning when a limit this code asks for is looser than the budget's, and so does nothing. */
   onWarning?: (message: string) => void;
