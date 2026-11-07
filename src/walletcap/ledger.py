@@ -59,6 +59,7 @@ from walletcap.money import (
 __all__ = [
     "MAX_AMOUNT",
     "SCHEMA_VERSION",
+    "UNBOUNDED_HOLD_MS",
     "UNSET",
     "BudgetError",
     "BudgetLimits",
@@ -80,6 +81,13 @@ SCHEMA_VERSION = "2"
 Schema 2 is 0.2.x's schema 1 with every budget under its canonical name and
 settled payments that keep their reservation's expiry. 0.3 upgrades a schema 1
 file when it opens it, and 0.2.x refuses a schema 2 file rather than misread it.
+"""
+
+UNBOUNDED_HOLD_MS: Final = 3_660_000
+"""How old a hold with no settle-by time must be before a bulk release gives it back.
+
+An hour, the longest an x402 authorization walletcap lets be signed can be
+redeemed (``MAX_PAYMENT_TIMEOUT_SECONDS`` in the JavaScript package), and a minute.
 """
 
 _ID = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
@@ -1057,8 +1065,9 @@ class Ledger:
 
         Only those taken ``older_than_ms`` ago or more, for an owner who has
         checked they never left the wallet. One with a settle-by time still
-        ahead stays: the payee could settle it after the release. Returns the
-        payments released.
+        ahead stays: the payee could settle it after the release. One with no
+        settle-by time stays until it is ``UNBOUNDED_HOLD_MS`` old: the wallet
+        may have signed it as it failed. Returns the payments released.
         """
 
         def outcome(reference: str | None) -> object:
@@ -1080,9 +1089,9 @@ class Ledger:
                 row
                 for row in connection.execute(
                     "SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' "
-                    "AND at_ms <= ? AND (expires_at_ms IS NULL OR expires_at_ms <= ?) "
-                    "ORDER BY at_ms, rowid",
-                    (instrument, now - older_than_ms, settled),
+                    "AND at_ms <= ? AND ((expires_at_ms IS NULL AND at_ms <= ?) "
+                    "OR expires_at_ms <= ?) ORDER BY at_ms, rowid",
+                    (instrument, now - older_than_ms, now - UNBOUNDED_HOLD_MS, settled),
                 ).fetchall()
                 if outcome(row["reference"]) in ("unknown", "refused")
             ]

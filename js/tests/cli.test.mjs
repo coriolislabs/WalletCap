@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../_clock.mjs';
+import { guardAgenticWallet } from '../agentic.mjs';
 import { openBudget } from '../index.mjs';
 
 const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
@@ -118,6 +119,41 @@ test('a bulk release keeps a payment its payee could still settle, and clears re
   assert.match(released.out, /Released 2 payments of unknown or refused outcome older than 1h \(\$30\.00 from 0xd797…ca02\)/);
   assert.deepEqual(budget.holds().map(hold => hold.id), [live.id]);
   assert.equal(budget.check('$100').ok, false);
+  budget.close();
+});
+
+test('a bulk release keeps a hold with no settle-by time for an hour and a minute, and a CDP roll-back until it can no longer settle', async () => {
+  const path = join(DIR, 'unbounded.sqlite');
+  const budget = openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
+  const USDC = '0x036cbd53842c5426634e7929541ec2318f3dcf7e';
+  const terms = { scheme: 'exact', network: 'eip155:84532', asset: USDC, amount: '50000', payTo: '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', maxTimeoutSeconds: 3600 };
+  // An Agentic Wallet call that threw after the wallet may have signed terms valid an hour, and a
+  // payment CDP rolled back: one pair taken 62 minutes ago, one pair now.
+  const failed = () => guardAgenticWallet(budget, { request: async () => { throw new Error('IPC request timed out'); }, discover: async () => ({ accepts: [terms] }) })
+    .request('make-x402-request', { baseURL: 'http://127.0.0.1:9', path: '/' }).catch(() => {});
+  const rolledBack = async () => {
+    const store = budget.cdpStore({ asset: USDC });
+    const entry = { atomicAmount: 50_000n, asset: USDC, network: 'eip155:84532', payTo: terms.payTo, at: Date.now() };
+    await store.append(entry);
+    await store.removeEntry(entry);
+    store.close();
+  };
+  setClock(() => Date.now() - 62 * 60_000);
+  await failed();
+  await rolledBack();
+  resetClock();
+  await failed();
+  await rolledBack();
+  await new Promise(done => setTimeout(done, 20));
+  // 0.3.0 gave back all four 20 ms later, though the new pair could still be redeemed.
+  const released = cli(path, 'release', '--all-unknown', '--older-than', '10ms');
+  assert.equal(released.code, 0, released.err);
+  assert.match(released.out, /Released 2 payments of unknown or refused outcome older than 10ms \(\$0\.10 from 0xd797…ca02\)/);
+  const holds = budget.holds();
+  assert.deepEqual(holds.map(hold => [hold.reason, hold.until === null]), [['unknown', true], ['refused', false]]);
+  assert.equal(budget.status().inFlight, 100_000n);
+  assert.match(cli(path, 'release', '--all-unknown', '--older-than', '10ms').out,
+    /can be released yet\. One goes once it is older than 10ms and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old\./);
   budget.close();
 });
 

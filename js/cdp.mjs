@@ -50,8 +50,7 @@ const ceilDiv = (numerator, denominator) => (numerator + denominator - 1n) / den
  * process on the host, for every rail. Pass it as `store` to applySpendControls, and set
  * maxCumulativeSpend there too: the SDK only records through its store when a
  * cumulative cap is configured. A payment CDP rolls back keeps counting here
- * until it is released; Budget.guard() frees it on its own once its
- * authorization expires.
+ * as long as it would have settled, unless its owner releases it sooner.
  */
 export class SharedBudgetStore {
   #ledger;
@@ -144,8 +143,9 @@ export class SharedBudgetStore {
   async removeEntry(entry) {
     // CDP removes a payment from its store in cases the store can't tell apart, and
     // a signed authorization may still be out there. So the payment keeps counting,
-    // as an open reservation marked refused, until someone who has checked the chain
-    // releases it.
+    // as an open reservation marked refused, for as long as it would have settled:
+    // until one window past the last moment the authorization can be redeemed.
+    // Someone who has checked the chain can release it sooner.
     const ref = reference(entry);
     this.#ledger.reopenByReference(this.#instrument, RAIL, ref, { outcome: 'refused' });
     // 0.2.0 wrote CDP entries on the x402 rail; try the old rail too. A guard

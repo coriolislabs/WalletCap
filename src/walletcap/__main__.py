@@ -76,7 +76,7 @@ def _parser() -> argparse.ArgumentParser:
         "--all-unknown",
         action="store_true",
         help="with release: every payment of unknown or refused outcome older than --older-than "
-        "that its payee can no longer settle",
+        "that its payee can no longer settle; with no settle-by time, an hour and a minute old",
     )
     parser.add_argument("--older-than", help="with release --all-unknown: 24h, 7d, 30m")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
@@ -283,7 +283,8 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
 def _release_unknown(args: argparse.Namespace, path: Path) -> str:
     """Every payment of unknown or refused outcome older than --older-than that can't settle.
 
-    For an owner who has checked the chain.
+    With no settle-by time, once it is an hour and a minute old. For an owner who has
+    checked the chain.
     """
 
     if args.id is not None:
@@ -300,8 +301,9 @@ def _release_unknown(args: argparse.Namespace, path: Path) -> str:
     window = format_window(older_than)
     if not released:
         return (
-            f"No payment of unknown or refused outcome from {short_wallet(wallet)} is older than "
-            f"{window}, apart from any its payee could still settle."
+            f"No payment of unknown or refused outcome from {short_wallet(wallet)} can be released "
+            f"yet. One goes once it is older than {window} and its payee can no longer settle it; "
+            "one with no settle-by time, once it is also an hour and a minute old."
         )
     plural = "" if len(released) == 1 else "s"
     total = sum(spend.amount for spend in released)

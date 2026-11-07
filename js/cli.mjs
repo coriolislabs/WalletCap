@@ -29,8 +29,9 @@ Commands
   release <id>         Give back an in-flight payment you know never left the wallet
   release --all-unknown --older-than <24h|7d|30m>
                        Give back every payment of unknown or refused outcome older than that,
-                       once you know none of them left the wallet; one the payee could still
-                       settle stays
+                       once you know none of them left the wallet. One the payee could still
+                       settle stays, and one with no settle-by time stays until it is an hour
+                       and a minute old
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget
   awal-mcp [-- <cmd>]  Coinbase's Agentic Wallet MCP server (~/.payments-mcp) behind a proxy that
                        counts its payments and refuses tools it can't count (--allow-tool <name>)
@@ -116,7 +117,7 @@ const detail = status => [
 ].join('\n');
 
 // Every payment of unknown or refused outcome older than --older-than that the payee can no longer
-// settle, for an owner who has checked the chain.
+// settle (with no settle-by time, an hour and a minute old), for an owner who has checked the chain.
 function releaseUnknown(values, path, id) {
   if (id !== undefined) throw new Usage('release takes an id or --all-unknown, not both');
   if (values['older-than'] === undefined) throw new Usage('release --all-unknown needs --older-than, like --older-than 24h');
@@ -128,7 +129,8 @@ function releaseUnknown(values, path, id) {
     const released = ledger.releaseUnknown(wallet, olderThan);
     if (values.json) return json(released.map(row => ({ id: row.spend_id, amount: row.amount })));
     if (released.length === 0) {
-      return `No payment of unknown or refused outcome from ${shortWallet(wallet)} is older than ${formatWindow(olderThan)}, apart from any its payee could still settle.`;
+      return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be released yet. One goes once it is older than `
+        + `${formatWindow(olderThan)} and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old.`;
     }
     const total = released.reduce((sum, row) => sum + row.amount, 0n);
     return `Released ${released.length} payment${released.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `

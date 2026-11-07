@@ -29,6 +29,13 @@ export const REFERENCE_LIMIT = 4096;
  */
 export const SETTLES_BY = Symbol('walletcap/settles-by');
 
+/**
+ * How old a hold with no settle-by time must be before a bulk release gives it back: an hour,
+ * the longest an x402 authorization walletcap lets be signed can be redeemed
+ * (MAX_PAYMENT_TIMEOUT_SECONDS), and a minute.
+ */
+export const UNBOUNDED_HOLD_MS = 3_660_000n;
+
 const ID = /^[A-Za-z0-9_.:@/-]{1,128}$/;
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS budget_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -622,8 +629,9 @@ export class Ledger {
   }
 
   /**
-   * Turn a recorded payment back into an open reservation, noting why: it counts
-   * until someone releases it, whatever the window.
+   * Turn a recorded payment back into an open reservation, noting why. It counts
+   * until someone releases it, or, if it was recorded with a settle-by time, as
+   * long as the recorded payment would have.
    */
   reopenByReference(name, rail, reference, { outcome } = {}) {
     const instrument = instrumentName(name);
@@ -635,7 +643,8 @@ export class Ledger {
       if (outcome !== undefined) {
         try { text = referenceText(JSON.stringify({ ...JSON.parse(row.reference), outcome })); } catch { /* keep the reference as it was */ }
       }
-      this.statement("UPDATE spend SET status = 'reserved', expires_at_ms = NULL, reference = ? WHERE spend_id = ?").run(text, row.spend_id);
+      // It keeps its expiry: it counts as long as the settled payment would have.
+      this.statement("UPDATE spend SET status = 'reserved', reference = ? WHERE spend_id = ?").run(text, row.spend_id);
     });
   }
 
@@ -725,7 +734,9 @@ export class Ledger {
    * Give back every open payment of unknown outcome, or refused by the payee, that
    * was taken at least `olderThanMs` ago, for an owner who has checked they never
    * left the wallet. One with a settle-by time still ahead stays: the payee could
-   * settle it after the release. Returns the payments released.
+   * settle it after the release. One with no settle-by time stays until it is
+   * UNBOUNDED_HOLD_MS old: the wallet may have signed it as it failed. Returns the
+   * payments released.
    */
   releaseUnknown(name, olderThanMs) {
     const instrument = instrumentName(name);
@@ -738,8 +749,8 @@ export class Ledger {
       // MAX_INTEGER can't say when its settle-by is, so it stays.
       const settled = now + window + 1n < MAX_INTEGER ? now + window + 1n : MAX_INTEGER - 1n;
       const released = this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' AND at_ms <= ? "
-        + 'AND (expires_at_ms IS NULL OR expires_at_ms <= ?) ORDER BY at_ms, rowid')
-        .all(instrument, now - age, settled).filter(row => ['unknown', 'refused'].includes(outcomeOf(row.reference)));
+        + 'AND ((expires_at_ms IS NULL AND at_ms <= ?) OR expires_at_ms <= ?) ORDER BY at_ms, rowid')
+        .all(instrument, now - age, now - UNBOUNDED_HOLD_MS, settled).filter(row => ['unknown', 'refused'].includes(outcomeOf(row.reference)));
       const remove = this.statement("DELETE FROM spend WHERE spend_id = ? AND status = 'reserved'");
       for (const row of released) remove.run(row.spend_id);
       return released;

@@ -301,6 +301,32 @@ def test_a_bulk_release_keeps_what_the_payee_could_still_settle(
     assert not budget.check("$100").ok
 
 
+def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "unbounded.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    now = time.time()
+    monkeypatch.setattr(_clock, "source", lambda: now - 62 * 60)  # taken 62 minutes ago
+    old = budget.reserve("$1")
+    monkeypatch.undo()
+    fresh = budget.reserve("$2")
+    for hold in (old, fresh):
+        hold.annotate(outcome="unknown")  # the payment may have been signed as it failed
+    time.sleep(0.02)
+    # 0.3.0 gave back both 20 ms later, though the fresh one may still be settled.
+    released = _cli(path, "release", "--all-unknown", "--older-than", "10ms")
+    assert released.returncode == 0, released.stderr
+    assert (
+        "Released 1 payment of unknown or refused outcome older than 10ms ($1.00 from 0xd797…ca02)"
+        in released.stdout
+    )
+    assert [hold.id for hold in budget.holds()] == [fresh.id]
+    nothing = _cli(path, "release", "--all-unknown", "--older-than", "10ms")
+    assert "can be released yet" in nothing.stdout
+    assert "one with no settle-by time, once it is also an hour and a minute old" in nothing.stdout
+
+
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
 
