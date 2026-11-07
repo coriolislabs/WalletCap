@@ -114,6 +114,7 @@ def test_a_crash_mid_upgrade_leaves_the_file_as_it_was(tmp_path: Path) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
         )
 
     timed = tmp_path / "timed.sqlite"
@@ -179,6 +180,7 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
         ),
         subprocess.Popen(
             [
@@ -194,6 +196,7 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
         ),
     ]
     time.sleep(0.3)

@@ -42,6 +42,7 @@ def _run(command: list[str], path: Path, *args: str) -> Any:
         [*command, "--path", str(path), *args, "--json"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         env={**os.environ, "PYTHONPATH": str(SOURCE)},
         timeout=60,

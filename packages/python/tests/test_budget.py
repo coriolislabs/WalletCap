@@ -395,7 +395,10 @@ def test_async_paths_wait_for_the_lock_in_a_thread_not_on_the_event_loop(tmp_pat
         "connection.execute('COMMIT')\n"
     )
     holder = subprocess.Popen(
-        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", script, str(path)],
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     )
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "locked"
@@ -556,6 +559,7 @@ def _cli(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, "-m", "walletcap", "--path", str(path), *args],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         env={**os.environ, "PYTHONPATH": str(SOURCE)},
     )
@@ -668,6 +672,7 @@ def test_python_and_javascript_spend_from_one_budget(tmp_path: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         timeout=60,
     )
@@ -713,6 +718,7 @@ def test_both_languages_find_the_same_default_file(env: dict[str, str], platform
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
         timeout=60,
     )
@@ -958,7 +964,10 @@ def _locked(path: Path, seconds: float) -> subprocess.Popen[str]:
         "connection.execute('COMMIT')\n"
     )
     holder = subprocess.Popen(
-        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", script, str(path)],
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     )
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "locked"
@@ -1052,6 +1061,7 @@ def test_the_quickstart_prints_dollars() -> None:
         [sys.executable, str(REPO / "examples" / "quickstart" / "quickstart.py")],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         env={**os.environ, "PYTHONPATH": str(SOURCE)},
     )

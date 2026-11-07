@@ -156,6 +156,7 @@ print(won)
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding="utf-8",
                 ),
             )
         )
@@ -356,7 +357,10 @@ def test_the_time_is_read_once_the_write_lock_is_held(tmp_path: Path) -> None:
     )
     # Another process takes the write lock and holds it for 400 ms.
     holder = subprocess.Popen(
-        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", script, str(path)],
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
     )
     assert holder.stdout is not None
     assert holder.stdout.readline().strip() == "locked"
