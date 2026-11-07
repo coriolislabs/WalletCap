@@ -1,0 +1,11 @@
+SPDX-License-Identifier: Apache-2.0
+
+walletcap, by ShadowPath
+Copyright 2026 Coriolis Labs Inc.
+
+This distribution is licensed under the Apache License 2.0. It is separate from
+the ShadowPath product, which is proprietary and is not included here.
+
+AccountCapSpender's ISpendPermissionManager interface restates the struct layout
+of Coinbase's SpendPermissionManager so the contract can call it; it contains no
+Coinbase code.

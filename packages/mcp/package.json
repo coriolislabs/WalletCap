@@ -1,0 +1,57 @@
+{
+  "name": "walletcap-mcp",
+  "version": "0.4.0",
+  "mcpName": "io.github.coriolislabs/walletcap",
+  "description": "Coinbase's payments MCP server behind a walletcap spend limit: a per-payment cap and rolling 24-hour USDC budget per wallet. Payments are counted, tools that move no money pass through, and every other tool is refused.",
+  "license": "Apache-2.0",
+  "author": "Coriolis Labs Inc.",
+  "type": "module",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "agent-wallet",
+    "spending-limit",
+    "spend-limit",
+    "x402",
+    "coinbase",
+    "agentic-wallet",
+    "payments-mcp",
+    "usdc",
+    "walletcap"
+  ],
+  "bin": {
+    "walletcap-mcp": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "server.json",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "test": "npm run build && node --test --test-concurrency=2 \"test/*.test.mjs\"",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "walletcap": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coriolislabs/WalletCap.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/coriolislabs/WalletCap/tree/main/packages/mcp#readme",
+  "bugs": {
+    "url": "https://github.com/coriolislabs/WalletCap/issues"
+  }
+}

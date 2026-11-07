@@ -1,5 +1,5 @@
-node_modules/
-dist/
+node_modules
+dist
 build/
 *.egg-info/
 __pycache__/
@@ -13,6 +13,15 @@ work/
 examples/quickstart/demo.sqlite
 
 # The fake awal stand-in in the tests is committed on purpose: the CLI test
-# needs its dist/ layout, and the dist/ rule above would hide it.
-!js/tests/support/fake-awal/dist/
-!js/tests/support/fake-awal/dist/**
+# needs its dist/ layout, and the dist rule above would hide it.
+!packages/js/test/support/fake-awal/dist/
+!packages/js/test/support/fake-awal/dist/**
+
+# Copies of spec/*.sql, made by the build: the files at spec/ are the source.
+packages/python/src/walletcap/spec/
+
+# Caches of the Python tools CI runs.
+.hypothesis/
+
+# Built from spec/*.sql by packages/js/scripts/gen-spec.mjs.
+packages/js/src/core/_spec.generated.ts

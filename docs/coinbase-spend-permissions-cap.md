@@ -14,14 +14,14 @@ rolling window.
 
 > **Unaudited. Testnet only.** `AccountCapSpender` moves real tokens on behalf of an agent and has
 > not had an independent audit. Read
-> [solidity/README.md](https://github.com/coriolislabs/WalletCap/blob/main/solidity/README.md)
+> [contracts/README.md](https://github.com/coriolislabs/WalletCap/blob/main/contracts/README.md)
 > before deploying it, and don't point it at a mainnet SpendPermissionManager until an audit is
 > complete.
 
 ## Deploy it on a testnet
 
 ```console
-$ cd solidity
+$ cd contracts
 $ forge create src/AccountCapSpender.sol:AccountCapSpender \
     --rpc-url "$BASE_SEPOLIA_RPC_URL" \
     --private-key "$DEPLOYER_KEY" \
@@ -48,7 +48,7 @@ $ forge create src/AccountCapSpender.sol:AccountCapSpender \
 The contract's checks also run without Foundry, on an in-process EVM:
 
 ```console
-$ cd solidity/evm && npm install && node check.mjs ..
+$ cd contracts/evm && npm install && node check.mjs ..
 ```
 
 ## Crash test: $150 over with a second permission, $0 through AccountCapSpender
@@ -70,10 +70,10 @@ period the manager holds: the crash test's suite checks that a fourth $50 is ref
 ## Links
 
 - [README: Coinbase Spend Permissions, on chain](https://github.com/coriolislabs/WalletCap#coinbase-spend-permissions-on-chain)
-- [The contract](https://github.com/coriolislabs/WalletCap/blob/main/solidity/src/AccountCapSpender.sol),
-  its [Foundry tests](https://github.com/coriolislabs/WalletCap/blob/main/solidity/test/AccountCapSpender.t.sol)
-  and the [audit scope](https://github.com/coriolislabs/WalletCap/blob/main/solidity/README.md#audit-scope)
-- [The crash test](https://github.com/coriolislabs/WalletCap/tree/main/crash-test), which says
+- [The contract](https://github.com/coriolislabs/WalletCap/blob/main/contracts/src/AccountCapSpender.sol),
+  its [Foundry tests](https://github.com/coriolislabs/WalletCap/blob/main/contracts/test/AccountCapSpender.t.sol)
+  and the [audit scope](https://github.com/coriolislabs/WalletCap/blob/main/contracts/README.md#audit-scope)
+- [The crash test](https://github.com/coriolislabs/WalletCap/tree/main/bench/crash-test), which says
   exactly what runs, and [all pages](index.md)
 - Off chain, the same budget idea for x402 payments: [any x402 client](x402-spending-limit.md) and
   [Coinbase CDP x402 spend controls](coinbase-cdp-spend-controls.md)

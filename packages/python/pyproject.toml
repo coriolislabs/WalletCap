@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: Apache-2.0
+[project]
+name = "walletcap"
+version = "0.4.0"
+description = "Spend limits for AI agent wallets: a per-payment cap and rolling 24-hour budget that holds across restarts, kept in one SQLite ledger that every process, and the npm package, shares."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Coriolis Labs Inc." }]
+keywords = [
+    "ai-agents",
+    "ai-agent",
+    "agent-wallet",
+    "agent-payments",
+    "spending-limit",
+    "spend-limit",
+    "budget",
+    "x402",
+    "usdc",
+    "stablecoin",
+    "guardrails",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.scripts]
+walletcap = "walletcap.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/coriolislabs/WalletCap"
+Repository = "https://github.com/coriolislabs/WalletCap"
+Issues = "https://github.com/coriolislabs/WalletCap/issues"
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "hypothesis==6.170.8", "mypy==2.4.0", "ruff==0.17.2"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/walletcap"]
+
+# The sdist is the Python package alone, enough to build the wheel. The tests stay in the
+# repository: they read spec/vectors and spec/fixtures and run the npm package beside this one,
+# none of which a Python sdist carries. The spec copies tests make under src/ stay out, and
+# hatch_build.py adds the spec from the repository's spec/. Hatchling packs the repository's
+# .gitignore into every sdist; hatch_build.py takes it out.
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "pyproject.toml", "hatch_build.py", "README.md", "LICENSE", "NOTICE"]
+ignore-vcs = true
+exclude = ["src/walletcap/spec", "__pycache__", "*.pyc"]
+
+# The ledger's rule ships inside the package: spec/ at the repository root is the one copy, and
+# hatch_build.py puts it in both archives.
+[tool.hatch.build.hooks.custom]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "S", "SIM", "RET", "PIE", "PT", "PTH",
+    "PL", "RUF", "BLE", "FBT", "TRY", "TC", "ERA", "DTZ", "ISC", "Q", "T20",
+]
+ignore = [
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",  # the CLI and the ledger client have many cases
+    "TRY003",  # messages say what happened, where it happened
+    "ISC001",  # conflicts with the formatter
+    "TC003",  # annotations import from the standard library at the top; it loads in milliseconds
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "S311", "S603", "S607", "PLC0415", "FBT", "T20", "S108"]
+"src/walletcap/__main__.py" = ["T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests"]
+mypy_path = "src"
+warn_unreachable = true
