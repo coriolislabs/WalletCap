@@ -104,6 +104,8 @@ other message's, may change in any release.
   ledger client and `ledgerOf`.
 - The test clock: replacing `julianday('now')` on a test's own connections. It exists for
   walletcap's own tests.
+- A hold's token, the `holder` of a `held` entry in the file. No API returns it; only the
+  ledger's own statements read it.
 - Message wording, the plain-text output of the command lines, and the order of rows in results
   except where the API says (`history` is newest first, `holds` oldest first).
 - The `walletcap-crash-test` package's output, beyond what its README says.

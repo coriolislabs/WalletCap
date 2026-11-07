@@ -21,7 +21,12 @@ The ledger and the budget file:
 - A payment's id is its rail's own identity where walletcap reads one (`eip3009:<from>:<nonce>`,
   `permit2:<owner>:<nonce>`), a key the caller passes as `id`, or one the ledger makes: `wc-`
   and 32 hex digits. 0.3's ids were `spend-…` and `cdp-…`. Holding an id that is already in the
-  ledger returns that payment.
+  ledger returns that payment, with `created` false. Holding a voided id is refused with
+  `UsageError`: retry with a new id.
+- Only the hold that took a payment can settle, void, bound or note it: the ledger gives each
+  hold a token that its moves need. A second hold of the same id, or another process, gets
+  `UsageError`. The owner's `void(id, evidence)` and `settle(id, evidence)` move any payment, and
+  settling a payment that is already settled succeeds for anyone.
 - The file is created `0600` in a `0700` folder, and opened in WAL mode with
   `synchronous = FULL`. SQLite older than 3.37.0 is refused (`MIN_SQLITE_VERSION`).
 - The window of a budget can change only while no payment counts; 0.3 refused any change once
@@ -113,7 +118,9 @@ Behaviour:
 - `walletcap settle <id> [--tx <hash>]`.
 - Python's async forms: `acheck`, `ahold`, `astatus`, `aholds` and `ahistory`, and a hold's
   `asettle`, `avoid` and `anote`. `async with budget.pay()` now waits for a lock in a worker
-  thread; 0.3 waited on the event loop.
+  thread; 0.3 waited on the event loop. If the caller is cancelled while `ahold()` or `async with
+  budget.pay()` waits, the hold the thread takes is voided, with the evidence "cancelled before
+  paying", before the cancellation goes on.
 - `walletcap-mcp`, the npm package for the MCP proxy.
 - [STABILITY.md](STABILITY.md), and design records in [docs/adr/](docs/adr/).
 

@@ -15,3 +15,4 @@ and its consequences.
 - [0010. VOID to SETTLED can put the count over the cap](0010-void-to-settled-can-pass-the-cap.md)
 - [0011. Python keeps its sync API, with async forms](0011-python-keeps-a-sync-api.md)
 - [0012. Network filesystems: unsupported, not detected yet](0012-network-filesystems.md)
+- [0013. A payment's moves belong to the hold that took it](0013-a-payments-moves-belong-to-the-hold-that-took-it.md)

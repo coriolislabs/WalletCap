@@ -26,6 +26,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -34,7 +35,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
 
-from walletcap._ledger import Ledger, ProcessLimits, Row, merged_note_of
+from walletcap._ledger import Ledger, ProcessLimits, Row, held_elsewhere, merged_note_of
 from walletcap.errors import (
     BudgetUnavailable,
     BudgetWarning,
@@ -448,14 +449,29 @@ class Hold:
     """
 
     def __init__(
-        self, ledger: Ledger, payment_id: str, amount: Micros, state: str, *, created: bool
+        self,
+        ledger: Ledger,
+        payment_id: str,
+        amount: Micros,
+        state: str,
+        *,
+        created: bool,
+        holder: str | None = None,
     ) -> None:
         self._ledger = ledger
         self._id = payment_id
         self._amount = amount
         self._state = state
         self._created = created
+        self._holder = holder
         self.tx: str | None = None
+
+    def _token(self, verb: str) -> str:
+        """The token this hold's moves need; a hold for a payment another process took has none."""
+
+        if self._holder is None:
+            raise UsageError(held_elsewhere(self._id, verb))
+        return self._holder
 
     @property
     def id(self) -> str:
@@ -485,7 +501,10 @@ class Hold:
         A settlement never shortens a hold. ``tx`` is the evidence, a transaction hash.
         """
 
-        self._state = self._ledger.settle(self._id, evidence=tx or self.tx)["state"]
+        # Settling a payment that is already settled is a no-op, with or without the token.
+        self._state = self._ledger.settle(self._id, holder=self._holder, evidence=tx or self.tx)[
+            "state"
+        ]
 
     def void(self, *, reason: str | None = None) -> None:
         """The payment never left the wallet, and never will: it stops counting.
@@ -493,19 +512,22 @@ class Hold:
         A settled payment can't be voided.
         """
 
-        self._state = self._ledger.void(self._id, evidence=reason or "not sent")["state"]
+        row = self._ledger.void(self._id, holder=self._token("void"), evidence=reason or "not sent")
+        self._state = row["state"]
 
     def settles_by(self, moment: datetime) -> None:
         """The last moment the payment could still settle, after now. A hold learns it once."""
 
         until = _moment_ms(moment, "settles_by")
-        self._state = self._ledger.bound(self._id, until=until)["state"]
+        holder = self._token("bound")
+        self._state = self._ledger.bound(self._id, holder=holder, until=until)["state"]
 
     def settles_within(self, duration: timedelta) -> None:
         """The same, as a time from now by the ledger's clock."""
 
         within = _duration_ms(duration, "settles_within")
-        self._state = self._ledger.bound(self._id, within_ms=within)["state"]
+        holder = self._token("bound")
+        self._state = self._ledger.bound(self._id, holder=holder, within_ms=within)["state"]
 
     def note(self, outcome: str, detail: str | None = None) -> None:
         """What is known about a held payment's outcome: ``"unknown"`` or ``"refused"``.
@@ -514,7 +536,10 @@ class Hold:
         """
 
         evidence = None if detail is None else detail[:1024]
-        self._state = self._ledger.note(self._id, outcome, evidence=evidence)["state"]
+        holder = self._token("note")
+        self._state = self._ledger.note(self._id, outcome, holder=holder, evidence=evidence)[
+            "state"
+        ]
 
     async def asettle(self, *, tx: str | None = None) -> None:
         await asyncio.to_thread(lambda: self.settle(tx=tx))
@@ -524,6 +549,62 @@ class Hold:
 
     async def anote(self, outcome: str, detail: str | None = None) -> None:
         await asyncio.to_thread(self.note, outcome, detail)
+
+
+_CANCELLED = "cancelled before paying"
+
+
+class _Taken:
+    """What a worker thread held, and whether its caller stopped waiting for it."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.cancelled = False
+        self.hold: Hold | None = None
+
+
+def _void_cancelled(hold: Hold) -> None:
+    if hold.created and hold.state == "held":
+        with contextlib.suppress(BudgetUnavailable, UsageError):
+            hold.void(reason=_CANCELLED)
+
+
+async def _hold_in_thread(take: Callable[[], Hold]) -> Hold:
+    """Hold in a worker thread, so a wait for the write lock never blocks the event loop.
+
+    A thread can't be stopped. If the caller is cancelled first, the hold the worker takes is
+    voided ("cancelled before paying": nothing was paid), by whichever of the two sees the
+    other done, and the cancellation waits for that before it goes on. Without this, a
+    cancelled ``async with budget.pay()`` left a held payment, with no outcome, that counted
+    for good and that no bulk release could reach.
+    """
+
+    taken = _Taken()
+
+    def worker() -> Hold:
+        hold = take()
+        with taken.lock:
+            taken.hold = hold
+            cancelled = taken.cancelled
+        if cancelled:
+            _void_cancelled(hold)
+        return hold
+
+    task = asyncio.ensure_future(asyncio.to_thread(worker))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with taken.lock:
+            taken.cancelled = True
+            finished = taken.hold
+        cleanup: asyncio.Future[Any] = (
+            task
+            if finished is None
+            else asyncio.ensure_future(asyncio.to_thread(_void_cancelled, finished))
+        )
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(cleanup)
+        raise
 
 
 @dataclass
@@ -585,8 +666,8 @@ class Paying:
 
     async def __aenter__(self) -> Hold:
         # The ledger waits for another process's write lock in a worker thread, never on the
-        # event loop.
-        return await asyncio.to_thread(self.__enter__)
+        # event loop. Cancelled before the body runs, the hold it took is voided.
+        return await _hold_in_thread(self.__enter__)
 
     async def __aexit__(
         self,
@@ -594,7 +675,14 @@ class Paying:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        await asyncio.to_thread(self.__exit__, exc_type, exc, traceback)
+        # The record can't be stopped once its thread runs: a cancellation waits for it.
+        task = asyncio.ensure_future(asyncio.to_thread(self.__exit__, exc_type, exc, traceback))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(task)
+            raise
 
 
 class Budget:
@@ -756,6 +844,7 @@ class Budget:
             micros,
             str(held["state"]),
             created=bool(held["created"]),
+            holder=held["holder"],
         )
 
     def pay(
@@ -823,7 +912,7 @@ class Budget:
         request = _Request(
             amount, _describe(to, note, details), rail, settles_by, settles_within, id
         )
-        return await asyncio.to_thread(self._hold, request)
+        return await _hold_in_thread(lambda: self._hold(request))
 
     async def astatus(self) -> Status:
         return await asyncio.to_thread(self.status)

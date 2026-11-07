@@ -14,6 +14,7 @@ import { resolve } from 'node:path';
 import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, UsageError } from './errors.js';
 import {
   type BudgetRow, Ledger, mergedNoteOf, OPEN, type Outcome, type PaymentRow, type PaymentState, type ProcessLimits, type StatusRow,
+  heldElsewhere,
 } from './ledger.js';
 import {
   checkKeys, defaultBudgetPath, describeLimits, type Dollars, expandHome, formatUsd, formatWindow, type LimitOptions, type Limits, limitFlags,
@@ -341,21 +342,33 @@ function processLimits(row: BudgetRow, asked: Limits): { limits: ProcessLimits; 
  * One payment, held in the budget: settle it when it settles, void it if it never left the
  * wallet, and tell it how long it can still settle once you know. Every move is idempotent, and
  * only moves forward: held, then void or settled; void, then settled.
+ *
+ * Only the hold that took a payment can move it: it carries the token the ledger checks. A hold
+ * for an id already in the ledger (`created` false) can't settle, void, bound or note it; only
+ * the process that held it, or the budget's owner, can.
  */
 export class Hold {
   readonly #ledger: Ledger;
   readonly #id: string;
   readonly #amount: Micros;
   readonly #created: boolean;
+  readonly #holder: string | null;
   #state: PaymentState;
 
   /** Internal: Budget.hold() makes these. */
-  constructor(ledger: Ledger, id: string, amount: Micros, state: PaymentState, created: boolean) {
+  constructor(ledger: Ledger, id: string, amount: Micros, state: PaymentState, created: boolean, holder: string | null = null) {
     this.#ledger = ledger;
     this.#id = id;
     this.#amount = amount;
     this.#state = state;
     this.#created = created;
+    this.#holder = holder;
+  }
+
+  // The token this hold's moves need; a hold for a payment another process took has none.
+  #token(verb: string): string {
+    if (this.#holder === null) throw new UsageError(heldElsewhere(this.#id, verb));
+    return this.#holder;
   }
 
   /** The payment's identity in the ledger: a good idempotency key for the rail you pay through. */
@@ -375,27 +388,28 @@ export class Hold {
    * that is later: a settlement never shortens a hold. `tx` is the evidence, a transaction hash.
    */
   async settle({ tx }: { tx?: string | undefined } = {}): Promise<void> {
-    this.#state = (await this.#ledger.settle(this.#id, { evidence: tx ?? null })).state;
+    // Settling a payment that is already settled is a no-op, with or without the token.
+    this.#state = (await this.#ledger.settle(this.#id, { evidence: tx ?? null, holder: this.#holder })).state;
   }
 
   /** The payment never left the wallet, and never will: it stops counting. A settled payment can't be voided. */
   async void({ reason }: { reason?: string | undefined } = {}): Promise<void> {
-    this.#state = (await this.#ledger.void(this.#id, { evidence: reason ?? 'not sent' })).state;
+    this.#state = (await this.#ledger.void(this.#id, { evidence: reason ?? 'not sent', holder: this.#token('void') })).state;
   }
 
   /** The last moment the payment could still settle, after now. A hold learns it once. */
   async settlesBy(when: Date | number | bigint): Promise<void> {
-    this.#state = (await this.#ledger.bound(this.#id, { until: momentMs(when, 'settlesBy'), withinMs: null })).state;
+    this.#state = (await this.#ledger.bound(this.#id, { until: momentMs(when, 'settlesBy'), withinMs: null, holder: this.#token('bound') })).state;
   }
 
   /** The same, as a time from now by the ledger's clock, in milliseconds. */
   async settlesWithin(ms: number | bigint): Promise<void> {
-    this.#state = (await this.#ledger.bound(this.#id, { until: null, withinMs: durationMs(ms, 'settlesWithin') })).state;
+    this.#state = (await this.#ledger.bound(this.#id, { until: null, withinMs: durationMs(ms, 'settlesWithin'), holder: this.#token('bound') })).state;
   }
 
   /** What is known about a held payment's outcome; it counts the same. */
   async note(outcome: Outcome, detail?: string): Promise<void> {
-    this.#state = (await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024) })).state;
+    this.#state = (await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024), holder: this.#token('note') })).state;
   }
 }
 
@@ -479,7 +493,8 @@ export class Budget {
   /**
    * Hold `amount` before paying, or throw BudgetRefused. Settle the hold when the payment
    * settles; void it only if the payment never left. An id already in the ledger, for this
-   * wallet and amount, returns that payment's hold (`created` is false).
+   * wallet and amount, returns that payment (`created` false), which this hold can't move; a
+   * voided id is refused: retry with a new one.
    */
   async hold(amount: Dollars, options: HoldOptions = {}): Promise<Hold> {
     checkKeys(options, HOLD_KEYS, 'hold');
@@ -494,7 +509,7 @@ export class Budget {
       withinMs: settlesWithinMs === undefined || settlesWithinMs === null ? null : durationMs(settlesWithinMs, 'settlesWithinMs'),
       limits: this.#limits,
     });
-    return new Hold(this.#ledger, held.payment, micros, held.state, held.created);
+    return new Hold(this.#ledger, held.payment, micros, held.state, held.created, held.holder);
   }
 
   /**

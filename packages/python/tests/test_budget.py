@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import warnings
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -202,7 +203,7 @@ def test_a_payment_that_went_through_but_was_not_recorded(
 ) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
 
-    def locked(payment: str, *, evidence: str | None = None) -> None:
+    def locked(payment: str, *, holder: str | None = None, evidence: str | None = None) -> None:
         raise BudgetUnavailable("the budget file is locked")
 
     monkeypatch.setattr(budget._ledger, "settle", locked)
@@ -820,3 +821,114 @@ def test_one_id_is_one_payment_and_pay_never_makes_it_twice(tmp_path: Path) -> N
     with pytest.raises(UsageError), budget.pay("$40", id="order-17"):
         ran = True
     assert not ran
+
+
+def test_a_voided_id_is_spent_so_a_retry_cannot_bring_a_payment_back(tmp_path: Path) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$10", create=True)
+    first = budget.hold("$10", id="order-17")
+    first.void(reason="card declined")
+    _pay(budget, "$10")
+    # 0.4's first draft returned the voided payment, created False, and its settle() took it from
+    # void to settled: $20 against a $10 cap.
+    with pytest.raises(UsageError, match="order-17 was voided; retry with a new id"):
+        budget.hold("$10", id="order-17")
+    with pytest.raises(UsageError), budget.pay("$10", id="order-17"):
+        pass
+    status = budget.status()
+    assert (status.spent, status.in_flight, status.remaining) == (10_000_000, 0, 0)
+
+
+def test_only_the_process_that_held_a_payment_or_the_owner_can_move_it(tmp_path: Path) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$20", create=True)
+    held = budget.hold("$10", id="order-18")
+    # Another process on the same file reads the id from holds() and holds it again: it gets
+    # the payment (created False), and no way to move it.
+    other = open_budget(WALLET, path=path)
+    [seen] = other.holds()
+    borrowed = other.hold("$10", id=seen.id)
+    assert borrowed.created is False
+    message = "order-18 was held by another process: only that process, or the budget's owner"
+    moves: list[Callable[[], object]] = [
+        borrowed.void,
+        borrowed.settle,
+        lambda: borrowed.note("unknown"),
+        lambda: borrowed.settles_within(timedelta(seconds=1)),
+        lambda: borrowed.settles_by(datetime.now(UTC) + timedelta(minutes=1)),
+    ]
+    for move in moves:
+        with pytest.raises(UsageError, match=message):
+            move()
+    assert budget.status().in_flight == 10_000_000
+    held.settle(tx=TX)
+    borrowed.settle()  # settled already: a no-op, for anyone
+    assert budget.status().spent == 10_000_000
+    # The owner reconciles a payment whoever held it, with evidence; settled stays settled.
+    second = other.hold("$5", id="order-19")
+    owner = open_owner(path=path)
+    owner.void("order-19", evidence="the chain shows it never moved")
+    second.void()  # void already: idempotent for the process that held it
+    assert second.state == "void"
+    assert budget.status().in_flight == 0
+    with pytest.raises(UsageError, match="a settled payment can't be voided"):
+        owner.void("order-18", evidence="checked")
+
+
+def _locked(path: Path, seconds: float) -> subprocess.Popen[str]:
+    """Another process that takes the write lock and holds it for ``seconds``."""
+
+    script = (
+        "import sqlite3, sys, time\n"
+        "connection = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "print('locked', flush=True)\n"
+        f"time.sleep({seconds})\n"
+        "connection.execute('COMMIT')\n"
+    )
+    holder = subprocess.Popen(
+        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    return holder
+
+
+def test_a_cancelled_async_pay_voids_the_hold_it_took(tmp_path: Path) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    holder = _locked(path, 0.6)
+
+    async def pay_once() -> None:
+        async with budget.pay("$10") as payment:  # pragma: no cover - cancelled first
+            payment.tx = TX
+
+    async def run() -> None:
+        # The hold waits for the lock in a worker thread; the caller gives up first. 0.4's first
+        # draft left the hold the worker took later, with no outcome: it counted for good, and
+        # no bulk release could reach it.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(pay_once(), 0.2)
+
+    asyncio.run(run())
+    assert holder.wait(timeout=30) == 0
+    status = budget.status()
+    assert (status.in_flight, status.spent, status.payments) == (0, 0, 0)
+    assert budget.holds() == []
+    [voided] = budget.history()
+    assert voided.status == "void"
+    _pay(budget, "$10")
+
+
+def test_a_cancelled_ahold_voids_the_hold_it_took(tmp_path: Path) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    holder = _locked(path, 0.6)
+
+    async def run() -> None:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(budget.ahold("$10"), 0.2)
+
+    asyncio.run(run())
+    assert holder.wait(timeout=30) == 0
+    assert (budget.status().in_flight, budget.holds()) == (0, [])
+    _pay(budget, "$10")

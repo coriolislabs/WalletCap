@@ -41,6 +41,7 @@ class Payment:
     state: str = "held"
     settled_at: int | None = None
     outcome: str | None = None
+    holder: str | None = None
 
     def counts_from(self) -> float | None:
         if self.state == "void":
@@ -197,8 +198,9 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
         existing = None if step["id"] is None else model.payments.get(step["id"])
         expected: Any
         if existing is not None:
-            expected = ("ok", existing.amount == step["amount"])
-            if existing.amount != step["amount"]:
+            # A voided id is spent; any other existing id, same amount, is that payment.
+            expected = ("ok", False)
+            if existing.state == "void" or existing.amount != step["amount"]:
                 expected = ("usage", None)
         elif until is not None and until <= model.now:
             expected = ("usage", None)
@@ -223,7 +225,11 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
                 stop = None if within is None else model.now + within
                 bound = until if until is not None else stop
                 model.payments[row["payment"]] = Payment(
-                    step["amount"], model.now, bound, next(model.order)
+                    step["amount"],
+                    model.now,
+                    bound,
+                    next(model.order),
+                    holder=row["holder"],
                 )
                 known.append(row["payment"])
             actual = ("ok", expected[1] if not row["created"] else True)
@@ -257,16 +263,18 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
         else:
             expected = ("ok", None)
 
+        holder = None if p is None else p.holder
+
         def move() -> Any:
             if op == "settle":
-                return ledger.settle(pid)
+                return ledger.settle(pid, holder=holder)
             if op == "void":
-                return ledger.void(pid)
+                return ledger.void(pid, holder=holder)
             if op == "note":
-                return ledger.note(pid, step["outcome"])
+                return ledger.note(pid, step["outcome"], holder=holder)
             if step["until"] is None:
-                return ledger.bound(pid, within_ms=step["within"])
-            return ledger.bound(pid, until=bound_until)
+                return ledger.bound(pid, holder=holder, within_ms=step["within"])
+            return ledger.bound(pid, holder=holder, until=bound_until)
 
         actual = _outcome(move)
         return expected, (actual[0], None) if actual[0] == "ok" else actual

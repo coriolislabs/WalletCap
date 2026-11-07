@@ -63,9 +63,14 @@ def test_vector(vector: dict[str, Any], tmp_path: Path, monkeypatch: pytest.Monk
         per_payment=budget.get("per_payment"),
         max_payments=budget.get("max_payments"),
     )
+    # Each payment's token, as the process that held it keeps it. A step "as": "other" acts as
+    # another process (no token); "as": "owner" uses the owner's moves.
+    holders: dict[str, str] = {}
     for step in vector["steps"]:
         expect = step.get("expect", {})
         op = step["op"]
+        holder = None if step.get("as") == "other" else holders.get(step.get("id", ""))
+        as_owner = step.get("as") == "owner"
         until = None if "until_from_now" not in step else clock["now"] + step["until_from_now"]
 
         def state(row: dict[str, Any], expect: dict[str, Any] = expect) -> None:
@@ -83,6 +88,8 @@ def test_vector(vector: dict[str, Any], tmp_path: Path, monkeypatch: pytest.Monk
             def held(row: dict[str, Any], expect: dict[str, Any] = expect) -> None:
                 if expect["held"] != "*":
                     assert row["payment"] == expect["held"]
+                if row["holder"] is not None:
+                    holders.setdefault(str(row["payment"]), str(row["holder"]))
 
             _outcome(
                 partial(
@@ -104,20 +111,42 @@ def test_vector(vector: dict[str, Any], tmp_path: Path, monkeypatch: pytest.Monk
                 held,
             )
         elif op == "settle":
-            _outcome(
-                partial(ledger.settle, step["id"], evidence=step.get("evidence")), expect, state
+            settle = (
+                partial(ledger.owner_settle, step["id"], evidence=step.get("evidence"))
+                if as_owner
+                else partial(
+                    ledger.settle, step["id"], holder=holder, evidence=step.get("evidence")
+                )
             )
+            _outcome(settle, expect, state)
         elif op == "void":
-            _outcome(partial(ledger.void, step["id"]), expect, state)
+            void = (
+                partial(ledger.owner_void, step["id"], evidence=step.get("evidence"))
+                if as_owner
+                else partial(ledger.void, step["id"], holder=holder)
+            )
+            _outcome(void, expect, state)
         elif op == "note":
             _outcome(
-                partial(ledger.note, step["id"], step["outcome"], evidence=step.get("evidence")),
+                partial(
+                    ledger.note,
+                    step["id"],
+                    step["outcome"],
+                    holder=holder,
+                    evidence=step.get("evidence"),
+                ),
                 expect,
                 state,
             )
         elif op == "bound":
             _outcome(
-                partial(ledger.bound, step["id"], until=until, within_ms=step.get("within_ms")),
+                partial(
+                    ledger.bound,
+                    step["id"],
+                    holder=holder,
+                    until=until,
+                    within_ms=step.get("within_ms"),
+                ),
                 expect,
                 state,
             )

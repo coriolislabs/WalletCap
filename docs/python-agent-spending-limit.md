@@ -56,7 +56,8 @@ except BroadcastFailed:
 ```
 
 - One id is one payment: holding it again returns that payment (`hold.created` is `False`), and
-  `pay()` refuses an id already in the ledger.
+  `pay()` refuses an id already in the ledger. Only the hold that took a payment can move it,
+  and a voided id can't be held again: a retry takes a new id.
 - `hold.settles_by(when)` and `hold.settles_within(duration)` tell an open hold, once, the last
   moment it could settle. `hold.note("unknown", detail)` records what you know; it counts the same.
 - `budget.check("$5")` answers without spending. `budget.status()`, `budget.history()` and

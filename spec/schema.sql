@@ -64,6 +64,8 @@ CREATE TABLE wc_entry (
   outcome  TEXT    CHECK (outcome IN ('unknown', 'refused')),       -- noted
   rail     TEXT    CHECK (length(rail) BETWEEN 1 AND 64),          -- held
   info     TEXT    CHECK (length(info) <= 4096),                   -- held: the client's JSON (payee, note, …)
+  holder   TEXT    CHECK (holder IS NULL OR (kind = 'held' AND length(holder) = 32 AND holder NOT GLOB '*[^0-9a-f]*')),
+                                                                   -- held: the holding process's token
   evidence TEXT    CHECK (length(evidence) <= 1024)                -- noted, settled, void: what showed it
 ) STRICT;
 CREATE UNIQUE INDEX wc_entry_hold ON wc_entry (payment) WHERE kind = 'held';
@@ -265,9 +267,9 @@ END
 -- Admission: one atomic conditional insert. It appends the payment's 'held' entry only if the
 -- verdict is NULL, the identity is new, and a settle-by time is after now; otherwise it appends
 -- nothing and returns no row, and the client asks `refusal` why.
-INSERT INTO wc_entry (payment, kind, at, wallet, amount, until, rail, info)
+INSERT INTO wc_entry (payment, kind, at, wallet, amount, until, rail, info, holder)
 SELECT coalesce(:payment, 'wc-' || lower(hex(randomblob(16)))), 'held', r.now, r.wallet, :amount,
-       coalesce(:until, r.now + :within_ms), :rail, :info
+       coalesce(:until, r.now + :within_ms), :rail, :info, :holder
 FROM wc_room r, {{process}} p
 WHERE r.wallet = :wallet
   AND NOT EXISTS (SELECT 1 FROM wc_current WHERE payment = :payment)
@@ -302,27 +304,29 @@ ORDER BY c.held_seq
 LIMIT 3
 
 -- @statement settle
+-- The paying process's moves (settle, void, bound, note) need :holder, the token its hold
+-- returned (ledger.md, Identity): another process that knows the payment's id can't move it.
 -- held or void -> settled. A settled payment is already settled: no row, nothing appended.
 INSERT INTO wc_entry (payment, kind, at, wallet, amount, evidence)
 SELECT c.payment, 'settled', k.now, c.wallet, c.amount, :evidence
-FROM wc_current c, wc_clock k
-WHERE c.payment = :payment AND c.state IN ('held', 'void')
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_clock k
+WHERE c.payment = :payment AND c.state IN ('held', 'void') AND h.holder = :holder
 RETURNING seq
 
 -- @statement void
 -- held -> void: evidence that the payment never moved money.
 INSERT INTO wc_entry (payment, kind, at, wallet, amount, evidence)
 SELECT c.payment, 'void', k.now, c.wallet, c.amount, :evidence
-FROM wc_current c, wc_clock k
-WHERE c.payment = :payment AND c.state = 'held'
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_clock k
+WHERE c.payment = :payment AND c.state = 'held' AND h.holder = :holder
 RETURNING seq
 
 -- @statement bound
 -- held with no until -> held until :until, or :within_ms from now. One that has an until keeps it.
 INSERT INTO wc_entry (payment, kind, at, wallet, amount, until)
 SELECT c.payment, 'bound', k.now, c.wallet, c.amount, coalesce(:until, k.now + :within_ms)
-FROM wc_current c, wc_clock k
-WHERE c.payment = :payment AND c.state = 'held' AND c.until IS NULL
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_clock k
+WHERE c.payment = :payment AND c.state = 'held' AND c.until IS NULL AND h.holder = :holder
   AND coalesce(:until, k.now + :within_ms) > k.now
 RETURNING seq, until
 
@@ -331,6 +335,28 @@ RETURNING seq, until
 -- payee said it failed). It keeps counting the same.
 INSERT INTO wc_entry (payment, kind, at, wallet, amount, outcome, evidence)
 SELECT c.payment, 'noted', k.now, c.wallet, c.amount, :outcome, :evidence
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_clock k
+WHERE c.payment = :payment AND c.state = 'held' AND h.holder = :holder
+RETURNING seq
+
+-- @statement mine
+-- Whether :holder is the token the payment's hold returned.
+SELECT h.holder IS NOT NULL AND h.holder = :holder AS mine
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq
+WHERE c.payment = :payment
+
+-- @statement owner_settle
+-- The owner's reconciliation, with evidence: held or void -> settled, whoever held it.
+INSERT INTO wc_entry (payment, kind, at, wallet, amount, evidence)
+SELECT c.payment, 'settled', k.now, c.wallet, c.amount, :evidence
+FROM wc_current c, wc_clock k
+WHERE c.payment = :payment AND c.state IN ('held', 'void')
+RETURNING seq
+
+-- @statement owner_void
+-- The owner's reconciliation, with evidence: held -> void, whoever held it.
+INSERT INTO wc_entry (payment, kind, at, wallet, amount, evidence)
+SELECT c.payment, 'void', k.now, c.wallet, c.amount, :evidence
 FROM wc_current c, wc_clock k
 WHERE c.payment = :payment AND c.state = 'held'
 RETURNING seq

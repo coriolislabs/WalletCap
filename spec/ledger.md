@@ -51,6 +51,12 @@ that has an `until` appends nothing and succeeds. Anything else, such as voiding
 payment, is refused. An exception in the code that makes a payment never settles it: the
 payment stays `HELD`, noted `unknown`.
 
+Two parties append transitions. The paying process's statements, `settle`, `void`, `bound` and
+`note`, need the token its hold returned (Identity, below); without it they append nothing, and
+the client refuses the move, except settling a payment that is already settled, which succeeds
+for anyone. The owner's, `owner_settle` and `owner_void`, need no token: they reconcile a
+payment, whoever held it, from evidence such as the chain's record.
+
 ### Rows
 
 `wc_entry` is the ledger: one row per state a payment enters, appended in order (`seq`), dated
@@ -79,8 +85,17 @@ can find it again:
 - a key the caller supplies, such as an order id;
 - otherwise the ledger's own: `wc-` and 32 random hex digits.
 
-Holding an identity that is already in the ledger appends nothing. The client returns the
-existing payment if the wallet and amount match, and refuses the hold otherwise.
+Holding an identity that is already in the ledger appends nothing. If that payment is `VOID`,
+the client refuses the hold: a voided identity is spent, and a retry takes a new one, so a
+payment that was given up can't come back. Otherwise it returns the existing payment if the
+wallet and amount match, and refuses the hold otherwise.
+
+Each `held` entry carries `holder`, a token of 32 random hex digits that the client makes for
+the hold and hands back only to the call that appended it. The paying process's moves need it,
+so a process that knows a payment's identity, from `holds` or from holding it again, can't move
+it: a hold of an existing payment comes back without a token. The token is in the file, and
+anything that can write the file can read it: it keeps walletcap's callers from moving each
+other's payments, and isn't an OS boundary ([ADR 0013](../docs/adr/0013-a-payments-moves-belong-to-the-hold-that-took-it.md)).
 
 ## Admission
 

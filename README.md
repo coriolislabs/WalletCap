@@ -194,7 +194,9 @@ try {
 ```
 
 - One id is one payment: holding an id again returns that payment (`hold.created` is false),
-  and `pay()` refuses an id already in the ledger, so nothing is paid twice.
+  and `pay()` refuses an id already in the ledger, so nothing is paid twice. Only the hold that
+  took a payment can settle, void or note it: a second hold of its id can't, and neither can
+  another process. A voided id can't be held again; a retry takes a new id.
 - `hold.settlesBy(date)` or `hold.settlesWithin(ms)` tells an open hold, once, the last moment
   it could settle.
 - If the payment went through but the budget can't record it, `pay()` throws
@@ -240,6 +242,7 @@ except BroadcastFailed:
   `budget.check(budget.status().remaining)` means what it says.
 - In async code, `async with budget.pay(...)` and `acheck`, `ahold`, `astatus`, `aholds` and
   `ahistory` wait for another process's lock in a worker thread, through `asyncio.to_thread`.
+  If the task is cancelled while it waits, the hold the thread takes is voided.
 
 ### x402
 
@@ -461,7 +464,8 @@ walletcap has three tiers of enforcement, and the library is the one that ships 
   it. It bounds bugs and runaways. An agent with a shell as the same OS user can go around it:
   call the wallet directly, edit the budget file, drop its triggers or delete it. The payer and
   owner handles are an API split, not an OS boundary: any process that can open the file can
-  open an owner's handle. A separate service under its own OS user, with peer-credential checks
+  open an owner's handle, and read the token that ties a payment's moves to the hold that took
+  it. A separate service under its own OS user, with peer-credential checks
   on a Unix socket (`walletcapd`), is planned.
 - **On chain, the limit binds.** `AccountCapSpender` makes the cap part of the payment path for
   Spend Permissions, so the agent's own code can't raise it. It is unaudited; testnet only.

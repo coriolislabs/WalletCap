@@ -141,7 +141,7 @@ export class Owner {
    * authorization unused past its expiry. It stops counting. A settled payment can't be voided.
    */
   async void(id: string, { evidence = 'voided by its owner' }: { evidence?: string } = {}): Promise<PaymentRecord> {
-    return recordOf(await this.#ledger.void(id, { evidence }));
+    return recordOf(await this.#ledger.ownerVoid(id, { evidence }));
   }
 
   /**
@@ -149,7 +149,7 @@ export class Owner {
    * through one window from now, or from its settle-by time if that is later.
    */
   async settle(id: string, { evidence = 'settled by its owner' }: { evidence?: string } = {}): Promise<PaymentRecord> {
-    return recordOf(await this.#ledger.settle(id, { evidence }));
+    return recordOf(await this.#ledger.ownerSettle(id, { evidence }));
   }
 
   /**

@@ -179,7 +179,7 @@ class Owner:
         A settled payment can't be voided.
         """
 
-        return record_of(self._ledger.void(payment_id, evidence=evidence))
+        return record_of(self._ledger.owner_void(payment_id, evidence=evidence))
 
     def settle(self, payment_id: str, *, evidence: str = "settled by its owner") -> PaymentRecord:
         """Settle a held or void payment: evidence that it paid, such as its transaction hash.
@@ -187,7 +187,7 @@ class Owner:
         It counts through one window from now, or from its settle-by time if that is later.
         """
 
-        return record_of(self._ledger.settle(payment_id, evidence=evidence))
+        return record_of(self._ledger.owner_settle(payment_id, evidence=evidence))
 
     def void_unknown(self, wallet: str, *, older_than: object) -> list[VoidedPayment]:
         """The bulk release: void every held payment of unknown or refused outcome.

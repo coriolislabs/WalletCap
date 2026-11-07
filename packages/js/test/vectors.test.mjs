@@ -44,6 +44,10 @@ for (const [index, vector] of VECTORS.cases.entries()) {
     await ledger.createBudget(wallet, {
       cap: big(budget.cap), windowMs: big(budget.window_ms), perPayment: big(budget.per_payment), maxPayments: big(budget.max_payments),
     });
+    // Each payment's token, as the process that held it keeps it. A step `as: 'other'` acts as
+    // another process (no token); `as: 'owner'` uses the owner's moves.
+    const holders = new Map();
+    const holder = step => (step.as === 'other' ? null : holders.get(step.id) ?? null);
     try {
       for (const [n, step] of vector.steps.entries()) {
         const expect = step.expect ?? {};
@@ -58,13 +62,20 @@ for (const [index, vector] of VECTORS.cases.entries()) {
             await outcome(() => ledger.hold(wallet, BigInt(step.amount), {
               payment: step.id ?? null, until, withinMs: big(step.within_ms), rail: 'vector',
               limits: { perPayment: big(limits.per_payment), cap: big(limits.cap), windowMs: big(limits.window_ms), maxPayments: big(limits.max_payments) },
-            }), expect, held => { if (expect.held !== '*') assert.equal(held.payment, expect.held, at); });
+            }), expect, held => {
+              if (expect.held !== '*') assert.equal(held.payment, expect.held, at);
+              if (held.holder !== null && !holders.has(held.payment)) holders.set(held.payment, held.holder);
+            });
             break;
           }
-          case 'settle': await outcome(() => ledger.settle(step.id, { evidence: step.evidence ?? null }), expect, row => assert.equal(row.state, expect.state, at)); break;
-          case 'void': await outcome(() => ledger.void(step.id), expect, row => assert.equal(row.state, expect.state, at)); break;
-          case 'note': await outcome(() => ledger.note(step.id, step.outcome, { evidence: step.evidence ?? null }), expect, row => assert.equal(row.state, expect.state, at)); break;
-          case 'bound': await outcome(() => ledger.bound(step.id, { until, withinMs: big(step.within_ms) }), expect, row => assert.equal(row.state, expect.state, at)); break;
+          case 'settle': await outcome(() => (step.as === 'owner'
+            ? ledger.ownerSettle(step.id, { evidence: step.evidence ?? null })
+            : ledger.settle(step.id, { evidence: step.evidence ?? null, holder: holder(step) })), expect, row => assert.equal(row.state, expect.state, at)); break;
+          case 'void': await outcome(() => (step.as === 'owner'
+            ? ledger.ownerVoid(step.id, { evidence: step.evidence ?? null })
+            : ledger.void(step.id, { holder: holder(step) })), expect, row => assert.equal(row.state, expect.state, at)); break;
+          case 'note': await outcome(() => ledger.note(step.id, step.outcome, { evidence: step.evidence ?? null, holder: holder(step) }), expect, row => assert.equal(row.state, expect.state, at)); break;
+          case 'bound': await outcome(() => ledger.bound(step.id, { until, withinMs: big(step.within_ms), holder: holder(step) }), expect, row => assert.equal(row.state, expect.state, at)); break;
           case 'set_limits': await outcome(() => ledger.setLimits(wallet, {
             ...(step.cap === undefined ? {} : { cap: BigInt(step.cap) }), ...(step.window_ms === undefined ? {} : { windowMs: BigInt(step.window_ms) }),
           }), expect, () => {}); break;

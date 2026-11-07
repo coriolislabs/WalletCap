@@ -70,7 +70,8 @@ class Model {
 
   hold({ id, amount, until, within, limits }) {
     const existing = id === null ? undefined : this.payments.get(id);
-    if (existing !== undefined) return existing.amount === amount ? { ok: true, created: false } : { usage: true };
+    // A voided id is spent; any other existing id, same amount, is that payment.
+    if (existing !== undefined) return existing.state !== 'void' && existing.amount === amount ? { ok: true, created: false } : { usage: true };
     if (until !== null && until <= this.now) return { usage: true };
     const refused = this.verdict(amount, limits);
     if (refused !== null) return { refused };
@@ -185,6 +186,7 @@ test('the ledger and the model of spec/ledger.md agree on every step of random h
     try {
       await ledger.createBudget(WALLET, { cap: big(start.cap), windowMs: big(start.window), perPayment: big(start.perPayment), maxPayments: big(start.maxPayments) });
       const known = [];
+      const holders = new Map();
       const target = n => (known.length === 0 || n === 7 ? 'missing' : known[n % known.length]);
       for (const [index, step] of ops.entries()) {
         const where = `step ${index}: ${JSON.stringify(step)}`;
@@ -202,6 +204,7 @@ test('the ledger and the model of spec/ledger.md agree on every step of random h
           if (expected.created && actual.ok) {
             model.payments.set(actual.value.payment, expected.payment);
             known.push(actual.value.payment);
+            holders.set(actual.value.payment, actual.value.holder);
           }
           if (actual.ok) actual = { ok: true, created: actual.value.created };
         } else if (['settle', 'void', 'note', 'bound'].includes(step.op)) {
@@ -212,10 +215,11 @@ test('the ledger and the model of spec/ledger.md agree on every step of random h
           const until = step.op === 'bound' ? (step.until === null ? model.now + step.within : model.now + step.until) : null;
           if (step.op === 'bound') expected = model.bound(id, until);
           actual = await outcomeOf(() => {
-            if (step.op === 'settle') return ledger.settle(id);
-            if (step.op === 'void') return ledger.void(id);
-            if (step.op === 'note') return ledger.note(id, step.outcome);
-            return step.until === null ? ledger.bound(id, { withinMs: BigInt(step.within) }) : ledger.bound(id, { until: BigInt(until) });
+            const holder = holders.get(id) ?? null;
+            if (step.op === 'settle') return ledger.settle(id, { holder });
+            if (step.op === 'void') return ledger.void(id, { holder });
+            if (step.op === 'note') return ledger.note(id, step.outcome, { holder });
+            return step.until === null ? ledger.bound(id, { withinMs: BigInt(step.within), holder }) : ledger.bound(id, { until: BigInt(until), holder });
           });
           if (actual.ok) actual = { ok: true };
         } else if (step.op === 'advance') {

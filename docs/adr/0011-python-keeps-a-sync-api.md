@@ -16,3 +16,6 @@ connection, so threads share none.
 
 - Synchronous code waits for a lock as it always did; async code doesn't block its loop.
 - The names differ from JavaScript's only by the `a` prefix.
+- A thread can't be stopped. If the caller is cancelled while `ahold()` or `async with
+  budget.pay()` waits, the hold the thread takes is voided, with the evidence "cancelled before
+  paying", and the cancellation goes on once that is done.

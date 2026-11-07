@@ -1,5 +1,5 @@
 {
-  "about": "Admission sequences both test suites run against the ledger, through the payer and owner handles. Each case starts with a fresh file whose clock reads `start` and one budget. Amounts are micro-dollars; times are milliseconds. A step's `expect` is checked exactly where given. Hold expectations: {held: id or *}, {refused: code, source, brief}, or {error: usage}. The expectations were worked out from spec/ledger.md, not from running either package.",
+  "about": "Admission sequences both test suites run against the ledger, through the payer and owner handles. Each case starts with a fresh file whose clock reads `start` and one budget. Amounts are micro-dollars; times are milliseconds. A step's `expect` is checked exactly where given. Hold expectations: {held: id or *}, {refused: code, source, brief}, or {error: usage}. Moves act as the process that held the payment, with its token, unless `as` says `other` (another process, with no token) or `owner` (the owner's reconciliation). The expectations were worked out from spec/ledger.md, not from running either package.",
   "start": 1800000000000,
   "wallet": "0xd797ead28c38575fdf4fc523866287372340ca02",
   "cases": [
@@ -255,6 +255,39 @@
         { "op": "advance", "ms": 1 },
         { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["open"] } },
         { "op": "status", "expect": { "in_flight": 0, "payments": 0 } }
+      ]
+    },
+    {
+      "name": "a voided id is spent: holding it again is refused",
+      "budget": { "cap": 10000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "order-17", "expect": { "held": "order-17" } },
+        { "op": "void", "id": "order-17", "expect": { "state": "void" } },
+        { "op": "hold", "amount": 10000000, "id": "x", "expect": { "held": "x" } },
+        { "op": "settle", "id": "x", "expect": { "state": "settled" } },
+        { "op": "hold", "amount": 10000000, "id": "order-17", "expect": { "error": "usage" } },
+        { "op": "settle", "id": "order-17", "as": "other", "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "spent": 10000000, "in_flight": 0, "payments": 1, "remaining": 0 } }
+      ]
+    },
+    {
+      "name": "a process without a payment's token can't move it; the owner can",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "hold", "amount": 50000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "void", "id": "a", "as": "other", "expect": { "error": "usage" } },
+        { "op": "note", "id": "a", "as": "other", "outcome": "unknown", "expect": { "error": "usage" } },
+        { "op": "bound", "id": "a", "as": "other", "within_ms": 300000, "expect": { "error": "usage" } },
+        { "op": "settle", "id": "a", "as": "other", "expect": { "error": "usage" } },
+        { "op": "status", "expect": { "in_flight": 50000000, "payments": 1 } },
+        { "op": "void", "id": "a", "as": "owner", "evidence": "the chain shows it never moved", "expect": { "state": "void" } },
+        { "op": "hold", "amount": 50000000, "id": "b", "expect": { "held": "b" } },
+        { "op": "settle", "id": "b", "expect": { "state": "settled" } },
+        { "op": "settle", "id": "b", "as": "other", "expect": { "state": "settled" } },
+        { "op": "void", "id": "b", "as": "owner", "expect": { "error": "usage" } },
+        { "op": "settle", "id": "a", "as": "owner", "evidence": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "expect": { "state": "settled" } },
+        { "op": "status", "expect": { "spent": 100000000, "in_flight": 0, "payments": 2 } }
       ]
     }
   ]

@@ -26,12 +26,14 @@ with budget.pay("$12.50") as payment:  # refused past $150 in any 24 hours
   its owner checks the chain and voids it. `raise NotSent(...)` inside the block says it never
   left.
 - `budget.hold(amount, id=..., settles_within=timedelta(minutes=5))` returns a `Hold` to
-  `settle(tx=...)`, `void()` or `note()` yourself. One id is one payment.
+  `settle(tx=...)`, `void()` or `note()` yourself. One id is one payment, and only the hold
+  that took it can move it; a voided id can't be held again.
 - Errors: `BudgetRefused` (`code`, `brief`), `BudgetUnavailable`, `UsageError`, and
   `PaymentNotRecorded`, which shares no base with the others: don't pay again. None is a
   `ValueError`.
 - `async with budget.pay(...)` and `acheck`, `ahold`, `astatus`, `aholds` and `ahistory` wait for
-  another process's lock in a worker thread, not on the event loop.
+  another process's lock in a worker thread, not on the event loop. If the task is cancelled
+  while it waits, the hold the thread takes is voided.
 - Amounts are dollars: strings (`"$12.50"`), `Decimal`s, floats and ints (whole dollars). What
   comes back is `Micros`, an `int` in micro-dollars that `to_micros` reads as micro-dollars.
 - The owner's command, `walletcap` or `python -m walletcap`: `status`, `set`, `freeze`,

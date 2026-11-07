@@ -33,7 +33,8 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150
   unknown, until its owner voids it: an error never settles a payment. `throw notSent(error)`
   says it never left.
 - `budget.hold(amount, { id, settlesWithinMs })` returns a `Hold` to `settle({ tx })`,
-  `void()` or `note()` yourself. One id is one payment.
+  `void()` or `note()` yourself. One id is one payment, and only the hold that took it can move
+  it; a voided id can't be held again.
 - Errors: `BudgetRefused` (`code`, `brief`), `BudgetUnavailable`, `UsageError`, and
   `PaymentNotRecorded`, which shares no base with the others: don't pay again.
 - Every method is async, and a wait for another process's lock never blocks the event loop.

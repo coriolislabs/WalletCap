@@ -9,7 +9,9 @@ import subprocess
 import sys
 import time
 from contextlib import closing
+from functools import cached_property
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +21,52 @@ SOURCE = ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
 from walletcap import MAX_AMOUNT, BudgetRefused, BudgetUnavailable, UsageError, _clock  # noqa: E402
-from walletcap._ledger import Ledger  # noqa: E402
+from walletcap._ledger import Ledger as _Base  # noqa: E402
+from walletcap._ledger import Row  # noqa: E402
+
+
+class Ledger(_Base):
+    """The ledger as one process that keeps the token of every payment it holds.
+
+    A payer's moves need the token its hold returned (spec/ledger.md, Identity); these tests act
+    as that one process unless they pass a token of their own.
+    """
+
+    @cached_property
+    def tokens(self) -> dict[str, str]:
+        return {}
+
+    def hold(self, name: str, amount: int, **kwargs: Any) -> Row:
+        row = super().hold(name, amount, **kwargs)
+        if row["holder"] is not None:
+            self.tokens[str(row["payment"])] = str(row["holder"])
+        return row
+
+    def settle(
+        self, payment: str, *, holder: str | None = None, evidence: str | None = None
+    ) -> Row:
+        return super().settle(payment, holder=holder or self.tokens.get(payment), evidence=evidence)
+
+    def void(self, payment: str, *, holder: str | None = None, evidence: str | None = None) -> Row:
+        return super().void(payment, holder=holder or self.tokens.get(payment), evidence=evidence)
+
+    def bound(
+        self,
+        payment: str,
+        *,
+        holder: str | None = None,
+        until: int | None = None,
+        within_ms: int | None = None,
+    ) -> Row:
+        token = holder or self.tokens.get(payment)
+        return super().bound(payment, holder=token, until=until, within_ms=within_ms)
+
+    def note(
+        self, payment: str, outcome: str, *, holder: str | None = None, evidence: str | None = None
+    ) -> Row:
+        token = holder or self.tokens.get(payment)
+        return super().note(payment, outcome, holder=token, evidence=evidence)
+
 
 DAY = 86_400_000
 CURRENT = (
@@ -84,10 +131,10 @@ while not pathlib.Path(sys.argv[4]).exists():
 won = 0
 for _ in range(3):
     try:
-        payment = ledger.hold("agent", 50, rail="python")["payment"]
+        held = ledger.hold("agent", 50, rail="python")
     except BudgetRefused:
         continue
-    ledger.settle(payment)
+    ledger.settle(held["payment"], holder=held["holder"])
     won += 1
 print(won)
 """
@@ -442,7 +489,7 @@ def test_replaying_the_ledger_rebuilds_each_payments_state(tmp_path: Path, clock
         connection.executescript(spec.sections["tables"] + spec.sections["projection"])
         connection.execute("INSERT INTO wc_budget VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", budget)
         connection.executemany(
-            "INSERT INTO wc_entry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", entries
+            "INSERT INTO wc_entry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", entries
         )
         rebuilt = connection.execute(CURRENT).fetchall()
     assert rebuilt == current

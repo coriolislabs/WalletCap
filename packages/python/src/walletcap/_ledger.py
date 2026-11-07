@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -221,6 +222,26 @@ def merged_note_of(text: str | None) -> str | None:
     """What an upgrade merged into this budget, or None."""
 
     return _note(text, _merged_note)
+
+
+def held_elsewhere(payment: str, verb: str) -> str:
+    """Why a process without a payment's token can't move it."""
+
+    return (
+        f"payment {payment} was held by another process: only that process, "
+        f"or the budget's owner, can {verb} it"
+    )
+
+
+_HOLDER = re.compile(r"[0-9a-f]{32}")
+
+
+def _holder(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _HOLDER.fullmatch(value) is None:
+        raise UsageError("a holder token is 32 lowercase hex digits")
+    return value
 
 
 def _held_note(held_payments: int, ids: list[str]) -> str:
@@ -651,6 +672,7 @@ class Ledger:
             "within_ms": None if within_ms is None else millis(within_ms, "within_ms", low=1),
             "rail": _rail(rail),
             "info": _text(info, "info", _INFO_LIMIT),
+            "holder": secrets.token_hex(16),
             "p_per_payment": own.per_payment,
             "p_cap": own.cap,
             "p_window_ms": own.window_ms,
@@ -659,12 +681,15 @@ class Ledger:
         with self._transaction() as connection:
             held = self._one(connection, "hold", args)
             if held is not None:
-                return {**held, "state": "held", "created": True}
+                return {**held, "state": "held", "created": True, "holder": args["holder"]}
             why = self._one(connection, "refusal", args)
             if why is None:
                 raise BudgetUnavailable(f"{short_wallet(wallet)} has no budget in {self._path}")
             if why["existing"] is not None:
                 existing = json.loads(why["existing"])
+                # A voided id is spent: holding it again would bring back a payment given up.
+                if existing["state"] == "void":
+                    raise UsageError(f"payment {args['payment']} was voided; retry with a new id")
                 if existing["wallet"] == wallet and existing["amount"] == args["amount"]:
                     return {
                         "payment": args["payment"],
@@ -672,6 +697,7 @@ class Ledger:
                         "until": None,
                         "state": existing["state"],
                         "created": False,
+                        "holder": None,
                     }
                 raise UsageError(
                     f"payment {args['payment']} is already in the ledger, for "
@@ -699,8 +725,14 @@ class Ledger:
         statement: str,
         payment: str,
         args: Mapping[str, object],
-        why: Callable[[Row], str | None],
+        why: Callable[[Row, Callable[[], bool]], str | None],
     ) -> Row:
+        """A transition: append it if allowed, else find out whether it was done, or why not.
+
+        ``why`` gets the payment and ``mine()``, whether the caller has its token; the owner's
+        moves don't ask.
+        """
+
         key = payment_id(payment)
         with self._transaction() as connection:
             moved = self._one(connection, statement, {"payment": key, **args})
@@ -708,34 +740,50 @@ class Ledger:
             if current is None:
                 raise UsageError(f"no payment {key} in {self._path}")
             if moved is None:
-                reason = why(current)
+
+                def mine() -> bool:
+                    asked = {"payment": key, "holder": args.get("holder")}
+                    row = self._one(connection, "mine", asked)
+                    return row is not None and row["mine"] == 1
+
+                reason = why(current, mine)
                 if reason is not None:
                     raise UsageError(reason)
             return current
 
-    def settle(self, payment: str, *, evidence: str | None = None) -> Row:
-        """held or void -> settled, with the evidence. Idempotent."""
+    def settle(self, payment: str, *, holder: str | None, evidence: str | None = None) -> Row:
+        """held or void -> settled, with the evidence, by the process that held it.
 
-        return self._move(
-            "settle",
-            payment,
-            {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)},
-            lambda _: None,
-        )
+        Settling a settled payment is a no-op, for anyone.
+        """
 
-    def void(self, payment: str, *, evidence: str | None = None) -> Row:
-        """held -> void: evidence that the payment never moved money. Settled stays settled."""
+        def why(current: Row, mine: Callable[[], bool]) -> str | None:
+            if current["state"] == "settled" or mine():
+                return None
+            return held_elsewhere(str(current["payment"]), "settle")
 
-        def why(current: Row) -> str | None:
+        args = {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT), "holder": _holder(holder)}
+        return self._move("settle", payment, args, why)
+
+    def void(self, payment: str, *, holder: str | None, evidence: str | None = None) -> Row:
+        """held -> void, by the process that held it: the payment never moved money."""
+
+        def why(current: Row, mine: Callable[[], bool]) -> str | None:
             if current["state"] == "settled":
                 return f"payment {current['payment']} is settled; a settled payment can't be voided"
-            return None
+            return None if mine() else held_elsewhere(str(current["payment"]), "void")
 
-        return self._move(
-            "void", payment, {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)}, why
-        )
+        args = {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT), "holder": _holder(holder)}
+        return self._move("void", payment, args, why)
 
-    def bound(self, payment: str, *, until: int | None = None, within_ms: int | None = None) -> Row:
+    def bound(
+        self,
+        payment: str,
+        *,
+        holder: str | None,
+        until: int | None = None,
+        within_ms: int | None = None,
+    ) -> Row:
         """held with no until -> held until ``until``, or ``within_ms`` from now. Kept once set."""
 
         if (until is None) == (within_ms is None):
@@ -743,9 +791,12 @@ class Ledger:
         args = {
             "until": None if until is None else millis(until, "until"),
             "within_ms": None if within_ms is None else millis(within_ms, "within_ms", low=1),
+            "holder": _holder(holder),
         }
 
-        def why(current: Row) -> str | None:
+        def why(current: Row, mine: Callable[[], bool]) -> str | None:
+            if not mine():
+                return held_elsewhere(str(current["payment"]), "bound")
             if current["state"] == "held" and current["until"] is None and until is not None:
                 return (
                     f"settles_by {_iso(until)} is not after now: "
@@ -755,13 +806,40 @@ class Ledger:
 
         return self._move("bound", payment, args, why)
 
-    def note(self, payment: str, outcome: str, *, evidence: str | None = None) -> Row:
-        """Note a held payment's outcome: 'unknown' or 'refused'. It counts the same."""
+    def note(
+        self, payment: str, outcome: str, *, holder: str | None, evidence: str | None = None
+    ) -> Row:
+        """Note a held payment's outcome, by the process that held it. It counts the same."""
 
         if outcome not in ("unknown", "refused"):
             raise UsageError("outcome is 'unknown' or 'refused'")
-        args = {"outcome": outcome, "evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)}
-        return self._move("note", payment, args, lambda _: None)
+
+        def why(current: Row, mine: Callable[[], bool]) -> str | None:
+            return None if mine() else held_elsewhere(str(current["payment"]), "note")
+
+        args = {
+            "outcome": outcome,
+            "evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT),
+            "holder": _holder(holder),
+        }
+        return self._move("note", payment, args, why)
+
+    def owner_settle(self, payment: str, *, evidence: str | None = None) -> Row:
+        """The owner's reconciliation: held or void -> settled, whoever held it. Idempotent."""
+
+        args = {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)}
+        return self._move("owner_settle", payment, args, lambda _current, _mine: None)
+
+    def owner_void(self, payment: str, *, evidence: str | None = None) -> Row:
+        """The owner's reconciliation: held -> void, whoever held it. Settled stays settled."""
+
+        def why(current: Row, _mine: Callable[[], bool]) -> str | None:
+            if current["state"] == "settled":
+                return f"payment {current['payment']} is settled; a settled payment can't be voided"
+            return None
+
+        args = {"evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)}
+        return self._move("owner_void", payment, args, why)
 
     def payment(self, payment: str) -> Row | None:
         key = payment_id(payment)
