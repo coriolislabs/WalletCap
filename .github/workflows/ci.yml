@@ -10,17 +10,28 @@ permissions:
 
 jobs:
   javascript:
-    name: JavaScript
+    name: JavaScript (walletcap)
     runs-on: ubuntu-latest
     container: node:22-bookworm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      - name: Install the test dependencies
-        run: npm install --no-audit --no-fund
-        working-directory: js
-      - name: Run the suite
-        run: npm test
-        working-directory: js
+      - name: Install the workspace from the lockfile
+        run: npm ci --no-audit --no-fund
+      - name: Build and run the suite
+        run: npm test -w walletcap
+
+  mcp:
+    name: JavaScript (walletcap-mcp)
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install the workspace from the lockfile
+        run: npm ci --no-audit --no-fund
+      - name: Build walletcap, which walletcap-mcp imports through its package exports
+        run: npm run build -w walletcap
+      - name: Build and run the suite
+        run: npm test -w walletcap-mcp
 
   python:
     name: Python
@@ -29,22 +40,25 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      - name: Install the workspace and build walletcap, for the tests that run both languages
+        run: npm ci --no-audit --no-fund && npm run build -w walletcap
       - name: Run the suite
         # Node is on PATH here, so the cross-language tests run rather than skip.
-        run: uv run --with pytest --python 3.12 pytest -q
+        run: uv run --no-project --with pytest --python 3.12 pytest -q
+        working-directory: packages/python
 
-  solidity:
-    name: Solidity
+  contracts:
+    name: Contracts
     runs-on: ubuntu-latest
     container: node:22-bookworm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Install the check's dependencies
         run: npm install --no-audit --no-fund
-        working-directory: solidity/evm
+        working-directory: contracts/evm
       - name: Drive the contract on an EVM
         run: node check.mjs ..
-        working-directory: solidity/evm
+        working-directory: contracts/evm
 
   crash-test:
     name: Crash test
@@ -52,20 +66,16 @@ jobs:
     container: node:22-bookworm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      # One install, so the walletcap the crash test depends on comes from this checkout and is
-      # never looked up on npm (a release's walletcap isn't published until the PR merges).
-      - name: Build this checkout's walletcap
-        run: npm install --no-audit --no-fund && npm run build
-        working-directory: js
-      - name: Install the crash test, on this checkout's walletcap
-        run: npm install --no-save --no-audit --no-fund --no-package-lock ../js
-        working-directory: crash-test
+      # The workspace links walletcap to packages/js, so the crash test runs this checkout's
+      # walletcap, never the one on npm (a release's walletcap isn't published until it merges).
+      - name: Install the workspace and build walletcap
+        run: npm ci --no-audit --no-fund && npm run build -w walletcap
       - name: Check the shipped contracts match their sources
         run: node contracts/build.mjs --check
-        working-directory: crash-test
+        working-directory: bench/crash-test
       - name: Run it
         run: node --test
-        working-directory: crash-test
+        working-directory: bench/crash-test
 
   crash-test-agentkit:
     name: Crash test (AgentKit)
@@ -73,15 +83,15 @@ jobs:
     container: node:22-bookworm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install the workspace from the lockfile
+        run: npm ci --no-audit --no-fund
       - name: Pack the crash test and this checkout's walletcap
         run: |
-          (cd ../js && npm install --no-audit --no-fund)
-          npm pack --pack-destination "$RUNNER_TEMP"
-          (cd ../js && npm pack --pack-destination "$RUNNER_TEMP")
-        working-directory: crash-test
+          npm pack -w walletcap --pack-destination "$RUNNER_TEMP"
+          npm pack -w walletcap-crash-test --pack-destination "$RUNNER_TEMP"
       # As users run it, from the packed tarballs, with AgentKit installed alongside. walletcap is
       # this checkout's: the version the crash test depends on isn't on npm until it is released.
       - name: Run it with Coinbase AgentKit alongside
         run: npx -y -p "$RUNNER_TEMP"/walletcap-crash-test-*.tgz -p "$RUNNER_TEMP"/walletcap-[0-9]*.tgz -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit --json > "$RUNNER_TEMP/agentkit.json"
       - name: Check the AgentKit row
-        run: node crash-test/ci/check-agentkit.mjs "$RUNNER_TEMP/agentkit.json"
+        run: node bench/crash-test/ci/check-agentkit.mjs "$RUNNER_TEMP/agentkit.json"

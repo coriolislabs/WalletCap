@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# CircleCI runs the same gate as scripts/ci.sh, directly from the GitHub repo.
+# CircleCI runs the same gate as GitHub Actions' local equivalent: scripts/ci.sh.
 version: 2.1
 
 jobs:
@@ -9,38 +9,15 @@ jobs:
     steps:
       - checkout
       - run:
-          name: JavaScript
-          command: |
-            cd js
-            npm install --no-audit --no-fund --no-package-lock
-            npm test
-      - run:
           name: Python
           command: |
             sudo apt-get update -qq
             sudo apt-get install -y -qq python3 python3-venv
             python3 -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet pytest
-            /tmp/venv/bin/python -m pytest -q
       - run:
-          name: Examples
-          command: |
-            node examples/quickstart/quickstart.mjs
-            python3 examples/quickstart/quickstart.py
-      - run:
-          name: Solidity
-          command: |
-            cd solidity/evm
-            npm install --no-audit --no-fund --no-package-lock
-            node check.mjs ..
-      - run:
-          name: Crash test
-          command: |
-            (cd js && npm run build)
-            cd crash-test
-            npm install --no-save --no-audit --no-fund --no-package-lock ../js
-            node contracts/build.mjs --check
-            node --test
+          name: scripts/ci.sh
+          command: PATH="/tmp/venv/bin:$PATH" scripts/ci.sh
 
 workflows:
   ci:

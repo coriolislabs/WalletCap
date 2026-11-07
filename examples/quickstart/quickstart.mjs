@@ -5,7 +5,7 @@
 import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BudgetRefused, openBudget } from '../../js/dist/index.js';
+import { BudgetRefused, openBudget } from '../../packages/js/dist/index.js';
 
 const PATH = join(dirname(fileURLToPath(import.meta.url)), 'demo.sqlite');
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';

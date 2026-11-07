@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "workspaces": [
+    "packages/js",
+    "packages/mcp",
+    "bench/crash-test"
+  ],
+  "scripts": {
+    "build": "npm run build -w walletcap -w walletcap-mcp",
+    "test": "npm test -w walletcap -w walletcap-mcp"
+  }
+}

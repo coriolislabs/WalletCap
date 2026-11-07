@@ -11,7 +11,7 @@ import sys
 import warnings
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "packages" / "python" / "src"))
 
 from walletcap import BudgetRefused, open_budget
 

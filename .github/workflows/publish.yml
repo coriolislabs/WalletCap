@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Publish when a GitHub Release is published, or by hand.
-# - A release tagged v<version> publishes walletcap to PyPI and npm.
-# - A release tagged crash-test-v<version> publishes walletcap-crash-test to npm, and nothing else.
-# Everything uses trusted publishing, so no token is stored. PyPI matches this repository,
-# the workflow filename (publish.yml) and the "pypi" environment, and attaches PEP 740
-# attestations. npm matches this repository, publish.yml and the "npm" environment, for
-# each of the two packages, and attaches provenance.
+# - A release tagged v<version> publishes walletcap to PyPI (packages/python) and npm
+#   (packages/js). Both packages must carry that version.
+# - A release tagged mcp-v<version> publishes walletcap-mcp to npm (packages/mcp), and nothing else.
+# - A release tagged crash-test-v<version> publishes walletcap-crash-test to npm
+#   (bench/crash-test), and nothing else.
+# Everything uses trusted publishing, so no token is stored. PyPI matches this repository, the
+# workflow filename (publish.yml) and the "pypi" environment, and attaches PEP 740 attestations.
+# npm matches this repository, publish.yml and the "npm" environment, for each package, and
+# attaches provenance.
+#
+# walletcap-mcp is a new package. npm can't attach a trusted publisher to a package that doesn't
+# exist yet, so its first release is published by hand (npm publish --access public in
+# packages/mcp); its trusted publisher is then set up on npmjs.com, and the mcp job below
+# publishes every release after that.
 name: Publish
 
 on:
@@ -20,7 +28,7 @@ permissions:
 jobs:
   pypi:
     name: PyPI
-    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'crash-test-v')
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     environment: pypi
     steps:
@@ -28,25 +36,33 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
       - name: Check the release tag matches the package version
         if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: test "$TAG" = "v$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+        run: test "$TAG" = "v$(python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml', 'rb'))['project']['version'])")"
+      - name: Build walletcap for npm, which the cross-language tests run
+        run: npm ci --no-audit --no-fund && npm run build -w walletcap
       - name: Run the Python suite
+        working-directory: packages/python
         run: |
           python -m pip install --upgrade pytest
           python -m pytest -q
       - name: Build the distributions
+        working-directory: packages/python
         run: |
           python -m pip install --upgrade build
-          python -m build
+          python -m build --outdir ../../dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
 
   npm:
     name: npm
-    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'crash-test-v')
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -62,14 +78,40 @@ jobs:
         if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: test "$TAG" = "v$(node -p "require('./js/package.json').version")"
+        run: test "$TAG" = "v$(node -p "require('./packages/js/package.json').version")"
       - name: Run the JavaScript suite
-        working-directory: js
         run: |
-          npm install --no-audit --no-fund --no-package-lock
-          npm test
+          npm ci --no-audit --no-fund
+          npm test -w walletcap
       - name: Publish to npm with provenance
-        working-directory: js
+        working-directory: packages/js
+        run: npm publish --provenance
+
+  mcp:
+    name: npm (mcp)
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'mcp-v')
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Use an npm that supports trusted publishing (11.5.1 or later)
+        run: npm install --global npm@11.21.1
+      - name: Check the release tag matches the package version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: test "$TAG" = "mcp-v$(node -p "require('./packages/mcp/package.json').version")"
+      - name: Run the suite on this checkout's walletcap
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build -w walletcap
+          npm test -w walletcap-mcp
+      - name: Publish to npm with provenance
+        working-directory: packages/mcp
         run: npm publish --provenance
 
   crash-test:
@@ -89,12 +131,15 @@ jobs:
       - name: Check the release tag matches the package version
         env:
           TAG: ${{ github.event.release.tag_name }}
-        run: test "$TAG" = "crash-test-v$(node -p "require('./crash-test/package.json').version")"
+        run: test "$TAG" = "crash-test-v$(node -p "require('./bench/crash-test/package.json').version")"
+      # Outside the workspace, so walletcap comes from npm, as users get it.
       - name: Run the crash test on the walletcap users get from npm
-        working-directory: crash-test
         run: |
+          mkdir "$RUNNER_TEMP/crash-test"
+          cp -R bench/crash-test/. "$RUNNER_TEMP/crash-test"
+          cd "$RUNNER_TEMP/crash-test"
           npm install --no-audit --no-fund --no-package-lock
           node --test
       - name: Publish to npm with provenance
-        working-directory: crash-test
+        working-directory: bench/crash-test
         run: npm publish --provenance
