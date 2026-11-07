@@ -1,9 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   defaultBudgetPath, formatUsd, formatWindow, normalizeWallet, parseLimits, toMicros, toWindowMs,
 } from '../money.mjs';
+
+// The cases the Python suite checks too (tests/test_money.py).
+const VECTORS = JSON.parse(readFileSync(new URL('../../spec/vectors/money.json', import.meta.url), 'utf8'));
+
+test('dollars convert as the shared vectors say, the same as in Python', () => {
+  assert.ok(VECTORS.cases.length > 50);
+  for (const { input, micros, error } of VECTORS.cases) {
+    const shown = JSON.stringify(input);
+    if (error) assert.throws(() => toMicros(input), { name: 'BudgetError' }, shown);
+    else assert.equal(toMicros(input), BigInt(micros), shown);
+  }
+});
+
+test('trimming takes linear time: a long run of spaces inside an amount is refused at once', () => {
+  // A regex like /[ \t]+$/ backtracks quadratically here: about 20 s for these 200,000 spaces.
+  const text = `1${' '.repeat(200_000)}x`;
+  const started = performance.now();
+  for (const parse of [toMicros, toWindowMs, normalizeWallet]) assert.throws(() => parse(text), { name: 'BudgetError' });
+  assert.ok(performance.now() - started < 1_000, `took ${performance.now() - started} ms`);
+});
+
+test('windows, wallet names and counts read only ASCII digits and trim only ASCII whitespace', () => {
+  assert.equal(toWindowMs(' 24h\t'), 86_400_000n);
+  assert.equal(normalizeWallet(' 0xd797ead28c38575fdf4fc523866287372340ca02\n'), '0xd797ead28c38575fdf4fc523866287372340ca02');
+  assert.deepEqual(parseLimits({ maxPayments: ' 3 ' }), { maxUses: 3n });
+  for (const bad of ['\u0661\u0662h', '24h\u0085', '\u00a024h']) assert.throws(() => toWindowMs(bad), { name: 'BudgetError' }, bad);
+  for (const bad of ['0xd797ead28c38575fdf4fc523866287372340ca02\u0085', 'eip155:\u0661:0xd797ead28c38575fdf4fc523866287372340ca02']) {
+    assert.throws(() => normalizeWallet(bad), { name: 'BudgetError' }, bad);
+  }
+  for (const bad of ['\u0661\u0662', '3\u0085']) assert.throws(() => parseLimits({ maxPayments: bad }), { name: 'BudgetError' }, bad);
+});
 
 test('dollars read exactly from strings, rounded from numbers, as-is from bigints', () => {
   assert.equal(toMicros('$12.50'), 12_500_000n);

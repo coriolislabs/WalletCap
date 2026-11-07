@@ -15,12 +15,14 @@ SOURCE = ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
 from walletcap import (  # noqa: E402
+    MAX_AMOUNT,
     BudgetError,
     BudgetRevoked,
     Ledger,
     OverBudget,
     OverPerPayment,
     OverUses,
+    _clock,
 )
 
 DAY = 86_400
@@ -34,8 +36,17 @@ class Clock:
         return self.at
 
 
-def _ledger(path: Path, clock: Clock, **options: int) -> Ledger:
-    ledger = Ledger(path, clock=clock, **options)
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    """The ledger's own clock, replaced through the private hook for one test."""
+
+    fake = Clock()
+    monkeypatch.setattr(_clock, "source", fake)
+    return fake
+
+
+def _ledger(path: Path, **options: int) -> Ledger:
+    ledger = Ledger(path, **options)
     ledger.declare("agent", unit="usdc", cap=150, window_seconds=DAY, per_payment=50)
     return ledger
 
@@ -46,12 +57,11 @@ def _pay(ledger: Ledger, amount: int = 50) -> str:
     return spend_id
 
 
-def test_a_restart_reads_the_same_count(tmp_path: Path) -> None:
-    clock = Clock()
-    ledger = _ledger(tmp_path / "budget.sqlite", clock)
+def test_a_restart_reads_the_same_count(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
     for _ in range(3):
         _pay(ledger)
-    restarted = Ledger(tmp_path / "budget.sqlite", clock=clock)
+    restarted = Ledger(tmp_path / "budget.sqlite")
     with pytest.raises(OverBudget) as refused:
         restarted.reserve("agent", 1)
     assert refused.value.reason == "budget"
@@ -60,7 +70,7 @@ def test_a_restart_reads_the_same_count(tmp_path: Path) -> None:
 
 def test_racing_processes_cannot_both_take_the_last_of_the_budget(tmp_path: Path) -> None:
     path = tmp_path / "budget.sqlite"
-    _ledger(path, Clock(time.time()))
+    _ledger(path)
     go = tmp_path / "go"
     script = """
 import pathlib, sys, time
@@ -109,9 +119,8 @@ print(won)
     assert Ledger(path).status("agent").spent == 150
 
 
-def test_spend_counts_for_the_whole_window_then_ages_out(tmp_path: Path) -> None:
-    clock = Clock()
-    ledger = _ledger(tmp_path / "budget.sqlite", clock)
+def test_spend_counts_for_the_whole_window_then_ages_out(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
     for _ in range(3):
         _pay(ledger)
     clock.at += DAY  # a payment counts while at + window >= now
@@ -124,16 +133,15 @@ def test_spend_counts_for_the_whole_window_then_ages_out(tmp_path: Path) -> None
 
 
 def test_a_payment_over_the_per_payment_max_is_refused(tmp_path: Path) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", Clock())
+    ledger = _ledger(tmp_path / "budget.sqlite")
     with pytest.raises(OverPerPayment) as refused:
         ledger.reserve("agent", 51)
     assert refused.value.reason == "per_payment"
     assert ledger.status("agent").uses == 0
 
 
-def test_the_use_count_is_per_window(tmp_path: Path) -> None:
-    clock = Clock()
-    ledger = Ledger(tmp_path / "budget.sqlite", clock=clock)
+def test_the_use_count_is_per_window(tmp_path: Path, clock: Clock) -> None:
+    ledger = Ledger(tmp_path / "budget.sqlite")
     ledger.declare("agent", unit="usdc", cap=150, window_seconds=DAY, max_uses=2)
     _pay(ledger, 10)
     _pay(ledger, 10)
@@ -146,7 +154,7 @@ def test_the_use_count_is_per_window(tmp_path: Path) -> None:
 def test_a_revoke_refuses_new_reservations_but_lets_in_flight_payments_commit(
     tmp_path: Path,
 ) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", Clock())
+    ledger = _ledger(tmp_path / "budget.sqlite")
     in_flight = ledger.reserve("agent", 50)
     ledger.revoke("agent")
     with pytest.raises(BudgetRevoked) as refused:
@@ -158,7 +166,7 @@ def test_a_revoke_refuses_new_reservations_but_lets_in_flight_payments_commit(
 
 
 def test_a_released_reservation_gives_the_budget_back(tmp_path: Path) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", Clock())
+    ledger = _ledger(tmp_path / "budget.sqlite")
     held = [ledger.reserve("agent", 50) for _ in range(3)]
     assert ledger.status("agent").reserved == 150
     with pytest.raises(OverBudget):
@@ -172,10 +180,9 @@ def test_a_released_reservation_gives_the_budget_back(tmp_path: Path) -> None:
 
 
 def test_an_open_reservation_counts_past_the_window_and_settles_into_a_new_one(
-    tmp_path: Path,
+    tmp_path: Path, clock: Clock
 ) -> None:
-    clock = Clock()
-    ledger = _ledger(tmp_path / "budget.sqlite", clock)
+    ledger = _ledger(tmp_path / "budget.sqlite")
     held = [ledger.reserve("agent", 50) for _ in range(3)]
     clock.at += DAY + 1  # still unsettled a window later: an unknown outcome keeps counting
     assert ledger.status("agent").reserved == 150
@@ -192,36 +199,136 @@ def test_an_open_reservation_counts_past_the_window_and_settles_into_a_new_one(
     assert ledger.status("agent").spent == 0
 
 
-def test_a_lapsed_reservation_survives_compaction_and_still_settles(tmp_path: Path) -> None:
-    clock = Clock()
-    ledger = _ledger(tmp_path / "budget.sqlite", clock, reservation_ttl_seconds=60)
-    lapsing = ledger.reserve("agent", 50)
+def test_a_hold_never_lapses_while_its_payment_can_still_settle(
+    tmp_path: Path, clock: Clock
+) -> None:
+    # 0.2.x had reservation_ttl_seconds: a hold lapsed after it although its payment could
+    # still settle, so a second full cap was reserved and both settled, $300 on a $150 cap.
+    with pytest.raises(TypeError):
+        Ledger(tmp_path / "ttl.sqlite", reservation_ttl_seconds=60)  # type: ignore[call-arg]
+    ledger = _ledger(tmp_path / "budget.sqlite")
+    held = [ledger.reserve("agent", 50) for _ in range(3)]
     clock.at += 61
-    assert ledger.status("agent").reserved == 0
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+    clock.at += 30 * DAY
+    assert ledger.status("agent").reserved == 150
     assert ledger.compact("agent") == 0
-    ledger.commit(lapsing)
-    assert ledger.status("agent").spent == 50
+    for spend_id in held:
+        ledger.commit(spend_id)
+    assert ledger.status("agent").spent == 150
 
 
-def test_reservations_never_lapse_unless_a_ttl_is_set(tmp_path: Path) -> None:
-    clock = Clock()
-    ledger = _ledger(tmp_path / "default.sqlite", clock)
-    ledger.reserve("agent", 50)
-    clock.at += 3_600
-    assert ledger.status("agent").reserved == 50
-
-    clock = Clock()
-    ledger = _ledger(tmp_path / "ttl.sqlite", clock, reservation_ttl_seconds=60)
-    lapsing = ledger.reserve("agent", 50)
-    clock.at += 61
+def test_a_settle_by_time_that_isnt_after_now_is_refused(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
+    now_ms = int(clock.at * 1000)
+    # 0.2.x stored a past moment as given: the holds never counted, and more was reserved.
+    for settles_by_ms in (0, now_ms - 1, now_ms):
+        with pytest.raises(BudgetError, match="is not after now"):
+            ledger.reserve("agent", 50, settles_by_ms=settles_by_ms)
+    assert ledger.status("agent").uses == 0
+    held = [ledger.reserve("agent", 50, settles_by_ms=now_ms + 1) for _ in range(3)]
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+    clock.at += DAY + 0.002
     assert ledger.status("agent").reserved == 0
-    # A late commit is still recorded: the money moved.
-    ledger.commit(lapsing)
-    assert ledger.status("agent").spent == 50
+    for spend_id in held:
+        ledger.commit(spend_id)  # settled late after all: they count again, from now
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+
+
+def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
+    tmp_path: Path, clock: Clock
+) -> None:
+    assert MAX_AMOUNT == 10**15
+    ledger = Ledger(tmp_path / "budget.sqlite")
+    for too_much in (MAX_AMOUNT + 1, 2**63 - 1):
+        with pytest.raises(BudgetError, match="at most 1000000000000000"):
+            ledger.declare("big", unit="usd", cap=too_much, window_seconds=DAY)
+    ledger.declare("agent", unit="usd", cap=MAX_AMOUNT, window_seconds=DAY)
+    with pytest.raises(BudgetError, match="at most 1000000000000000"):
+        ledger.reserve("agent", MAX_AMOUNT + 1)
+    # Two holds of the most a budget can hold count at once: one lapsed, then settled late.
+    # 0.2.x took near-2^63 amounts, and two of them overflowed SQLite's SUM for good.
+    first = ledger.reserve("agent", MAX_AMOUNT, settles_by_ms=int(clock.at * 1000) + 1)
+    clock.at += DAY + 1
+    ledger.reserve("agent", MAX_AMOUNT)
+    ledger.commit(first)
+    status = ledger.status("agent")
+    assert (status.spent, status.reserved, status.remaining) == (MAX_AMOUNT, MAX_AMOUNT, 0)
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 1)
+
+
+def test_a_commit_never_shortens_a_hold(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
+    # A payee can say a payment settled at once and keep an authorization valid two days.
+    settles_by_ms = int(clock.at * 1000) + 2 * DAY * 1000
+    for spend_id in [ledger.reserve("agent", 50, settles_by_ms=settles_by_ms) for _ in range(3)]:
+        ledger.commit(spend_id)
+    clock.at += DAY + 1
+    assert ledger.status("agent").spent == 150
+    with pytest.raises(OverBudget):
+        ledger.reserve("agent", 50)
+    clock.at += 2 * DAY - 1  # the settle-by time plus one window
+    assert ledger.status("agent").spent == 150
+    assert [spend.counting for spend in ledger.history("agent")] == [True, True, True]
+    clock.at += 0.001
+    assert ledger.status("agent").spent == 0
+    _pay(ledger)
+
+
+def test_the_time_is_read_once_the_write_lock_is_held(tmp_path: Path) -> None:
+    path = tmp_path / "budget.sqlite"
+    ledger = _ledger(path)
+    script = (
+        "import sqlite3, sys, time\n"
+        "connection = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(0.4)\n"
+        "connection.execute('COMMIT')\n"
+    )
+    # Another process takes the write lock and holds it for 400 ms.
+    holder = subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+    asked = time.time()
+    spend_id = ledger.reserve("agent", 1)
+    [spend] = ledger.history("agent")
+    assert spend.spend_id == spend_id
+    # 0.3.0 read the time before it waited for the lock, so the payment was dated, and stopped
+    # counting, as much as the wait earlier than it was taken.
+    assert spend.at_ms / 1000 - asked >= 0.25
+    assert holder.wait(timeout=30) == 0
+
+
+def test_a_checksummed_address_names_the_one_lowercase_budget(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "budget.sqlite")
+    lower = "0xd797ead28c38575fdf4fc523866287372340ca02"
+    checksummed = "0xd797ead28C38575FDf4fC523866287372340Ca02"
+    # 0.2.x kept Ledger.declare's name as given: a checksummed address opened a second budget.
+    ledger.declare(checksummed, unit="usd", cap=150, window_seconds=DAY)
+    ledger.reserve(lower, 150)
+    for name in (checksummed, f"eip155:8453:{checksummed}", "0x" + lower[2:].upper()):
+        with pytest.raises(OverBudget):
+            ledger.reserve(name, 1)
+    with pytest.raises(BudgetError, match="other limits"):
+        ledger.declare(lower, unit="usd", cap=300, window_seconds=DAY)
+    assert [budget.instrument for budget in ledger.budgets()] == [lower]
+    assert ledger.status(checksummed).instrument == lower
+    # A mistyped checksum is refused rather than opening a budget of its own.
+    with pytest.raises(BudgetError, match="EIP-55"):
+        ledger.declare(
+            "0xD797ead28C38575FDf4fC523866287372340Ca02", unit="usd", cap=1, window_seconds=1
+        )
 
 
 def test_a_committed_reservation_cannot_be_committed_or_released_again(tmp_path: Path) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", Clock())
+    ledger = _ledger(tmp_path / "budget.sqlite")
     spend_id = _pay(ledger)
     with pytest.raises(BudgetError, match="already committed"):
         ledger.commit(spend_id)
@@ -232,7 +339,7 @@ def test_a_committed_reservation_cannot_be_committed_or_released_again(tmp_path:
 
 
 def test_declaring_again_with_other_limits_is_refused(tmp_path: Path) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", Clock())
+    ledger = _ledger(tmp_path / "budget.sqlite")
     ledger.declare("agent", unit="usdc", cap=150, window_seconds=DAY, per_payment=50)
     with pytest.raises(BudgetError, match="other limits"):
         ledger.declare("agent", unit="usdc", cap=300, window_seconds=DAY, per_payment=50)
@@ -242,7 +349,7 @@ def test_declaring_again_with_other_limits_is_refused(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("amount", [0, -1, True, 2**63, 1.5, "50"])
 def test_a_malformed_amount_is_refused(tmp_path: Path, amount: object) -> None:
-    ledger = _ledger(tmp_path / "budget.sqlite", Clock())
+    ledger = _ledger(tmp_path / "budget.sqlite")
     with pytest.raises(BudgetError, match="integer"):
         ledger.reserve("agent", amount)  # type: ignore[arg-type]
 
@@ -254,9 +361,8 @@ def test_a_malformed_identifier_is_refused(tmp_path: Path, instrument: str) -> N
         ledger.declare(instrument, unit="usdc", cap=1, window_seconds=1)
 
 
-def test_compact_deletes_only_rows_that_no_longer_count(tmp_path: Path) -> None:
-    clock = Clock()
-    ledger = _ledger(tmp_path / "budget.sqlite", clock)
+def test_compact_deletes_only_rows_that_no_longer_count(tmp_path: Path, clock: Clock) -> None:
+    ledger = _ledger(tmp_path / "budget.sqlite")
     _pay(ledger)
     still_open = ledger.reserve("agent", 50)
     clock.at += DAY + 1
@@ -272,6 +378,12 @@ def test_a_ledger_from_another_schema_version_is_refused(tmp_path: Path) -> None
     path = tmp_path / "budget.sqlite"
     Ledger(path)
     with sqlite3.connect(path) as connection:
-        connection.execute("UPDATE budget_meta SET value = '2' WHERE key = 'schema'")
-    with pytest.raises(BudgetError, match="schema 2"):
+        connection.execute("UPDATE budget_meta SET value = '3' WHERE key = 'schema'")
+    with pytest.raises(BudgetError, match="schema 3"):
         Ledger(path)
+
+
+def test_the_clock_is_not_an_option(tmp_path: Path) -> None:
+    # 0.2.x took a clock per Ledger; a process running a day ahead saw an empty budget.
+    with pytest.raises(TypeError):
+        Ledger(tmp_path / "budget.sqlite", clock=lambda: 2_000_000_000.0)  # type: ignore[call-arg]

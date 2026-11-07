@@ -2,9 +2,11 @@
 // Put the budget in front of Coinbase's Agentic Wallet: the awal CLI and the payments-mcp server.
 //
 // Every send and every x402 payment that goes through here is counted in the wallet's budget,
-// whichever process, session or machine makes it. An x402 payment is priced before the wallet
-// signs it, and the wallet is capped at that amount. A confirmed settlement counts for one
-// window; a payment the payee never confirms keeps counting until its owner releases it.
+// whichever process or session on this host makes it. An x402 payment is priced before the wallet
+// signs it, and the wallet is handed the terms walletcap priced and capped at that amount. Once
+// the wallet answers, the payment counts until one window past the time its authorization
+// expires, whatever the payee says; if the wallet never answers, until its owner releases it. A
+// send counts for one window, or, if its outcome is unknown, until its owner releases it.
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -14,10 +16,12 @@ import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { BudgetError, BudgetRefused } from './errors.mjs';
+import { now } from './_clock.mjs';
+import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.mjs';
 import { openBudget } from './index.mjs';
-import { formatUsd, normalizeWallet } from './money.mjs';
-import { assetKey, assetTable, atomicOf, toMicros as atomicToMicros } from './x402.mjs';
+import { SETTLES_BY } from './ledger.mjs';
+import { formatUsd, normalizeWallet, trimAscii } from './money.mjs';
+import { assetKey, assetTable, atomicOf, settlesWithinSeconds, timeoutRefusal, toMicros as atomicToMicros } from './x402.mjs';
 
 /** The wallet's chain names, as CAIP-2 networks. */
 export const AWAL_CHAINS = Object.freeze({
@@ -29,6 +33,8 @@ export const AWAL_CHAINS = Object.freeze({
 });
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+// Room for the wallet's clock, or the chain's, to run ahead of this one.
+const CLOCK_SKEW_MS = 60_000n;
 
 // The wallet's own refusals, raised before it signs anything. Only these give the amount back:
 // any other failure may come after the signature left, so it keeps counting.
@@ -39,6 +45,35 @@ const NOT_SIGNED = [
   /^(?:UI bridge error: )?(?:Not authenticated|Authentication required|Please sign in)/i,
 ];
 const notSigned = error => NOT_SIGNED.some(pattern => pattern.test(String(error?.message ?? error)));
+
+// The payment settled; record it, or say it went through but couldn't be recorded (not a BudgetError).
+const settled = (reservation, tx) => {
+  try {
+    reservation.commit({ tx });
+  } catch (error) {
+    throw new PaymentNotRecorded(reservation.id, { cause: error });
+  }
+};
+
+// Record what the wallet answered. If the ledger can't (a busy timeout, say), the payment still
+// counts as in flight, and the caller gets PaymentNotRecorded, not a BudgetError it might retry on.
+const recorded = (reservation, write) => {
+  try {
+    write();
+  } catch (error) {
+    throw new PaymentNotRecorded(reservation.id, { cause: error, settled: false });
+  }
+};
+
+// The amount the wallet sends is the amount counted: a whole number of atomic units in ASCII
+// digits, passed on to the wallet as walletcap read it ("0x10" or " 5" could read differently there).
+const sendAmount = value => {
+  const text = typeof value === 'bigint' || (typeof value === 'number' && Number.isSafeInteger(value)) ? String(value) : value;
+  if (typeof text !== 'string' || !/^[0-9]+$/.test(text)) {
+    throw new BudgetError(`the send amount ${String(value)} is not a whole number of atomic units`);
+  }
+  return BigInt(text);
+};
 
 const decodeHeader = value => {
   try {
@@ -66,7 +101,10 @@ const requestUrl = data => {
   return url;
 };
 
-/** Ask the endpoint what it charges: its 402 answer's accepted payment requirements, or null if it asks for none. */
+/**
+ * Ask the endpoint what it charges: its 402 answer, with the payment requirements it accepts
+ * (`accepts`) and any `extensions`, or null if it asks for none.
+ */
 export async function discoverRequirements(data, { fetch: fetchImpl = globalThis.fetch } = {}) {
   const method = String(data.method ?? 'GET').toUpperCase();
   const init = { method, headers: { Accept: 'application/json', ...(data.headers ?? {}) }, redirect: 'follow' };
@@ -81,12 +119,15 @@ export async function discoverRequirements(data, { fetch: fetchImpl = globalThis
   if (!Array.isArray(required?.accepts) || required.accepts.length === 0) {
     throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
   }
-  return required.accepts;
+  return required;
 }
 
 /**
  * Count every send and x402 payment made through `request(channel, data)`, the wallet's own
  * request channel, in `budget`. Returns a `request` with the same shape that applies the budget.
+ * `discover(data)`, if given, stands in for walletcap's own 402 discovery (discoverRequirements):
+ * it returns the 402 answer (`{ accepts, extensions }`) or just its list of payment requirements,
+ * or null when the endpoint asks for no payment.
  */
 export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchImpl, discover } = {}) {
   if (typeof request !== 'function') throw new BudgetError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
@@ -94,13 +135,27 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   const findRequirements = discover ?? (data => discoverRequirements(data, { fetch: fetchImpl }));
   const networkOf = requirement => assetKey(requirement.network, requirement.asset).split(' ')[0];
 
-  // A failure the wallet reports before signing gives the amount back; anything else keeps counting.
-  const failed = (reservation, error, { counts }) => {
+  // A failure the wallet reports before signing gives the amount back. Anything else may come after
+  // the payment left, so it stays in flight, marked unknown, and keeps counting: an error never
+  // settles a payment.
+  const failed = (reservation, error) => {
     if (!reservation.open) return;
-    if (notSigned(error)) reservation.release();
-    else if (counts === 'window') reservation.commit({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
-    else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+    recorded(reservation, () => {
+      if (notSigned(error)) reservation.release();
+      else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+    });
   };
+
+  // Terms the wallet may be handed: in an asset walletcap can price, valid an hour or less
+  // (timeoutRefusal), so walletcap can tell how much it pays and how long it can settle.
+  const isTerm = requirement => requirement !== null && typeof requirement === 'object';
+  const priced = requirement => table.has(assetKey(requirement.network, requirement.asset));
+  const payable = requirement => isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
+
+  // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay any
+  // of the terms it is handed, whatever walletcap would pick, so the longest of them counts,
+  // whatever the scheme (settlesWithinSeconds), plus a minute of clock skew.
+  const settlesWithinMs = requirements => BigInt(Math.max(...requirements.map(settlesWithinSeconds))) * 1000n + CLOCK_SKEW_MS;
 
   async function send(data) {
     const asset = String(data?.asset ?? 'USDC').toUpperCase();
@@ -109,83 +164,124 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     if (asset !== 'USDC' || network === undefined) {
       throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset} on ${chain}, so it refuses this send`);
     }
-    let atomic;
-    try { atomic = BigInt(data.amountAtomic); } catch { throw new BudgetError(`the send amount ${JSON.stringify(data?.amountAtomic)} is not an integer`); }
+    const atomic = sendAmount(data?.amountAtomic);
     if (atomic <= 0n) throw new BudgetError('the send amount must be more than $0');
+    const recipient = data?.recipient;
+    if (typeof recipient !== 'string' || recipient.length === 0) throw new BudgetError('the send needs a recipient');
     const reservation = budget.reserve(atomic, {
-      rail: 'awal', to: String(data.recipient), note: `send on ${chain}`, details: { network, asset },
+      rail: 'awal', to: recipient, note: `send on ${chain}`, details: { network, asset },
     });
     let result;
     try {
-      result = await request('send-transaction', { ...data, asset, chain });
+      // Only the fields the wallet's send takes, as walletcap read them: nothing else reaches the wallet.
+      result = await request('send-transaction', { recipient, amountAtomic: atomic.toString(), asset, chain });
     } catch (error) {
-      failed(reservation, error, { counts: 'window' });
+      failed(reservation, error);
       throw error;
     }
-    if (result?.error) failed(reservation, new Error(String(result.error)), { counts: 'window' });
-    else reservation.commit({ tx: TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined });
+    // A transaction the wallet reports as failed may still be mined: it keeps counting.
+    if (result?.error) failed(reservation, new Error(String(result.error)));
+    else settled(reservation, TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined);
     return result;
   }
 
   async function x402(data) {
-    const offered = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0
-      ? data.paymentRequirements
-      : await findRequirements(data);
+    // The wallet is handed the terms walletcap checks, the caller's or the ones walletcap
+    // discovers, less any it can't price or bound. Handed terms, awal skips its own 402 discovery
+    // and signs only a term equal to one of them, maxTimeoutSeconds included, so the payee can't
+    // show it others.
+    const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
+    const found = handed ? null : await findRequirements(data);
+    const required = Array.isArray(found) ? { accepts: found } : found ?? null;
     const url = requestUrl(data).href.slice(0, 1024);
-    if (offered === null) {
+    if (!handed && required !== null && (!Array.isArray(required.accepts) || required.accepts.length === 0)) {
+      throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
+    }
+    if (!handed && required === null) {
       // The endpoint asked for nothing. Let the request through with the wallet's smallest
-      // possible payment cap, counted, in case the payee asks for money after all.
+      // possible payment cap, one atomic unit, counted, in case the payee asks for money after
+      // all. Nothing was signed for value, so unless the payee confirms a payment the hold is
+      // given back: a free endpoint that fails can't leave holds that use up maxPayments.
       const reservation = budget.reserve(1n, { rail: 'awal-x402', note: url });
       let result;
       try {
         result = await request('make-x402-request', { ...data, maxAmountPerRequest: 1 });
       } catch (error) {
-        failed(reservation, error, { counts: 'window' });
+        recorded(reservation, () => reservation.release());
         throw error;
       }
-      if (paymentResponseOf(result) === null) reservation.release();
-      else reservation.commit({ outcome: 'unknown' });
+      const answer = paymentResponseOf(result);
+      if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
+      else recorded(reservation, () => reservation.release());
       return result;
     }
+    const offered = handed ? data.paymentRequirements : required.accepts;
+    const usable = offered.filter(payable);
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
-    const candidates = offered.filter(requirement => (preferred === undefined || networkOf(requirement) === preferred)
-      && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme));
-    const priced = candidates.filter(requirement => table.has(assetKey(requirement.network, requirement.asset)));
-    if (priced.length === 0) {
-      const first = candidates[0] ?? offered[0];
+    const wanted = requirement => (preferred === undefined || networkOf(requirement) === preferred)
+      && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme);
+    const candidates = usable.filter(wanted);
+    if (candidates.length === 0) {
+      // Nothing left the wallet could pay: say why for the terms it would have picked from.
+      const asked = offered.filter(requirement => isTerm(requirement) && wanted(requirement));
+      const countable = asked.find(priced);
+      if (countable !== undefined) throw timeoutRefusal(countable);
+      const first = asked[0] ?? offered.find(isTerm);
       throw new BudgetRefused('asset', `walletcap cannot price ${first?.asset} on ${first?.network}; it pays only in the USD stablecoins it knows`);
     }
+    const extensions = required?.extensions;
+    const terms = {
+      paymentRequirements: usable,
+      // The wallet uses the 402's extensions only when it discovers the terms itself.
+      ...(!handed && data.extensions === undefined && isTerm(extensions) && !Array.isArray(extensions) ? { extensions } : {}),
+    };
+    const settlesWithin = settlesWithinMs(usable);
     // The wallet picks the terms itself when it pays, so reserve the most any offer asks
     // and cap the wallet at exactly that: it refuses to sign for more.
-    const choice = priced.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
+    const choice = candidates.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
     const micros = atomicToMicros(atomicOf(choice), table.get(assetKey(choice.network, choice.asset)));
     if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
       throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
     }
-    // walletcap can't see when the authorization the wallet signs expires, so a payment that
-    // isn't confirmed settled keeps counting until its owner releases it (npx walletcap release).
+    // A payment counts until its owner releases it (npx walletcap release), or, once the wallet
+    // has answered, until one window past the time it can no longer settle.
     const reservation = budget.reserve(micros, {
       rail: 'awal-x402', to: choice.payTo, note: url,
       details: { network: choice.network, asset: choice.asset, scheme: choice.scheme, maxTimeoutSeconds: choice.maxTimeoutSeconds },
     });
     let result;
     try {
-      result = await request('make-x402-request', { ...data, maxAmountPerRequest: Number(atomicOf(choice)) });
+      result = await request('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) });
     } catch (error) {
-      failed(reservation, error, { counts: 'until-released' });
+      // The wallet may not have answered yet, and may still sign: it counts until released.
+      failed(reservation, error);
       throw error;
     }
+    // The wallet has answered, so it has signed if it ever will. The hold learns when that
+    // authorization expires before anything else: a commit never shortens a hold, so the payee's
+    // own word that the payment settled can't free the budget early.
+    recorded(reservation, () => reservation[SETTLES_BY](BigInt(now()) + settlesWithin));
     const answer = paymentResponseOf(result);
-    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) reservation.commit({ tx: answer.transaction });
-    else reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' });
+    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
+    else recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));
     return result;
   }
+
+  // The agent is told why a payment was refused, not which holds its owner could release: that
+  // is for the owner's CLI (walletcap holds) and budget.check().
+  const toAgent = async pay => {
+    try {
+      return await pay();
+    } catch (error) {
+      throw forAgent(error);
+    }
+  };
 
   return {
     budget,
     async request(channel, data) {
-      if (channel === 'send-transaction') return send(data ?? {});
-      if (channel === 'make-x402-request') return x402(data ?? {});
+      if (channel === 'send-transaction') return toAgent(() => send(data ?? {}));
+      if (channel === 'make-x402-request') return toAgent(() => x402(data ?? {}));
       return request(channel, data);
     },
   };
@@ -232,13 +328,25 @@ async function openGuard(env, request, options = {}) {
   return guardAgenticWallet(budget, { request });
 }
 
-// awal's own amount rule for USDC: "$0.05" and "0.05" are dollars; a whole number above 100 is atomic units.
+const AWAL_AMOUNT = /^\$?[ \t\n\v\f\r]*([0-9]+)(?:\.([0-9]+))?$/;
+
+/**
+ * awal's own amount rule for USDC, read exactly: "$0.05" and "0.05" are dollars, and a whole
+ * number above 100 ("50000", "101.0") is atomic units. Anything else is refused: "100.5abc", "1e3",
+ * "1,000", digits other than 0-9, and amounts finer than one atomic unit (0.000001).
+ */
 export function usdcAtomic(amount) {
-  const cleaned = String(amount).replace(/^\$/, '').trim();
-  const value = parseFloat(cleaned);
-  if (Number.isNaN(value) || value <= 0) throw new BudgetError(`Invalid amount: ${amount}. Must be a positive number.`);
-  if (Number.isInteger(value) && value > 100) return Math.floor(value).toString();
-  return Math.floor(value * 1_000_000).toString();
+  const match = AWAL_AMOUNT.exec(trimAscii(String(amount)));
+  if (match === null) {
+    throw new BudgetError(`Invalid amount: ${amount}. Give USDC like 0.05 or $0.05, or a whole number of atomic units above 100.`);
+  }
+  const [, whole, fraction = ''] = match;
+  if (/[^0]/.test(fraction.slice(6))) throw new BudgetError(`Invalid amount: ${amount} is finer than one atomic unit of USDC (0.000001).`);
+  const atomic = !/[^0]/.test(fraction) && BigInt(whole) > 100n
+    ? BigInt(whole)
+    : BigInt(whole) * 1_000_000n + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
+  if (atomic === 0n) throw new BudgetError(`Invalid amount: ${amount}. Must be a positive number.`);
+  return atomic.toString();
 }
 
 const PAY_OPTIONS = {

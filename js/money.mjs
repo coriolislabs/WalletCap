@@ -1,54 +1,90 @@
 // SPDX-License-Identifier: Apache-2.0
 // Dollars in, micro-dollars out: amounts, rolling windows, wallet names and the
 // default budget file. A budget counts in micro-dollars, so one USDC base unit
-// is one budget unit. The Python package parses and formats the same way.
+// is one budget unit. The Python package parses and formats the same way, and
+// spec/vectors/money.json holds the cases both test suites check.
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { BudgetError } from './errors.mjs';
 import { keccak256Hex } from './_keccak.mjs';
 
 export const MICROS = 1_000_000n;
-export const MAX_AMOUNT = (1n << 63n) - 1n;
+/**
+ * The most a budget, a limit or one payment can be, in the budget's own unit:
+ * 10^15, a billion dollars in micro-dollars. Kept far below 2^63 so that no sum
+ * of payments can overflow SQLite's 64-bit integers.
+ */
+export const MAX_AMOUNT = 10n ** 15n;
+/** Times and counts only have to fit in SQLite's 64-bit integers. */
+export const MAX_INTEGER = (1n << 63n) - 1n;
 export const DOLLAR_UNITS = new Set(['usd', 'usdc']);
 
-const DOLLARS = /^\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(?:usdc?)?$/i;
-const DURATION = /^(\d+)\s*(ms|s|m|h|d|w)$/;
+// ASCII only, in both languages: no other digits or spaces, so "١٢" and "12\u0085" are refused.
+const DOLLARS = /^\$?[ \t\n\v\f\r]*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.([0-9]+))?[ \t\n\v\f\r]*(?:[Uu][Ss][Dd][Cc]?)?$/;
+const DURATION = /^([0-9]+)[ \t\n\v\f\r]*(ms|s|m|h|d|w)$/;
+const NUMBER = /^([0-9]+)(?:\.([0-9]*))?(?:e([+-]?[0-9]+))?$/;
 const DURATION_MS = { ms: 1n, s: 1_000n, m: 60_000n, h: 3_600_000n, d: 86_400_000n, w: 604_800_000n };
 const DURATION_WORDS = { hour: 3_600_000n, day: 86_400_000n, week: 604_800_000n };
 const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
-const CAIP10_EVM = /^eip155:\d+:(0x[0-9a-fA-F]{40})$/;
+const CAIP10_EVM = /^eip155:[0-9]+:(0x[0-9a-fA-F]{40})$/;
 const CAIP10_SOLANA = /^solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})$/;
 const IDENTIFIER = /^[A-Za-z0-9_.:@/-]{1,128}$/;
 
 export const WINDOWS = { perHour: DURATION_WORDS.hour, perDay: DURATION_WORDS.day, perWeek: DURATION_WORDS.week };
 
+const ASCII_SPACE = new Set([' ', '\t', '\n', '\v', '\f', '\r']);
+
+/**
+ * `text` without leading or trailing ASCII whitespace; the Python package trims the same set.
+ * A scan, not a regex: /\s+$/ takes quadratic time on a long run of spaces inside the text.
+ */
+export const trimAscii = text => {
+  let start = 0;
+  let end = text.length;
+  while (start < end && ASCII_SPACE.has(text[start])) start += 1;
+  while (end > start && ASCII_SPACE.has(text[end - 1])) end -= 1;
+  return text.slice(start, end);
+};
+
+// A number of dollars as micro-dollars: the shortest decimal that reads back as the number
+// (String() here, repr() in Python: the same digits), rounded half up to a micro-dollar.
+const numberMicros = value => {
+  const [, whole, fraction = '', exponent = '0'] = NUMBER.exec(String(value));
+  const coefficient = BigInt(whole + fraction);
+  const shift = Number(exponent) - fraction.length + 6;
+  if (shift >= 0) return coefficient * 10n ** BigInt(shift);
+  const divisor = 10n ** BigInt(-shift);
+  return coefficient / divisor + (2n * (coefficient % divisor) >= divisor ? 1n : 0n);
+};
+
 /**
  * An amount of dollars as integer micro-dollars. Strings are exact ("$12.50",
- * "12.50 USDC", "$1,000"); numbers are dollars rounded to the nearest
- * micro-dollar; a bigint is already micro-dollars (1_000_000n is $1).
+ * "12.50 USDC", "$1,000"); numbers are dollars, read as the shortest decimal
+ * that gives the number back and rounded half up to the micro-dollar; a bigint
+ * is already micro-dollars (1_000_000n is $1).
  */
 export function toMicros(value, label = 'amount') {
+  let micros;
   if (typeof value === 'bigint') {
-    if (value < 0n || value > MAX_AMOUNT) throw new BudgetError(`${label} must be a nonnegative bigint of micro-dollars that fits in 64 bits`);
-    return value;
-  }
-  if (typeof value === 'number') {
+    if (value < 0n) throw new BudgetError(`${label} must be a nonnegative bigint of micro-dollars`);
+    micros = value;
+  } else if (typeof value === 'number') {
     if (!Number.isFinite(value) || value < 0) throw new BudgetError(`${label} must be a nonnegative number of dollars`);
-    const micros = Math.round(value * 1e6);
-    if (!Number.isSafeInteger(micros)) throw new BudgetError(`${label} is too large for a number; pass it as a string, like "1000000000"`);
-    return BigInt(micros);
-  }
-  if (typeof value === 'string') {
-    const match = DOLLARS.exec(value.trim());
+    micros = numberMicros(value);
+  } else if (typeof value === 'string') {
+    const match = DOLLARS.exec(trimAscii(value));
     if (match === null) throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"; got ${JSON.stringify(value)}`);
     const fraction = match[2] ?? '';
     if (/[^0]/.test(fraction.slice(6))) throw new BudgetError(`${label} is finer than a millionth of a dollar: ${JSON.stringify(value)}`);
-    const micros = BigInt(match[1].replaceAll(',', '')) * MICROS + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
-    if (micros > MAX_AMOUNT) throw new BudgetError(`${label} is too large`);
-    return micros;
+    micros = BigInt(match[1].replaceAll(',', '')) * MICROS + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
+  } else {
+    throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"`);
   }
-  throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"`);
+  if (micros > MAX_AMOUNT) throw new BudgetError(tooLarge(label));
+  return micros;
 }
+
+const tooLarge = label => `${label} is more than ${formatUsd(MAX_AMOUNT)}, the most a budget can hold`;
 
 /** "$1,234.50" for 1_234_500_000n micro-dollars; sub-cent amounts keep their digits. */
 export function formatUsd(micros) {
@@ -69,15 +105,29 @@ export function toWindowMs(value, label = 'window') {
   if (typeof value === 'bigint') ms = value;
   else if (typeof value === 'number' && Number.isSafeInteger(value)) ms = BigInt(value);
   else if (typeof value === 'string') {
-    const text = value.trim().toLowerCase();
+    const text = trimAscii(value).toLowerCase();
     const match = DURATION.exec(text);
     if (match) ms = BigInt(match[1]) * DURATION_MS[match[2]];
     else if (text in DURATION_WORDS) ms = DURATION_WORDS[text];
   }
-  if (ms === undefined || ms <= 0n || ms > MAX_AMOUNT) {
+  if (ms === undefined || ms <= 0n || ms > MAX_INTEGER) {
     throw new BudgetError(`${label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds`);
   }
   return ms;
+}
+
+/** How long ago, roughly: "3d 4h", "4h 12m", "12m 5s" or "5s". */
+export function formatAge(ms) {
+  const units = [['d', 86_400_000n], ['h', 3_600_000n], ['m', 60_000n], ['s', 1_000n]];
+  const parts = [];
+  let left = ms < 0n ? 0n : ms;
+  for (const [suffix, size] of units) {
+    if (parts.length === 0 && left < size && suffix !== 's') continue;
+    parts.push(`${left / size}${suffix}`);
+    left %= size;
+    if (parts.length === 2) break;
+  }
+  return parts.join(' ');
 }
 
 /** "24h" for a day (it rolls), then "7d", "30m", "90s" or "1500ms". */
@@ -108,10 +158,10 @@ const checksumOk = address => {
 };
 
 export function normalizeWallet(wallet) {
-  if (typeof wallet !== 'string' || wallet.trim().length === 0) {
+  if (typeof wallet !== 'string' || trimAscii(wallet).length === 0) {
     throw new BudgetError('wallet is required: the address or account the money leaves from');
   }
-  let name = wallet.trim();
+  let name = trimAscii(wallet);
   let caip = CAIP10_EVM.exec(name);
   if (caip) name = caip[1];
   else {
@@ -131,6 +181,20 @@ export function normalizeWallet(wallet) {
     throw new BudgetError('wallet must be an address or a plain name (letters, digits and _ . : @ / -, at most 128)');
   }
   return name;
+}
+
+/**
+ * The canonical name for a budget a 0.2.x file holds under some other spelling:
+ * normalizeWallet's rule without its checks. A checksummed, uppercase or CAIP-10
+ * EVM address becomes the lowercase address, even with a bad checksum, and a
+ * Solana CAIP-10 becomes its address, so every spelling merges into one budget.
+ */
+export function storedWalletName(name) {
+  const solana = CAIP10_SOLANA.exec(name);
+  if (solana) return solana[1];
+  const evm = CAIP10_EVM.exec(name);
+  const address = evm ? evm[1] : name;
+  return EVM_ADDRESS.test(address) ? address.toLowerCase() : name;
 }
 
 /** 0xd797…ca02 for an EVM address; anything else as it is. */
@@ -153,8 +217,8 @@ export const expandHome = (path, home = homedir()) => (path === '~' || path.star
 
 const positiveCount = (value, label) => {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
-  if (typeof value === 'bigint' && value >= 0n && value <= MAX_AMOUNT) return value;
-  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return BigInt(value.trim());
+  if (typeof value === 'bigint' && value >= 0n && value <= MAX_INTEGER) return value;
+  if (typeof value === 'string' && /^[0-9]+$/.test(trimAscii(value)) && BigInt(trimAscii(value)) <= MAX_INTEGER) return BigInt(trimAscii(value));
   throw new BudgetError(`${label} must be a whole number of payments`);
 };
 

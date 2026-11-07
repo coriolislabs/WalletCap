@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""walletcap: one spend budget per wallet, across every process, replica, key and rail.
+"""walletcap: one spend budget per wallet, across every process, key and rail on one host.
 
     from walletcap import open_budget
 
@@ -12,6 +12,7 @@
 from walletcap.budget import (
     Budget,
     Check,
+    Hold,
     Paying,
     Payment,
     Reservation,
@@ -27,6 +28,7 @@ from walletcap.errors import (
     OverBudget,
     OverPerPayment,
     OverUses,
+    PaymentNotRecorded,
 )
 from walletcap.ledger import (
     MAX_AMOUNT,
@@ -43,7 +45,7 @@ from walletcap.money import (
     to_micros,
 )
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
 
 __all__ = [
     "MAX_AMOUNT",
@@ -57,12 +59,14 @@ __all__ = [
     "BudgetStatus",
     "BudgetWarning",
     "Check",
+    "Hold",
     "Ledger",
     "NotSent",
     "OverBudget",
     "OverPerPayment",
     "OverUses",
     "Payment",
+    "PaymentNotRecorded",
     "Paying",
     "Reservation",
     "Spend",

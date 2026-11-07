@@ -108,6 +108,13 @@ test("the run fails if walletcap's guard or CDP on walletcap's cdpStore lets any
   assert.equal(held(leak('walletcap', { usdc: 200n * USD, over: 50n * USD })), false);
   // CDP's own controls are what's measured: their overage is the finding, not a failure.
   assert.equal(held(leak('cdp', { usdc: 1_500n * USD, over: 1_350n * USD })), true);
+  // With AgentKit, walletcap may sign the 1¢ offer the agent approved, or nothing: another offer
+  // within its 2¢ limit, to the merchant even, is not the one approved.
+  const agentkit = received => ({ ...run, agentkit: { walletcap: { received } } });
+  assert.equal(held(agentkit([])), true);
+  assert.equal(held(agentkit([{ network: 'eip155:84532', amount: '10000', toStranger: false, approved: true }])), true);
+  assert.equal(held(agentkit([{ network: 'eip155:8453', amount: '1000000', toStranger: true, approved: false }])), false);
+  assert.equal(held(agentkit([{ network: 'eip155:8453', amount: '20000', toStranger: false, approved: false }])), false);
 });
 
 const agentkitInstalled = (() => {
@@ -119,12 +126,13 @@ const agentkitInstalled = (() => {
   }
 })();
 
-test("AgentKit signs the merchant's first-listed $1.00 on mainnet and reports the 1¢ it was given; walletcap refuses", { skip: !agentkitInstalled && '@coinbase/agentkit is not installed alongside' }, async () => {
+test("AgentKit signs the merchant's first-listed $1.00 on mainnet and reports the 1¢ it was given; walletcap signs the 1¢", { skip: !agentkitInstalled && '@coinbase/agentkit is not installed alongside' }, async () => {
   const row = await agentkitRow();
   assert.deepEqual(row.agentkit.received.map(p => [p.network, p.amount, p.toStranger]), [['eip155:8453', '1000000', true]]);
   assert.deepEqual([row.agentkit.reported.network, row.agentkit.reported.amount], ['eip155:84532', '10000']);
-  assert.deepEqual(row.walletcap.received, []);
-  assert.equal(row.walletcap.refused, true);
+  // walletcap passes over the $1.00, valid 4 days; the offer left is the 1¢ the agent approved.
+  assert.deepEqual(row.walletcap.received.map(p => [p.network, p.amount, p.toStranger, p.approved]), [['eip155:84532', '10000', false, true]]);
+  assert.equal(row.walletcap.refused, false);
 });
 
 test('Spend Permissions does hold one permission within one period: the fourth $50 is refused', async () => {

@@ -3,7 +3,8 @@
 // client's public payment hooks. It works under @x402/fetch, @x402/axios and
 // Coinbase's CDP spend controls alike: whatever else is configured, every
 // payment the client creates is counted in the shared budget before it is sent.
-import { BudgetError, BudgetRefused } from './errors.mjs';
+import { now } from './_clock.mjs';
+import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.mjs';
 
 const GUARDED = Symbol.for('walletcap/x402-guard');
 // Set by @coinbase/cdp-sdk/x402's applySpendControls. The CDP store and this
@@ -18,9 +19,49 @@ const SLOT = Symbol('walletcap/x402-payment');
 const FINGERPRINTS_KEPT = 10_000;
 
 /**
+ * The longest validity, in seconds, the guard lets a payee ask for: an hour, the
+ * ceiling Coinbase's CDP spend controls enforce too (MAX_PAYMENT_TIMEOUT_SECONDS
+ * in @coinbase/cdp-sdk). x402's clients sign an authorization that can be
+ * redeemed until maxTimeoutSeconds after signing, so a payee asking for days
+ * could hold authorizations and redeem them all later. Terms asking for more are
+ * passed over for shorter ones on offer, or refused before anything is signed.
+ */
+export const MAX_PAYMENT_TIMEOUT_SECONDS = 3600;
+
+/** A refusal for terms whose validity walletcap can't bound to an hour or less, or null. */
+export const timeoutRefusal = requirements => {
+  const seconds = requirements?.maxTimeoutSeconds;
+  if (Number.isSafeInteger(seconds) && seconds > 0 && seconds <= MAX_PAYMENT_TIMEOUT_SECONDS) return null;
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) {
+    return new BudgetRefused('timeout', `the payee's terms give no whole number of seconds for how long the payment can be redeemed `
+      + `(maxTimeoutSeconds: ${JSON.stringify(seconds) ?? 'none'}), so walletcap can't tell when it stops counting`);
+  }
+  return new BudgetRefused('timeout', `the payee asks for an authorization it could redeem for ${seconds} seconds; `
+    + `walletcap signs for at most ${MAX_PAYMENT_TIMEOUT_SECONDS} seconds (an hour), as Coinbase's CDP spend controls do`);
+};
+
+// A Solana payment is a signed transaction, which the chain takes until its blockhash is 150
+// blocks old, about a minute, however short maxTimeoutSeconds is.
+const SOLANA_TRANSACTION_SECONDS = 120;
+
+/**
+ * How long after it is signed a payment on these terms can settle, in seconds, or null if the
+ * terms fail timeoutRefusal. Every scheme x402's clients sign expires maxTimeoutSeconds after
+ * signing: EIP-3009's validBefore, the Permit2 deadline, the escrow's pre-approval expiry, a
+ * batch deposit's validBefore. A Solana transaction lasts at least as long as its blockhash.
+ */
+export const settlesWithinSeconds = requirements => {
+  if (timeoutRefusal(requirements) !== null) return null;
+  const { network, maxTimeoutSeconds: seconds } = requirements;
+  const caip2 = Object.hasOwn(V1_NETWORKS, network) ? V1_NETWORKS[network] : String(network);
+  return caip2.startsWith('solana:') ? Math.max(seconds, SOLANA_TRANSACTION_SECONDS) : seconds;
+};
+
+/**
  * USD stablecoins the budget counts at face value, by CAIP-2 network. The EVM
  * entries are from x402 2.28.0's own DEFAULT_ASSETS, plus Circle's native USDC
- * on Optimism and Solana. Add others with guard(client, { assets }).
+ * on Optimism and Solana. Add other USD-pegged stablecoins with
+ * guard(client, { assets }); their decimals can't be changed.
  */
 export const USD_ASSETS = Object.freeze([
   { network: 'eip155:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
@@ -51,15 +92,27 @@ export const assetKey = (network, asset) => {
   return `${caip2} ${id}`;
 };
 
+const BUILT_IN = new Map(USD_ASSETS.map(({ network, asset, decimals }) => [assetKey(network, asset), decimals]));
+
+/**
+ * The assets a guard prices: the built-in table plus `extra`. Each extra entry
+ * must be a USD-pegged stablecoin, counted at $1 a token, with integer decimals
+ * from 0 to 18. It can add an asset, but can't change a built-in one's decimals.
+ */
 export function assetTable(extra) {
   if (!Array.isArray(extra)) throw new BudgetError('assets must be a list of { network, asset, decimals }');
-  const table = new Map();
-  for (const entry of [...USD_ASSETS, ...extra]) {
+  const table = new Map(BUILT_IN);
+  for (const entry of extra) {
     const { network, asset, decimals } = entry ?? {};
-    if (typeof network !== 'string' || typeof asset !== 'string' || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
-      throw new BudgetError('each asset is { network, asset, decimals }: a USD stablecoin the budget counts at face value');
+    if (typeof network !== 'string' || typeof asset !== 'string' || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+      throw new BudgetError('each asset is { network, asset, decimals }: a USD-pegged stablecoin, counted at $1 a token, with decimals from 0 to 18');
     }
-    table.set(assetKey(network, asset), decimals);
+    const key = assetKey(network, asset);
+    const builtIn = BUILT_IN.get(key);
+    if (builtIn !== undefined && builtIn !== decimals) {
+      throw new BudgetError(`${asset} on ${network} is already priced with ${builtIn} decimals; an asset override can't change them`);
+    }
+    table.set(key, decimals);
   }
   return table;
 }
@@ -80,16 +133,26 @@ export const toMicros = (atomic, decimals) => {
   return (atomic + divisor - 1n) / divisor;
 };
 
-// An EIP-3009 authorization (x402's exact scheme on EVM) cannot settle once validBefore has passed.
-const settlesBy = payload => {
-  const validBefore = payload?.payload?.authorization?.validBefore;
-  if (!['string', 'number', 'bigint'].includes(typeof validBefore)) return null;
+// A Unix time in seconds as milliseconds, or null if it isn't a positive whole number.
+const unixMs = value => {
+  if (!['string', 'number', 'bigint'].includes(typeof value)) return null;
   try {
-    const seconds = BigInt(validBefore);
+    const seconds = BigInt(value);
     return seconds > 0n ? seconds * 1000n : null;
   } catch {
     return null;
   }
+};
+
+// When a payment just signed can no longer settle: the expiry it carries, an EIP-3009
+// authorization's validBefore or a Permit2 deadline (x402's exact and upto schemes, and the
+// escrow's), or else the time it was signed plus its terms' validity (settlesWithinSeconds).
+const settlesBy = (payload, requirements) => {
+  const signed = payload?.payload;
+  const expiries = [unixMs(signed?.authorization?.validBefore), unixMs(signed?.permit2Authorization?.deadline)].filter(ms => ms !== null);
+  if (expiries.length > 0) return expiries.reduce((latest, ms) => (ms > latest ? ms : latest));
+  const within = settlesWithinSeconds(payload?.accepted ?? requirements);
+  return within === null ? null : BigInt(now()) + BigInt(within) * 1000n;
 };
 
 // Transports may clone a payload before handing it back (a JSON round trip, a spread);
@@ -147,11 +210,16 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     if (print !== null) byFingerprint.delete(print);
   };
 
-  // Pay only in assets the budget can count, when the server offers a choice.
+  // Pay only in assets the budget can count, on terms valid an hour or less, when the server
+  // offers a choice: a payee that also offers longer terms is paid on the shorter ones.
   if (typeof client.registerPolicy === 'function') {
     client.registerPolicy((_version, requirements) => {
-      const kept = requirements.filter(priced);
-      if (kept.length === 0 && requirements.length > 0) price(requirements[0]); // throws the explanation
+      const kept = requirements.filter(requirement => priced(requirement) && timeoutRefusal(requirement) === null);
+      if (kept.length === 0 && requirements.length > 0) {
+        const countable = requirements.find(priced);
+        if (countable === undefined) price(requirements[0]); // throws the explanation
+        throw timeoutRefusal(countable);
+      }
       return kept;
     });
   }
@@ -161,9 +229,13 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     const amount = price(context.selectedRequirements);
     context[SLOT] = { amount, reservation: null, payload: null };
     if (amount === 0n) return undefined;
-    // An early refusal, before anything is signed. The reservation that binds comes after.
+    // An early refusal, before anything is signed. The reservation that binds comes after. The
+    // agent is told why, not which holds its owner could release: that is for the owner's CLI.
     const check = budget.check(amount);
-    if (!check.ok) throw new BudgetRefused(check.reason, check.message);
+    if (!check.ok) throw new BudgetRefused(check.reason, check.brief);
+    // The policy above has already set aside longer terms; this holds for a client without one.
+    const tooLong = timeoutRefusal(context.selectedRequirements);
+    if (tooLong !== null) throw tooLong;
     return undefined;
   });
 
@@ -175,13 +247,17 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     // If another process spent the budget since the check, this throws; the
     // client then discards the signed payload and nothing is sent.
     const url = context.paymentRequired?.resource?.url;
-    slot.reservation = budget.reserve(slot.amount, {
-      rail: 'x402',
-      to: requirements.payTo,
-      note: typeof url === 'string' ? url.slice(0, 1024) : undefined,
-      details: { network: requirements.network, asset: requirements.asset, scheme: requirements.scheme },
-      settlesBy: settlesBy(context.paymentPayload),
-    });
+    try {
+      slot.reservation = budget.reserve(slot.amount, {
+        rail: 'x402',
+        to: requirements.payTo,
+        note: typeof url === 'string' ? url.slice(0, 1024) : undefined,
+        details: { network: requirements.network, asset: requirements.asset, scheme: requirements.scheme },
+        settlesBy: settlesBy(context.paymentPayload, requirements),
+      });
+    } catch (error) {
+      throw forAgent(error);
+    }
     slot.payload = context.paymentPayload;
     remember(context.paymentPayload, slot.reservation);
   });
@@ -202,13 +278,23 @@ export function guardX402Client(client, budget, { assets = [] } = {}) {
     forget(context.paymentPayload);
     if (!reservation.open) return undefined;
     if (context.settleResponse?.success === true) {
-      reservation.commit({ tx: context.settleResponse.transaction });
+      try {
+        reservation.commit({ tx: context.settleResponse.transaction });
+      } catch (error) {
+        // Settled but not recorded: the reservation stays open and keeps counting.
+        throw new PaymentNotRecorded(reservation.id, { cause: error });
+      }
     } else {
       // No settlement confirmed. The payee still holds the signed authorization
       // and could settle it until it expires, so the payment keeps counting until
       // then, plus one window, as if it settled at the last possible moment.
       const refused = context.settleResponse !== undefined || context.paymentRequired !== undefined;
-      reservation.annotate({ outcome: refused ? 'refused' : 'unknown' });
+      try {
+        reservation.annotate({ outcome: refused ? 'refused' : 'unknown' });
+      } catch (error) {
+        // Not recorded either way: the reservation stays open and keeps counting.
+        throw new PaymentNotRecorded(reservation.id, { cause: error, settled: false });
+      }
     }
     return undefined;
   });

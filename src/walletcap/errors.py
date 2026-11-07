@@ -44,6 +44,23 @@ class BudgetWarning(UserWarning):
     """The budget file kept a limit tighter than the code asked for."""
 
 
+class PaymentNotRecorded(Exception):
+    """The payment went through, but the budget could not record it as settled.
+
+    It still counts as in flight. It is not a ``BudgetError``, so code that
+    retries on a ``BudgetError`` does not pay twice. ``reservation_id`` names
+    the payment, and ``cause`` (also ``__cause__``) is why it was not recorded.
+    """
+
+    def __init__(self, reservation_id: str, cause: BaseException | None = None) -> None:
+        super().__init__(
+            "the payment went through but could not be recorded as settled; "
+            f"it still counts as in flight ({reservation_id})"
+        )
+        self.reservation_id = reservation_id
+        self.cause = cause
+
+
 class NotSent(Exception):
     """Raise inside ``with budget.pay(...)`` to say the payment never left the wallet.
 

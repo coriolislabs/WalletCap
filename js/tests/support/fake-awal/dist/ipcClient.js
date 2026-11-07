@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Stand-in for the awal CLI's IPC client, for the tests only. It is NOT
 // Coinbase's wallet: it never signs or sends anything. It answers the three
-// channels walletcap uses, logs each one to FAKE_AWAL_LOG, and settles every
-// x402 payment it is asked about (FAKE_AWAL_MODE=settle).
+// channels walletcap uses, logs each one (with the payment requirements it is
+// handed) to FAKE_AWAL_LOG, and settles every x402 payment it is asked about
+// (FAKE_AWAL_MODE=settle).
 import { appendFileSync } from 'node:fs';
 
 const TX = `0x${'cd'.repeat(32)}`;
@@ -11,7 +12,7 @@ const b64 = value => Buffer.from(JSON.stringify(value)).toString('base64');
 
 export async function sendIpcRequest(channel, data) {
   if (process.env.FAKE_AWAL_LOG !== undefined) {
-    appendFileSync(process.env.FAKE_AWAL_LOG, `${JSON.stringify({ channel })}\n`);
+    appendFileSync(process.env.FAKE_AWAL_LOG, `${JSON.stringify({ channel, paymentRequirements: data?.paymentRequirements })}\n`);
   }
   if (channel === 'get-wallet-address') return { address: WALLET };
   if (channel === 'send-transaction') return { transactionHash: TX };

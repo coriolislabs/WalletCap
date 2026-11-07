@@ -1,8 +1,8 @@
 {
   "name": "walletcap",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "mcpName": "io.github.coriolislabs/walletcap",
-  "description": "Spend limits for AI agent wallets: a per-payment cap and rolling 24-hour USDC budget that holds across restarts, replicas and payment rails. For x402, Coinbase CDP spend controls, AgentKit, the Agentic Wallet and its MCP server, and Spend Permissions.",
+  "description": "Spend limits for AI agent wallets: a per-payment cap and rolling 24-hour USDC budget that holds across restarts, replicas on one host and payment rails. For x402, Coinbase CDP spend controls, AgentKit, the Agentic Wallet and its MCP server, and Spend Permissions.",
   "license": "Apache-2.0",
   "author": "Coriolis Labs Inc.",
   "type": "module",
@@ -38,6 +38,7 @@
     "walletcap": "cli.mjs"
   },
   "files": [
+    "_clock.mjs",
     "_keccak.mjs",
     "agentic.mjs",
     "cdp.mjs",

@@ -1,16 +1,40 @@
 // SPDX-License-Identifier: Apache-2.0
-// The budget file: one SQLite database that every process, replica and rail
-// opens. A payment reserves its amount inside one BEGIN IMMEDIATE transaction,
-// so two processes racing for the last of a budget cannot both win, and a
-// restart reads the same count. The Python ledger in this package uses the same
-// tables and the same counting rule, so both languages spend from one budget.
+// The budget file: one SQLite database that every process on one host opens,
+// for every rail. A payment reserves its amount inside one BEGIN IMMEDIATE
+// transaction, so two processes racing for the last of a budget cannot both
+// win, and a restart reads the same count. The file must be on that host's
+// local disk: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop
+// bind mounts. The Python ledger in this package uses the same tables and the
+// same counting rule, so both languages spend from one budget.
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { now as clockNow } from './_clock.mjs';
 import { BudgetError, BudgetRefused } from './errors.mjs';
-import { DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, shortWallet } from './money.mjs';
+import {
+  DOLLAR_UNITS, formatAmount, formatWindow, MAX_AMOUNT, MAX_INTEGER, normalizeWallet, shortWallet, storedWalletName,
+} from './money.mjs';
 
-export const SCHEMA_VERSION = '1';
+/**
+ * The file's format. Schema 2 is 0.2.x's schema 1 with every budget under its
+ * canonical name and settled payments that keep their reservation's expiry;
+ * 0.3 upgrades a schema 1 file when it opens it, and 0.2.x refuses a schema 2
+ * file rather than misread it.
+ */
+export const SCHEMA_VERSION = '2';
 export const REFERENCE_LIMIT = 4096;
+
+/**
+ * Internal: the key of Reservation's method that gives an open payment, once, the
+ * last moment it could still settle. The package does not export it.
+ */
+export const SETTLES_BY = Symbol('walletcap/settles-by');
+
+/**
+ * How old a hold with no settle-by time must be before a bulk release gives it back: an hour,
+ * the longest an x402 authorization walletcap lets be signed can be redeemed
+ * (MAX_PAYMENT_TIMEOUT_SECONDS), and a minute.
+ */
+export const UNBOUNDED_HOLD_MS = 3_660_000n;
 
 const ID = /^[A-Za-z0-9_.:@/-]{1,128}$/;
 const SCHEMA = `
@@ -36,11 +60,14 @@ CREATE TABLE IF NOT EXISTS spend (
 );
 CREATE INDEX IF NOT EXISTS spend_by_instrument ON spend (instrument, at_ms);
 `;
-// The counting rule, the same in Python: a settled payment counts while its
-// settlement is inside the budget's rolling window, and a reservation counts
-// until it is committed or released, or its expiry passes, whatever the window.
+// The counting rule, the same in Python. A settled payment counts while its
+// settlement is inside the budget's rolling window, and also until its expiry,
+// if the reservation it settled had one: a commit never shortens a hold, so a
+// payee's word that a payment settled can't free the budget while its signed
+// authorization can still be redeemed. A reservation counts until it is
+// committed or released, or its expiry passes, whatever the window.
 const COUNTED = 'FROM spend JOIN budgets ON budgets.instrument = spend.instrument '
-  + "WHERE spend.instrument = ? AND ((spend.status = 'committed' AND spend.at_ms + budgets.window_ms >= ?) "
+  + "WHERE spend.instrument = ? AND ((spend.status = 'committed' AND (spend.at_ms + budgets.window_ms >= ? OR spend.expires_at_ms > ?)) "
   + "OR (spend.status = 'reserved' AND (spend.expires_at_ms IS NULL OR spend.expires_at_ms > ?)))";
 
 // node:sqlite prints an ExperimentalWarning when it loads (Node 22 and 24).
@@ -70,15 +97,52 @@ export const identifier = (value, label) => {
   return value;
 };
 
-/** An integer in the budget's own unit that fits in 64 bits. */
-export const units = (value, label, { allowZero = false } = {}) => {
+/**
+ * The name a budget is kept under, whoever opens it: an EVM address, bare or
+ * CAIP-10, is lowercased after its EIP-55 check, and a Solana CAIP-10 is reduced
+ * to its address, as openBudget() does. A checksummed address can't open a
+ * second budget beside the lowercase one.
+ */
+export const instrumentName = value => normalizeWallet(identifier(value, 'instrument'));
+
+/** Refuse an option `what` doesn't take, naming the one that was probably meant. */
+export const checkKeys = (source, known, what) => {
+  if (source === null || typeof source !== 'object') throw new BudgetError(`${what} takes an options object`);
+  for (const key of Object.keys(source)) {
+    if (known.has(key)) continue;
+    const plain = key.toLowerCase().replaceAll(/[-_]/g, '');
+    const match = [...known].find(candidate => candidate.toLowerCase() === plain);
+    throw new BudgetError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
+  }
+};
+
+// A bigint, a safe integer, or a string of ASCII digits: nothing else, so '0x10', ' 7 ' and true are refused.
+const wholeNumber = (value, label, { allowZero, max, most }) => {
   let parsed;
-  try { parsed = BigInt(value); } catch { throw new BudgetError(`${label} must be an integer`); }
-  if (typeof value === 'number' && !Number.isSafeInteger(value)) throw new BudgetError(`${label} must be an exact integer`);
-  if (parsed > MAX_AMOUNT || parsed < (allowZero ? 0n : 1n)) {
-    throw new BudgetError(`${label} must be a ${allowZero ? 'nonnegative' : 'positive'} integer that fits in 64 bits`);
+  if (typeof value === 'bigint') parsed = value;
+  else if (typeof value === 'number' && Number.isSafeInteger(value)) parsed = BigInt(value);
+  else if (typeof value === 'string' && /^[0-9]+$/.test(value)) parsed = BigInt(value);
+  else throw new BudgetError(`${label} must be an integer`);
+  if (parsed > max || parsed < (allowZero ? 0n : 1n)) {
+    throw new BudgetError(`${label} must be a ${allowZero ? 'nonnegative' : 'positive'} integer ${most}`);
   }
   return parsed;
+};
+
+/** An amount in the budget's own unit, at most MAX_AMOUNT, so no sum of them overflows 64 bits. */
+export const units = (value, label, { allowZero = false } = {}) => wholeNumber(value, label, { allowZero, max: MAX_AMOUNT, most: `of at most ${MAX_AMOUNT}` });
+
+/** A time in milliseconds, or a count, that fits in 64 bits. */
+export const integer = (value, label, { allowZero = false } = {}) => wholeNumber(value, label, { allowZero, max: MAX_INTEGER, most: 'that fits in 64 bits' });
+
+// Counted as a payment settled at `settlesBy` would be: through settlesBy + window. A payment is
+// made after it is reserved, so a settle-by time that isn't after now is a mistake, and refused.
+const expiry = (settlesBy, now, windowMs) => {
+  if (settlesBy <= now) {
+    const iso = ms => new Date(Number(ms)).toISOString();
+    throw new BudgetError(`settlesBy ${iso(settlesBy)} is not after now (${iso(now)}): a payment can't settle before it is made`);
+  }
+  return settlesBy + windowMs >= MAX_INTEGER ? MAX_INTEGER : settlesBy + windowMs + 1n;
 };
 
 const referenceText = reference => {
@@ -91,43 +155,81 @@ const referenceText = reference => {
 
 const unreadable = (path, error) => new BudgetError(`the budget file ${path} cannot be used: ${error.message}`, { cause: error });
 
-/** Why `row`'s budget refuses `spend` on top of what already counts, or null. */
-export function refusal(row, { total, uses }, spend) {
+// Open payments named in a refusal, so its owner can see which holds take the room: the oldest few.
+const SHOWN_HOLDS = 3;
+const heldNote = (heldUses, openIds) => {
+  const ids = openIds();
+  const more = heldUses > BigInt(ids.length) ? ` and ${heldUses - BigInt(ids.length)} more` : '';
+  return `${ids.join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can release it`;
+};
+
+/**
+ * Why `row`'s budget refuses `spend` on top of what already counts, or null.
+ * `heldTotal` and `heldUses` are the part of the count that is open payments,
+ * and `openIds()` gives the oldest of their ids, so the refusal can name them.
+ * `frozenNote()` says why a frozen budget was frozen, if the ledger knows.
+ */
+export function refusal(row, { total, uses, heldTotal = 0n, heldUses = 0n }, spend, openIds = () => [], frozenNote = () => null) {
   const name = shortWallet(row.instrument);
   const money = value => formatAmount(value, row.unit);
   const window = formatWindow(row.window_ms);
+  const plural = count => (count === 1n ? '' : 's');
   if (row.revoked_at_ms !== null) {
-    return new BudgetRefused('revoked', `${name}'s budget is frozen: nothing can be paid until its owner unfreezes it`);
+    const note = frozenNote();
+    return new BudgetRefused('revoked', `${name}'s budget is frozen: nothing can be paid until its owner unfreezes it${note === null ? '' : `. ${note}`}`);
   }
   if (row.per_payment !== null && spend > row.per_payment) {
     return new BudgetRefused('per_payment', `${money(spend)} is over ${name}'s ${money(row.per_payment)} limit per payment`);
   }
+  // The open payments' ids and what their owner can do go in the message, not in `brief`.
   if (total + spend > row.cap) {
     const left = row.cap > total ? row.cap - total : 0n;
-    return new BudgetRefused('budget', `${money(spend)} would bring ${name} to ${money(total + spend)} in the last ${window}, over its ${money(row.cap)} limit (${money(left)} left)`);
+    const over = `${money(spend)} would bring ${name} to ${money(total + spend)} in the last ${window}, over its ${money(row.cap)} limit (${money(left)} left)`;
+    if (heldUses === 0n) return new BudgetRefused('budget', over);
+    const brief = `${over}; ${money(heldTotal)} of it is ${heldUses} open payment${plural(heldUses)}`;
+    return new BudgetRefused('budget', `${brief} (${heldNote(heldUses, openIds)})`, { brief });
   }
   if (row.max_uses !== null && uses + 1n > row.max_uses) {
-    return new BudgetRefused('uses', `${name} already made ${uses} payment${uses === 1n ? '' : 's'} in the last ${window}, the most its budget allows`);
+    if (heldUses === 0n) {
+      return new BudgetRefused('uses', `${name} already made ${uses} payment${plural(uses)} in the last ${window}, the most its budget allows`);
+    }
+    const brief = `${name} has ${uses} payment${plural(uses)} counting in the last ${window}, the most its budget allows, `
+      + `and ${heldUses} of them ${heldUses === 1n ? 'is' : 'are'} still open`;
+    return new BudgetRefused('uses', `${brief} (${heldNote(heldUses, openIds)})`, { brief });
   }
   return null;
 }
 
 const unitsMatch = (stored, wanted) => (DOLLAR_UNITS.has(wanted) ? DOLLAR_UNITS.has(stored) : stored === wanted);
 
+// "$100.00 per 24h, at most $50.00 a payment" in the budget's own unit.
+const limitsText = ({ unit, cap, window_ms: window, per_payment: perPayment, max_uses: maxUses }) => [
+  `${formatAmount(cap, unit)} per ${formatWindow(window)}`,
+  ...(perPayment === null ? [] : [`at most ${formatAmount(perPayment, unit)} a payment`]),
+  ...(maxUses === null ? [] : [`${maxUses} payments per ${formatWindow(window)}`]),
+].join(', ');
+
+// What the 0.3.0 upgrade did to a wallet's budget, kept in budget_meta as JSON so either language
+// can say it: `merged <name>` lists the 0.2.x names merged into it; `unmerged <name>` the budgets
+// in another unit it couldn't merge, which froze the wallet.
+const mergedKey = name => `merged ${name}`;
+const unmergedKey = name => `unmerged ${name}`;
+const mergedNote = names => `The 0.3.0 upgrade merged the budget${names.length === 1 ? '' : 's'} 0.2.x kept under ${names.join(', ')} `
+  + "into this one, with the tighter of each limit; its owner can change them with 'walletcap set'";
+const unmergedNote = ({ kept, aside }) => `The 0.3.0 upgrade froze it: 0.2.x also kept ${aside.map(({ name, unit }) => `a budget in ${unit} under ${name}`).join(' and ')} `
+  + `for this wallet, which can't be merged with this one in ${kept}, so ${aside.length === 1 ? 'that budget no longer counts' : 'those budgets no longer count'}`;
+
 export class Ledger {
   #db;
   #path;
-  #clock;
   #closed = false;
   #statements = new Map();
 
-  constructor(path, { clock = Date.now, busyTimeoutMs = 30_000 } = {}) {
+  constructor(path, { busyTimeoutMs = 30_000 } = {}) {
     if (typeof path !== 'string' || path.length === 0) throw new BudgetError('path is required');
-    if (typeof clock !== 'function') throw new BudgetError('clock must be a function');
     if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs <= 0) throw new BudgetError('busyTimeoutMs must be a positive integer');
     const { DatabaseSync } = loadSqlite();
     this.#path = path;
-    this.#clock = clock;
     try {
       this.#db = new DatabaseSync(path);
     } catch (error) {
@@ -140,7 +242,8 @@ export class Ledger {
       this.transaction(() => {
         this.statement("INSERT OR IGNORE INTO budget_meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
         const { value } = this.statement("SELECT value FROM budget_meta WHERE key = 'schema'").get();
-        if (value !== SCHEMA_VERSION) throw new BudgetError(`ledger schema ${value} is not ${SCHEMA_VERSION}`);
+        if (value === '1') this.#upgradeFromSchema1();
+        else if (value !== SCHEMA_VERSION) throw new BudgetError(`ledger schema ${value} is not ${SCHEMA_VERSION}`);
       });
     } catch (error) {
       this.#db.close();
@@ -150,7 +253,46 @@ export class Ledger {
 
   get path() { return this.#path; }
 
-  now() { return units(this.#clock(), 'clock', { allowZero: true }); }
+  // 0.2.x kept a budget under the name SharedBudgetStore or Python's Ledger was given, so a
+  // checksummed or CAIP-10 address could hold a budget beside the lowercase one. Each moves to its
+  // canonical name, merged with any budget already there: the tighter of every limit, and every
+  // payment, so nothing stops counting. A budget in another unit can't be merged: it stays under
+  // its 0.2.x name, and the wallet is frozen until its owner has looked. The Python ledger
+  // upgrades a file the same way.
+  #upgradeFromSchema1() {
+    const sameUnit = (a, b) => a === b || (DOLLAR_UNITS.has(a) && DOLLAR_UNITS.has(b));
+    const least = (a, b) => (a === null ? b : b === null || a < b ? a : b);
+    const note = (key, add) => {
+      const stored = this.#meta(key);
+      this.statement('INSERT OR REPLACE INTO budget_meta VALUES (?, ?)').run(key, JSON.stringify(add(stored === null ? null : JSON.parse(stored))));
+    };
+    for (const row of this.statement('SELECT * FROM budgets ORDER BY instrument').all()) {
+      const name = storedWalletName(row.instrument);
+      if (name === row.instrument) continue;
+      const kept = this.#row(name);
+      if (kept === null) {
+        this.statement('INSERT INTO budgets VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(name, row.unit, row.cap, row.window_ms, row.per_payment, row.max_uses, row.revoked_at_ms);
+      } else if (!sameUnit(kept.unit, row.unit)) {
+        this.statement('UPDATE budgets SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE instrument = ?').run(this.now(), name);
+        note(unmergedKey(name), stored => ({ kept: kept.unit, aside: [...(stored?.aside ?? []), { name: row.instrument, unit: row.unit }] }));
+        continue;
+      } else {
+        // A longer window with a smaller cap is tighter than either budget was.
+        this.statement('UPDATE budgets SET cap = ?, window_ms = ?, per_payment = ?, max_uses = ?, revoked_at_ms = ? WHERE instrument = ?').run(
+          least(kept.cap, row.cap), kept.window_ms > row.window_ms ? kept.window_ms : row.window_ms,
+          least(kept.per_payment, row.per_payment), least(kept.max_uses, row.max_uses), least(kept.revoked_at_ms, row.revoked_at_ms), name,
+        );
+        note(mergedKey(name), stored => [...(stored ?? []), row.instrument]);
+      }
+      this.statement('UPDATE spend SET instrument = ? WHERE instrument = ?').run(name, row.instrument);
+      this.statement('DELETE FROM budgets WHERE instrument = ?').run(row.instrument);
+    }
+    this.statement("UPDATE budget_meta SET value = ? WHERE key = 'schema'").run(SCHEMA_VERSION);
+  }
+
+  /** The ledger's own time: the system clock, in milliseconds. Callers can't set it. */
+  now() { return integer(clockNow(), 'clock', { allowZero: true }); }
 
   statement(sql) {
     let statement = this.#statements.get(sql);
@@ -188,6 +330,18 @@ export class Ledger {
     return this.statement('SELECT * FROM budgets WHERE instrument = ?').get(instrument) ?? null;
   }
 
+  #meta(key) {
+    return this.statement('SELECT value FROM budget_meta WHERE key = ?').get(key)?.value ?? null;
+  }
+
+  // Why the 0.3.0 upgrade froze the wallet's budget, or null.
+  #frozenNote(instrument) {
+    return () => {
+      const unmerged = this.#meta(unmergedKey(instrument));
+      return unmerged === null ? null : unmergedNote(JSON.parse(unmerged));
+    };
+  }
+
   #required(instrument) {
     const row = this.#row(instrument);
     if (row === null) throw new BudgetError(`${shortWallet(instrument)} has no budget in ${this.#path}`);
@@ -195,8 +349,16 @@ export class Ledger {
   }
 
   #counted(instrument, now) {
-    return this.statement(`SELECT COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses ${COUNTED}`)
-      .get(instrument, now, now);
+    return this.statement('SELECT COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses, '
+      + "COALESCE(SUM(CASE WHEN spend.status = 'reserved' THEN spend.amount END), 0) AS heldTotal, "
+      + `COUNT(CASE WHEN spend.status = 'reserved' THEN 1 END) AS heldUses ${COUNTED}`)
+      .get(instrument, now, now, now);
+  }
+
+  // The ids of the oldest open payments that count, for a refusal to name.
+  #openIds(instrument, now) {
+    return () => this.statement(`SELECT spend.spend_id ${COUNTED} AND spend.status = 'reserved' ORDER BY spend.at_ms, spend.rowid LIMIT ?`)
+      .all(instrument, now, now, now, SHOWN_HOLDS).map(row => row.spend_id);
   }
 
   #insert(instrument, unit, { cap, windowMs, perPayment = null, maxUses = null }) {
@@ -204,20 +366,33 @@ export class Ledger {
       .run(instrument, unit, cap, windowMs, perPayment, maxUses);
   }
 
-  budget(instrument) { return this.read(() => this.#row(instrument)); }
+  // Limits from ensure() and setLimits(), checked here too: every stored cap is bounded.
+  static #limits({ cap, windowMs, perPayment, maxUses }) {
+    const limits = {};
+    if (cap !== undefined) limits.cap = units(cap, 'cap', { allowZero: true });
+    if (windowMs !== undefined) limits.windowMs = integer(windowMs, 'windowMs');
+    if (perPayment !== undefined) limits.perPayment = perPayment === null ? null : units(perPayment, 'perPayment');
+    if (maxUses !== undefined) limits.maxUses = maxUses === null ? null : integer(maxUses, 'maxUses', { allowZero: true });
+    return limits;
+  }
+
+  budget(instrument) {
+    const name = instrumentName(instrument);
+    return this.read(() => this.#row(name));
+  }
 
   budgets() { return this.read(() => this.statement('SELECT * FROM budgets ORDER BY instrument').all()); }
 
   /** Record a budget once; declaring it again with other limits is refused. */
-  declare(instrument, { unit, cap, windowMs, perPayment = null, maxUses = null }) {
-    identifier(instrument, 'instrument');
+  declare(name, { unit, cap, windowMs, perPayment = null, maxUses = null }) {
+    const instrument = instrumentName(name);
     identifier(unit, 'unit');
     const budget = {
       unit,
       cap: units(cap, 'cap', { allowZero: true }),
-      window_ms: units(windowMs, 'windowMs'),
+      window_ms: integer(windowMs, 'windowMs'),
       per_payment: perPayment === null ? null : units(perPayment, 'perPayment'),
-      max_uses: maxUses === null ? null : units(maxUses, 'maxUses', { allowZero: true }),
+      max_uses: maxUses === null ? null : integer(maxUses, 'maxUses', { allowZero: true }),
     };
     return this.transaction(() => {
       const row = this.#row(instrument);
@@ -226,7 +401,10 @@ export class Ledger {
         return this.#row(instrument);
       }
       if (Object.keys(budget).some(key => row[key] !== budget[key])) {
-        throw new BudgetError('instrument budget is already declared with other limits');
+        const text = limits => limitsText(limits) + (row.unit === budget.unit ? '' : ` in ${limits.unit}`);
+        const merged = this.#meta(mergedKey(instrument));
+        throw new BudgetError(`${shortWallet(instrument)}'s budget is already declared with other limits: ${text(row)}, not ${text(budget)}`
+          + (merged === null ? '' : `. ${mergedNote(JSON.parse(merged))}`));
       }
       return row;
     });
@@ -237,8 +415,9 @@ export class Ledger {
    * a tighter limit is stored, a looser one is reported and left alone. A
    * restart can lower a limit; only setLimits() raises one.
    */
-  ensure(instrument, limits, { unit = 'usd', create = true } = {}) {
-    identifier(instrument, 'instrument');
+  ensure(name, asked, { unit = 'usd', create = true } = {}) {
+    const instrument = instrumentName(name);
+    const limits = Ledger.#limits(asked);
     return this.transaction(() => {
       const row = this.#row(instrument);
       if (row === null) {
@@ -278,8 +457,9 @@ export class Ledger {
   }
 
   /** Change limits in either direction. What was spent keeps counting: nothing resets. */
-  setLimits(instrument, limits, { unit = 'usd', create = true } = {}) {
-    identifier(instrument, 'instrument');
+  setLimits(name, asked, { unit = 'usd', create = true } = {}) {
+    const instrument = instrumentName(name);
+    const limits = Ledger.#limits(asked);
     return this.transaction(() => {
       const row = this.#row(instrument);
       if (row === null) {
@@ -304,27 +484,38 @@ export class Ledger {
         limits.maxUses === undefined ? row.max_uses : limits.maxUses,
         instrument,
       );
+      this.statement('DELETE FROM budget_meta WHERE key = ?').run(mergedKey(instrument)); // the owner's limits now
       return this.#row(instrument);
     });
   }
 
   /** What counts against the budget right now: total and number of payments. */
-  counted(instrument, now = this.now()) { return this.read(() => this.#counted(instrument, now)); }
+  counted(name) {
+    const instrument = instrumentName(name);
+    return this.read(() => this.#counted(instrument, this.now()));
+  }
 
-  countedRows(instrument, now = this.now()) {
-    return this.read(() => this.statement(
-      `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms ${COUNTED}`,
-    ).all(instrument, now, now));
+  /** The payments that count right now, and the ledger's time they were read at. */
+  countedRows(name) {
+    const instrument = instrumentName(name);
+    return this.read(() => {
+      const now = this.now();
+      const rows = this.statement(
+        `SELECT spend.spend_id, spend.status, spend.amount, spend.rail, spend.reference, spend.at_ms, spend.expires_at_ms ${COUNTED}`,
+      ).all(instrument, now, now, now);
+      return { now, rows };
+    });
   }
 
   /** Whether `amount` would be refused right now, without reserving it. */
-  check(instrument, amount) {
+  check(name, amount) {
+    const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
-    const now = this.now();
     return this.read(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       const counted = this.#counted(instrument, now);
-      const refused = refusal(row, counted, spend);
+      const refused = refusal(row, counted, spend, this.#openIds(instrument, now), this.#frozenNote(instrument));
       const left = row.cap - counted.total;
       return { refusal: refused, total: counted.total, uses: counted.uses, remaining: row.revoked_at_ms !== null || left < 0n ? 0n : left };
     });
@@ -333,58 +524,89 @@ export class Ledger {
   /**
    * Take `amount` from the budget, or throw the BudgetRefused that says why
    * not. A reservation counts until committed or released. With settlesByMs
-   * (the last moment the payment could still settle) it stops counting one
-   * window after that moment, as if it had settled then.
+   * (the last moment the payment could still settle, after now) it stops
+   * counting one window after that moment, as if it had settled then.
    */
-  reserve(instrument, amount, { rail = 'js', reference = null, settlesByMs = null } = {}) {
-    identifier(instrument, 'instrument');
+  reserve(name, amount, { rail = 'js', reference = null, settlesByMs = null } = {}) {
+    const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
     identifier(rail, 'rail');
     const text = referenceText(reference);
-    const settlesBy = settlesByMs === null ? null : units(settlesByMs, 'settlesByMs', { allowZero: true });
-    const now = this.now();
+    const settlesBy = settlesByMs === null ? null : integer(settlesByMs, 'settlesByMs', { allowZero: true });
     return this.transaction(() => {
+      // Read once the write lock is held: a wait for another process can't leave it stale.
+      const now = this.now();
       const row = this.#required(instrument);
-      const refused = refusal(row, this.#counted(instrument, now), spend);
+      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now), this.#frozenNote(instrument));
       if (refused !== null) throw refused;
       const spendId = `spend-${randomUUID().replaceAll('-', '')}`;
-      // Counted exactly as a payment settled at settlesBy would be: through settlesBy + window.
-      let expires = null;
-      if (settlesBy !== null) expires = settlesBy + row.window_ms >= MAX_AMOUNT ? MAX_AMOUNT : settlesBy + row.window_ms + 1n;
+      const expires = settlesBy === null ? null : expiry(settlesBy, now, row.window_ms);
       this.statement("INSERT INTO spend VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?)")
         .run(spendId, instrument, spend, rail, text, now, expires);
       return spendId;
     });
   }
 
-  /** Record a payment as settled at `atMs` after the same checks (Coinbase's SDK records at creation). */
-  record(instrument, amount, { rail, reference = null, atMs }) {
+  /**
+   * Record a payment as settled now, after the same checks. Coinbase's SDK
+   * records a payment when it creates it; the time is always the ledger's own.
+   * With settlesWithinMs, the payment can still settle up to that long after it
+   * is recorded, so it counts until one window past that moment too.
+   */
+  record(name, amount, { rail, reference = null, settlesWithinMs = null }) {
+    const instrument = instrumentName(name);
     const spend = units(amount, 'amount');
+    identifier(rail, 'rail');
     const text = referenceText(reference);
-    const at = units(atMs, 'at', { allowZero: true });
-    const now = this.now();
+    const within = settlesWithinMs === null ? null : integer(settlesWithinMs, 'settlesWithinMs');
     return this.transaction(() => {
+      const now = this.now();
       const row = this.#required(instrument);
-      const refused = refusal(row, this.#counted(instrument, now), spend);
+      const refused = refusal(row, this.#counted(instrument, now), spend, this.#openIds(instrument, now), this.#frozenNote(instrument));
       if (refused !== null) throw refused;
       const spendId = `${rail}-${randomUUID()}`;
-      this.statement("INSERT INTO spend VALUES (?, ?, ?, 'committed', ?, ?, ?, NULL)")
-        .run(spendId, instrument, spend, rail, text, at);
+      const expires = within === null ? null : expiry(now + within, now, row.window_ms);
+      this.statement("INSERT INTO spend VALUES (?, ?, ?, 'committed', ?, ?, ?, ?)")
+        .run(spendId, instrument, spend, rail, text, now, expires);
       return spendId;
     });
   }
 
-  /** The payment settled: it counts for one rolling window from now. */
+  /**
+   * The payment settled: it counts for one rolling window from now, and, if the
+   * reservation had a settle-by time, at least until one window past that time.
+   * A commit never shortens a hold: the word that a payment settled may come
+   * from the payee, who could still redeem the authorization later.
+   */
   commit(spendId, { reference } = {}) {
     identifier(spendId, 'spend_id');
     const text = referenceText(reference);
-    const now = this.now();
     this.transaction(() => {
+      const now = this.now();
       const row = this.statement('SELECT status FROM spend WHERE spend_id = ?').get(spendId);
       if (row === undefined) throw new BudgetError('unknown reservation');
       if (row.status === 'committed') throw new BudgetError('reservation is already committed');
-      this.statement("UPDATE spend SET status = 'committed', at_ms = MAX(at_ms, ?), expires_at_ms = NULL, "
+      this.statement("UPDATE spend SET status = 'committed', at_ms = MAX(at_ms, ?), "
         + 'reference = COALESCE(?, reference) WHERE spend_id = ?').run(now, text, spendId);
+    });
+  }
+
+  /**
+   * Give an open reservation that has no settle-by time the last moment its
+   * payment could settle: it then counts until one window after that moment,
+   * as reserve() with settlesByMs does. A reservation that already has one
+   * keeps it.
+   */
+  settlesBy(spendId, settlesByMs) {
+    identifier(spendId, 'spend_id');
+    const settlesBy = integer(settlesByMs, 'settlesByMs', { allowZero: true });
+    this.transaction(() => {
+      const now = this.now();
+      const row = this.statement('SELECT spend.status, spend.expires_at_ms, budgets.window_ms FROM spend '
+        + 'JOIN budgets ON budgets.instrument = spend.instrument WHERE spend.spend_id = ?').get(spendId);
+      if (row === undefined || row.status !== 'reserved' || row.expires_at_ms !== null) return;
+      this.statement("UPDATE spend SET expires_at_ms = ? WHERE spend_id = ? AND status = 'reserved' AND expires_at_ms IS NULL")
+        .run(expiry(settlesBy, now, row.window_ms), spendId);
     });
   }
 
@@ -406,18 +628,13 @@ export class Ledger {
     });
   }
 
-  removeByReference(instrument, rail, reference) {
-    this.transaction(() => {
-      this.statement('DELETE FROM spend WHERE spend_id = (SELECT spend_id FROM spend '
-        + 'WHERE instrument = ? AND rail = ? AND reference = ? LIMIT 1)').run(instrument, rail, reference);
-    });
-  }
-
   /**
-   * Turn a recorded payment back into an open reservation, noting why: it counts
-   * until someone releases it, whatever the window.
+   * Turn a recorded payment back into an open reservation, noting why. It counts
+   * until someone releases it, or, if it was recorded with a settle-by time, as
+   * long as the recorded payment would have.
    */
-  reopenByReference(instrument, rail, reference, { outcome } = {}) {
+  reopenByReference(name, rail, reference, { outcome } = {}) {
+    const instrument = instrumentName(name);
     this.transaction(() => {
       const row = this.statement("SELECT spend_id, reference FROM spend WHERE instrument = ? AND rail = ? AND reference = ? AND status = 'committed' LIMIT 1")
         .get(instrument, rail, reference);
@@ -426,35 +643,40 @@ export class Ledger {
       if (outcome !== undefined) {
         try { text = referenceText(JSON.stringify({ ...JSON.parse(row.reference), outcome })); } catch { /* keep the reference as it was */ }
       }
-      this.statement("UPDATE spend SET status = 'reserved', expires_at_ms = NULL, reference = ? WHERE spend_id = ?").run(text, row.spend_id);
+      // It keeps its expiry: it counts as long as the settled payment would have.
+      this.statement("UPDATE spend SET status = 'reserved', reference = ? WHERE spend_id = ?").run(text, row.spend_id);
     });
   }
 
   /** Refuse every later payment from the instrument, on every rail. */
-  revoke(instrument) {
-    const now = this.now();
+  revoke(name) {
+    const instrument = instrumentName(name);
     this.transaction(() => {
+      const now = this.now();
       this.#required(instrument);
       this.statement('UPDATE budgets SET revoked_at_ms = ? WHERE instrument = ? AND revoked_at_ms IS NULL').run(now, instrument);
     });
   }
 
-  /** Allow payments again after revoke(). */
-  unrevoke(instrument) {
+  /** Allow payments again after revoke(), or after the 0.3.0 upgrade froze the budget. */
+  unrevoke(name) {
+    const instrument = instrumentName(name);
     this.transaction(() => {
       this.#required(instrument);
       this.statement('UPDATE budgets SET revoked_at_ms = NULL WHERE instrument = ?').run(instrument);
+      this.statement('DELETE FROM budget_meta WHERE key = ?').run(unmergedKey(instrument));
     });
   }
 
   /** What counts against the budget right now, in its own unit. */
-  status(instrument) {
-    const now = this.now();
+  status(name) {
+    const instrument = instrumentName(name);
     return this.read(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       const sums = Object.fromEntries(this.statement(
         `SELECT spend.status AS status, COALESCE(SUM(spend.amount), 0) AS total, COUNT(spend.spend_id) AS uses ${COUNTED} GROUP BY spend.status`,
-      ).all(instrument, now, now).map(sum => [sum.status, sum]));
+      ).all(instrument, now, now, now).map(sum => [sum.status, sum]));
       const spent = sums.committed?.total ?? 0n;
       const reserved = sums.reserved?.total ?? 0n;
       const revoked = row.revoked_at_ms !== null;
@@ -476,19 +698,62 @@ export class Ledger {
   }
 
   /** The newest payments first, with whether each still counts. */
-  history(instrument, { limit = 20 } = {}) {
-    const rows = units(limit, 'limit');
-    const now = this.now();
+  history(name, { limit = 20 } = {}) {
+    const instrument = instrumentName(name);
+    const rows = integer(limit, 'limit');
     return this.read(() => {
+      const now = this.now();
       const row = this.#required(instrument);
       return this.statement('SELECT * FROM spend WHERE instrument = ? ORDER BY at_ms DESC, rowid DESC LIMIT ?')
         .all(instrument, rows)
         .map(spend => ({
           ...spend,
           counting: spend.status === 'committed'
-            ? spend.at_ms + row.window_ms >= now
+            ? spend.at_ms + row.window_ms >= now || (spend.expires_at_ms !== null && spend.expires_at_ms > now)
             : spend.expires_at_ms === null || spend.expires_at_ms > now,
         }));
+    });
+  }
+
+  /**
+   * The open payments that still count, oldest first: in flight, refused by the
+   * payee, or of unknown outcome. Each row carries the ledger's time as `now`.
+   */
+  holds(name) {
+    const instrument = instrumentName(name);
+    return this.read(() => {
+      const now = this.now();
+      this.#required(instrument);
+      return this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' "
+        + 'AND (expires_at_ms IS NULL OR expires_at_ms > ?) ORDER BY at_ms, rowid').all(instrument, now)
+        .map(row => ({ ...row, now }));
+    });
+  }
+
+  /**
+   * Give back every open payment of unknown outcome, or refused by the payee, that
+   * was taken at least `olderThanMs` ago, for an owner who has checked they never
+   * left the wallet. One with a settle-by time still ahead stays: the payee could
+   * settle it after the release. One with no settle-by time stays until it is
+   * UNBOUNDED_HOLD_MS old: the wallet may have signed it as it failed. Returns the
+   * payments released.
+   */
+  releaseUnknown(name, olderThanMs) {
+    const instrument = instrumentName(name);
+    const age = integer(olderThanMs, 'olderThanMs', { allowZero: true });
+    const outcomeOf = text => { try { return JSON.parse(text)?.outcome; } catch { return undefined; } };
+    return this.transaction(() => {
+      const now = this.now();
+      const { window_ms: window } = this.#required(instrument);
+      // A hold's expiry is its settle-by time plus one window plus 1 ms (expiry()). One capped at
+      // MAX_INTEGER can't say when its settle-by is, so it stays.
+      const settled = now + window + 1n < MAX_INTEGER ? now + window + 1n : MAX_INTEGER - 1n;
+      const released = this.statement("SELECT * FROM spend WHERE instrument = ? AND status = 'reserved' AND at_ms <= ? "
+        + 'AND ((expires_at_ms IS NULL AND at_ms <= ?) OR expires_at_ms <= ?) ORDER BY at_ms, rowid')
+        .all(instrument, now - age, now - UNBOUNDED_HOLD_MS, settled).filter(row => ['unknown', 'refused'].includes(outcomeOf(row.reference)));
+      const remove = this.statement("DELETE FROM spend WHERE spend_id = ? AND status = 'reserved'");
+      for (const row of released) remove.run(row.spend_id);
+      return released;
     });
   }
 
@@ -499,14 +764,16 @@ export class Ledger {
   }
 
   /** Delete settled payments older than `cutoffMs` that no longer count. */
-  prune(instrument, cutoffMs) {
-    const cutoff = units(cutoffMs, 'olderThanMs', { allowZero: true });
-    const now = this.now();
+  prune(name, cutoffMs) {
+    const instrument = instrumentName(name);
+    const cutoff = integer(cutoffMs, 'olderThanMs', { allowZero: true });
     this.transaction(() => {
+      const now = this.now();
       const { window_ms: window } = this.#required(instrument);
       // Reservations stay until committed or released: a lapsed one may still settle.
-      this.statement("DELETE FROM spend WHERE instrument = ? AND status = 'committed' AND at_ms < ? AND at_ms + ? < ?")
-        .run(instrument, cutoff, window, now);
+      this.statement("DELETE FROM spend WHERE instrument = ? AND status = 'committed' AND at_ms < ? AND at_ms + ? < ? "
+        + 'AND (expires_at_ms IS NULL OR expires_at_ms <= ?)')
+        .run(instrument, cutoff, window, now, now);
     });
   }
 

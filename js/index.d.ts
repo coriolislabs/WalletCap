@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// One spend budget per wallet, counted across every process, replica, key, permission and rail.
+// One spend budget per wallet, counted across every process, replica, key, permission and rail on one host.
 
 export declare const SCHEMA_VERSION: string;
-/** The largest amount a budget holds, in its own unit (micro-dollars for openBudget). */
+/**
+ * The most a budget, a limit or one payment can be, in the budget's own unit: 10^15, a billion
+ * dollars in micro-dollars. It keeps every sum of payments inside SQLite's 64-bit integers.
+ */
 export declare const MAX_AMOUNT: bigint;
 
 /**
@@ -15,13 +18,34 @@ export type Dollars = string | number | bigint;
 /** A rolling window: "24h", "7d", "30m", "day", or milliseconds. */
 export type Window = string | number | bigint;
 
-export type RefusalReason = 'budget' | 'per_payment' | 'uses' | 'revoked' | 'asset';
+export type RefusalReason = 'budget' | 'per_payment' | 'uses' | 'revoked' | 'asset' | 'timeout';
+
+/**
+ * The longest validity, in seconds, guard() lets a payee ask for (3600, an hour, as CDP's spend
+ * controls allow). Terms asking for more are passed over for shorter ones on offer, or refused
+ * with reason 'timeout' before signing.
+ */
+export declare const MAX_PAYMENT_TIMEOUT_SECONDS: number;
 
 export declare class BudgetError extends Error {}
 
 export declare class BudgetRefused extends BudgetError {
   readonly reason: RefusalReason;
   readonly code: `budget_${RefusalReason}`;
+  /** The message without the ids of open payments or what their owner can do about them. */
+  readonly brief: string;
+}
+
+/**
+ * The budget could not record what happened to a payment that went through, or may have; it
+ * still counts as in flight. Not a BudgetError, so code that retries on a BudgetError does not
+ * pay twice.
+ */
+export declare class PaymentNotRecorded extends Error {
+  /** The reservation whose payment went through. */
+  readonly reservationId: string;
+  /** Why it could not be recorded. */
+  readonly cause: unknown;
 }
 
 /** Tag an error to say the payment never left the wallet, so pay() gives its amount back. */
@@ -47,8 +71,6 @@ export interface BudgetOptions extends Limits {
   path?: string;
   /** Create the file and the wallet's budget if missing (default false: only an owner's `walletcap set` creates them). Pass true only for a demo or a first-run setup. */
   create?: boolean;
-  /** Milliseconds since the epoch. Defaults to Date.now. */
-  clock?: () => number;
   /** How long to wait for another process's write. Defaults to 30000. */
   busyTimeoutMs?: number;
   /** Called instead of process.emitWarning when the file keeps a limit tighter than the code asks for. */
@@ -59,6 +81,8 @@ export interface Check {
   ok: boolean;
   reason?: RefusalReason;
   message?: string;
+  /** The message without the ids of open payments or what their owner can do about them. */
+  brief?: string;
   /** Micro-dollars left in the window. */
   remaining: bigint;
 }
@@ -72,7 +96,11 @@ export interface PaymentDetails {
   details?: Record<string, unknown>;
   /** The rail, for the history. Defaults to 'js'. */
   rail?: string;
-  /** The last moment the payment could still settle. An open reservation stops counting one window after it. */
+  /**
+   * The last moment the payment could still settle, after now (a moment that isn't is refused).
+   * An open reservation, one whose outcome is unknown included, stops counting one window after
+   * it. Without it, an open reservation counts until it is committed or released.
+   */
   settlesBy?: Date | number | bigint;
 }
 
@@ -82,10 +110,14 @@ export declare class Reservation {
   /** Micro-dollars. */
   readonly amount: bigint;
   readonly open: boolean;
-  /** The payment settled: it counts for one rolling window from now. */
+  /**
+   * The payment settled: it counts for one rolling window from now, and, with a settlesBy, at
+   * least until one window past it. A commit never shortens a hold.
+   */
   commit(result?: { tx?: string; outcome?: string; error?: string }): void;
   /** The payment never left the wallet: give its amount back. */
   release(): void;
+  /** Note what is known about an open payment, like { outcome: 'unknown' }; it keeps counting. */
   annotate(fields: Record<string, unknown>): void;
 }
 
@@ -122,10 +154,36 @@ export interface Payment {
   tx?: string;
 }
 
+/**
+ * A USD-pegged stablecoin the budget counts at $1 a token. List only USD-pegged stablecoins:
+ * nothing else is priced. An entry can add an asset but can't change a built-in one's decimals.
+ */
+/** An open payment that still counts against the budget. */
+export interface Hold {
+  id: string;
+  /** Micro-dollars. */
+  amount: bigint;
+  /**
+   * 'in flight': no outcome yet. 'refused': the payee said it failed, but may still hold the
+   * authorization. 'unknown': the payment call failed after the money may have left.
+   */
+  reason: 'in flight' | 'refused' | 'unknown';
+  at: Date;
+  /** How long ago it was taken, in milliseconds. */
+  ageMs: bigint;
+  /** When it stops counting, or null if only a release ends it. */
+  until: Date | null;
+  rail: string;
+  to?: string;
+  note?: string;
+  error?: string;
+}
+
 export interface AssetEntry {
   /** CAIP-2, like 'eip155:8453'. */
   network: string;
   asset: string;
+  /** An integer from 0 to 18. */
   decimals: number;
 }
 
@@ -149,8 +207,10 @@ export declare class Budget {
   /** Take `amount` before paying, or throw BudgetRefused. */
   reserve(amount: Dollars, details?: PaymentDetails): Reservation;
   /**
-   * Reserve `amount`, run `fn` to pay, then record it. If `fn` throws, the
-   * payment still counts unless the error is tagged with notSent().
+   * Reserve `amount`, run `fn` to pay, then record it. If `fn` throws, the payment stays in
+   * flight, marked unknown, until one window past `settlesBy` or, without one, until its owner
+   * releases it, unless the error is tagged with notSent(). If the payment went through but
+   * can't be recorded, it throws PaymentNotRecorded: don't pay again.
    */
   pay<T>(amount: Dollars, fn: (reservation: Reservation) => T | Promise<T>, details?: PaymentDetails): Promise<T>;
   status(): Status;
@@ -160,7 +220,12 @@ export declare class Budget {
   freeze(): void;
   unfreeze(): void;
   history(options?: { limit?: number }): Payment[];
-  /** Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client. */
+  /** The open payments that still count, oldest first, and why. Its owner releases one that never left: walletcap release <id>. */
+  holds(): Hold[];
+  /**
+   * Count every payment an x402 client (@x402/core 2.x) makes in this budget. Returns the client.
+   * `assets` adds USD-pegged stablecoins to the built-in table; it can't change a built-in's decimals.
+   */
   guard<C extends X402HookedClient>(client: C, options?: { assets?: AssetEntry[] }): C;
   /**
    * Count every payment a Coinbase AgentKit X402ActionProvider makes in this budget: each x402
@@ -168,7 +233,7 @@ export declare class Budget {
    */
   guardAgentKit<P extends object>(provider: P, options?: { assets?: AssetEntry[] }): P;
   /** A SpendStore for Coinbase's CDP applySpendControls that counts in this budget. */
-  cdpStore(options: { asset: string; scale?: bigint | number; clock?: () => number }): SharedBudgetStore;
+  cdpStore(options: { asset: string; scale?: bigint | number }): SharedBudgetStore;
   close(): void;
 }
 
@@ -194,7 +259,7 @@ export interface SpendLedgerEntry {
 }
 
 export interface SharedBudgetStoreOptions {
-  /** The budget file shared by every process, replica and rail that spends from the budget. */
+  /** The budget file shared by every process on one host, on every rail, that spends from the budget. */
   path: string;
   /** The funding instrument whose budget this store spends from. */
   instrument: string;
@@ -202,8 +267,6 @@ export interface SharedBudgetStoreOptions {
   asset: string;
   /** Budget units per atomic unit of `asset`. Defaults to 1n. */
   scale?: bigint | number;
-  /** Milliseconds since the epoch. Defaults to Date.now. */
-  clock?: () => number;
   /** How long to wait for another process's write transaction. Defaults to 30000. */
   busyTimeoutMs?: number;
 }

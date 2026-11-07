@@ -3,7 +3,8 @@
 
 A budget counts in micro-dollars, so one USDC base unit is one budget unit. The
 JavaScript package parses and formats the same way, and computes the same
-default budget file, so both languages find one budget.
+default budget file, so both languages find one budget. spec/vectors/money.json
+holds the cases both test suites check.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import os
 import re
 import sys
 from collections.abc import Mapping
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
@@ -21,28 +22,100 @@ from walletcap._keccak import keccak256
 from walletcap.errors import BudgetError
 
 MICROS: Final = 1_000_000
-MAX_AMOUNT: Final = 2**63 - 1
+MAX_AMOUNT: Final = 10**15
+"""The most a budget, a limit or one payment can be, in the budget's own unit.
+
+10^15 is a billion dollars in micro-dollars, far below 2^63, so no sum of payments
+can overflow SQLite's 64-bit integers.
+"""
+MAX_INTEGER: Final = 2**63 - 1
+"""Times and counts only have to fit in SQLite's 64-bit integers."""
 DOLLAR_UNITS: Final = frozenset({"usd", "usdc"})
 HOUR_MS: Final = 3_600_000
 DAY_MS: Final = 86_400_000
 WEEK_MS: Final = 604_800_000
 
-_DOLLARS = re.compile(r"^\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?\s*(?:usdc?)?$", re.IGNORECASE)
-_DURATION = re.compile(r"^(\d+)\s*(ms|s|m|h|d|w)$")
+_SPACE: Final = " \t\n\v\f\r"
+# Digits in the most an amount, or a time or count, can be. Longer digit strings are refused
+# before int() reads them: Python refuses int() of a string over 4,300 digits with ValueError.
+_AMOUNT_DIGITS: Final = len(str(MAX_AMOUNT))
+_INTEGER_DIGITS: Final = len(str(MAX_INTEGER))
+# ASCII only, in both languages: no other digits or spaces, so "١٢" and "12\x85" are refused.
+_DOLLARS = re.compile(
+    r"\$?[ \t\n\v\f\r]*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.([0-9]+))?[ \t\n\v\f\r]*"
+    r"(?:[Uu][Ss][Dd][Cc]?)?"
+)
+_DURATION = re.compile(r"([0-9]+)[ \t\n\v\f\r]*(ms|s|m|h|d|w)")
+_FLOAT = re.compile(r"([0-9]+)(?:\.([0-9]*))?(?:e([+-]?[0-9]+))?")
 _DURATION_MS: Final = {"ms": 1, "s": 1_000, "m": 60_000, "h": HOUR_MS, "d": DAY_MS, "w": WEEK_MS}
 _DURATION_WORDS: Final = {"hour": HOUR_MS, "day": DAY_MS, "week": WEEK_MS}
-_EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_CAIP10_EVM = re.compile(r"^eip155:\d+:(0x[0-9a-fA-F]{40})$")
-_CAIP10_SOLANA = re.compile(r"^solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})$")
-_IDENTIFIER = re.compile(r"^[A-Za-z0-9_.:@/-]{1,128}$")
+_EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+_CAIP10_EVM = re.compile(r"eip155:[0-9]+:(0x[0-9a-fA-F]{40})")
+_CAIP10_SOLANA = re.compile(r"solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})")
+_IDENTIFIER = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}")
 _EXAMPLES = 'dollars, like "$12.50", 12.5 or "12.50 USDC"'
+
+
+def strip_ascii(text: str) -> str:
+    """``text`` without leading or trailing ASCII whitespace; JavaScript trims the same set."""
+
+    return text.strip(_SPACE)
+
+
+def _pow10(exponent: int) -> int:
+    """10 to a nonnegative power, as an int."""
+
+    return int(10**exponent)
+
+
+def _float_micros(value: float) -> int:
+    """A float of dollars as micro-dollars, as the JavaScript package converts a number.
+
+    ``repr()`` is the shortest decimal that reads back as the same float, the same
+    digits JavaScript's ``String()`` gives, and it is rounded half up to the
+    micro-dollar.
+    """
+
+    match = _FLOAT.fullmatch(repr(abs(value)))  # abs: -0.0 is 0, as String(-0) is "0"
+    if match is None:
+        raise BudgetError(f"{value!r} is not a number of dollars")
+    fraction = match.group(2) or ""
+    coefficient = int(match.group(1) + fraction)
+    shift = int(match.group(3) or 0) - len(fraction) + 6
+    if shift >= 0:
+        return coefficient * _pow10(shift)
+    micros, remainder = divmod(coefficient, _pow10(-shift))
+    return micros + (1 if 2 * remainder >= _pow10(-shift) else 0)
+
+
+def _decimal_micros(value: Decimal, label: str) -> int:
+    """An exact Decimal of dollars as micro-dollars, refusing anything finer.
+
+    It reads the digits, so no int() is built from more digits than an amount
+    can have, however many the Decimal holds.
+    """
+
+    _, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int) or not any(digits):
+        return 0
+    shift = exponent + 6  # the micro-dollars are the digits times 10**shift
+    whole = len(digits) + shift  # how many digits the whole micro-dollars take
+    if whole > _AMOUNT_DIGITS:
+        return MAX_AMOUNT + 1  # more than the most a budget can hold
+    if shift >= 0:
+        return int("".join(map(str, digits))) * _pow10(shift)
+    if any(digits[max(whole, 0) :]):
+        raise BudgetError(f"{label} is finer than a millionth of a dollar: {value}")
+    return int("".join(map(str, digits[:whole]))) if whole > 0 else 0
 
 
 def to_micros(value: object, label: str = "amount") -> int:
     """Dollars as integer micro-dollars.
 
     Strings and Decimals are exact (``"$12.50"``, ``"12.50 USDC"``, ``"$1,000"``);
-    ints are whole dollars; floats are dollars rounded to the nearest micro-dollar.
+    ints are whole dollars; floats are dollars, read as the shortest decimal that
+    gives the float back and rounded half up to the micro-dollar, as JavaScript
+    reads a number.
     """
 
     if isinstance(value, bool):
@@ -52,27 +125,33 @@ def to_micros(value: object, label: str = "amount") -> int:
     elif isinstance(value, float):
         if not math.isfinite(value) or value < 0:
             raise BudgetError(f"{label} must be a nonnegative number of dollars")
-        rounded = Decimal(repr(value)).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
-        micros = int(rounded * MICROS)
+        micros = _float_micros(value)
     elif isinstance(value, Decimal):
         if not value.is_finite():
             raise BudgetError(f"{label} must be {_EXAMPLES}")
-        scaled = value * MICROS
-        if scaled != scaled.to_integral_value():
-            raise BudgetError(f"{label} is finer than a millionth of a dollar: {value}")
-        micros = int(scaled)
+        if value < 0:
+            raise BudgetError(f"{label} must be a nonnegative amount")
+        micros = _decimal_micros(value, label)
     elif isinstance(value, str):
-        match = _DOLLARS.match(value.strip())
+        match = _DOLLARS.fullmatch(strip_ascii(value))
         if match is None:
             raise BudgetError(f"{label} must be {_EXAMPLES}; got {value!r}")
         fraction = match.group(2) or ""
         if fraction[6:].strip("0"):
             raise BudgetError(f"{label} is finer than a millionth of a dollar: {value!r}")
-        micros = int(match.group(1).replace(",", "")) * MICROS + int(fraction[:6].ljust(6, "0"))
+        whole = match.group(1).replace(",", "").lstrip("0") or "0"
+        if len(whole) > _AMOUNT_DIGITS:
+            micros = MAX_AMOUNT + 1  # more than the most a budget can hold
+        else:
+            micros = int(whole) * MICROS + int(fraction[:6].ljust(6, "0"))
     else:
         raise BudgetError(f"{label} must be {_EXAMPLES}")
-    if micros < 0 or micros > MAX_AMOUNT:
-        raise BudgetError(f"{label} must be a nonnegative amount that fits in 64 bits")
+    if micros < 0:
+        raise BudgetError(f"{label} must be a nonnegative amount")
+    if micros > MAX_AMOUNT:
+        raise BudgetError(
+            f"{label} is more than {format_usd(MAX_AMOUNT)}, the most a budget can hold"
+        )
     return micros
 
 
@@ -100,17 +179,35 @@ def to_window_ms(value: object, label: str = "window") -> int:
     elif isinstance(value, int):
         ms = value
     elif isinstance(value, str):
-        text = value.strip().lower()
-        match = _DURATION.match(text)
+        text = strip_ascii(value).lower()
+        match = _DURATION.fullmatch(text)
         if match is not None:
-            ms = int(match.group(1)) * _DURATION_MS[match.group(2)]
+            count = match.group(1).lstrip("0") or "0"
+            if len(count) <= _INTEGER_DIGITS:
+                ms = int(count) * _DURATION_MS[match.group(2)]
         else:
             ms = _DURATION_WORDS.get(text)
-    if ms is None or ms <= 0 or ms > MAX_AMOUNT:
+    if ms is None or ms <= 0 or ms > MAX_INTEGER:
         raise BudgetError(
             f'{label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds'
         )
     return ms
+
+
+def format_age(ms: int) -> str:
+    """How long ago, roughly: ``"3d 4h"``, ``"4h 12m"``, ``"12m 5s"`` or ``"5s"``."""
+
+    units = (("d", DAY_MS), ("h", HOUR_MS), ("m", 60_000), ("s", 1_000))
+    parts: list[str] = []
+    left = max(ms, 0)
+    for suffix, size in units:
+        if not parts and left < size and suffix != "s":
+            continue
+        parts.append(f"{left // size}{suffix}")
+        left %= size
+        if len(parts) == 2:
+            break
+    return " ".join(parts)
 
 
 def format_window(ms: int) -> str:
@@ -146,17 +243,17 @@ def normalize_wallet(wallet: object) -> str:
     reduced to its address, so it and the bare address share one budget.
     """
 
-    if not isinstance(wallet, str) or not wallet.strip():
+    if not isinstance(wallet, str) or not strip_ascii(wallet):
         raise BudgetError("wallet is required: the address or account the money leaves from")
-    name = wallet.strip()
-    caip = _CAIP10_EVM.match(name)
+    name = strip_ascii(wallet)
+    caip = _CAIP10_EVM.fullmatch(name)
     if caip is not None:
         name = caip.group(1)
     else:
-        caip = _CAIP10_SOLANA.match(name)
+        caip = _CAIP10_SOLANA.fullmatch(name)
         if caip is not None:
             name = caip.group(1)
-    if _EVM_ADDRESS.match(name):
+    if _EVM_ADDRESS.fullmatch(name):
         hexpart = name[2:]
         if (
             hexpart != hexpart.lower()
@@ -171,12 +268,29 @@ def normalize_wallet(wallet: object) -> str:
     # A mistyped address must not quietly open a second budget.
     if name[:2].lower() == "0x":
         raise BudgetError(f"wallet {name!r} looks like an EVM address but is not 40 hex digits")
-    if _IDENTIFIER.match(name) is None:
+    if _IDENTIFIER.fullmatch(name) is None:
         raise BudgetError(
             "wallet must be an address or a plain name "
             "(letters, digits and _ . : @ / -, at most 128)"
         )
     return name
+
+
+def stored_wallet_name(name: str) -> str:
+    """The canonical name for a budget a 0.2.x file holds under some other spelling.
+
+    ``normalize_wallet``'s rule without its checks: a checksummed, uppercase or
+    CAIP-10 EVM address becomes the lowercase address, even with a bad checksum,
+    and a Solana CAIP-10 becomes its address, so every spelling merges into one
+    budget.
+    """
+
+    solana = _CAIP10_SOLANA.fullmatch(name)
+    if solana is not None:
+        return solana.group(1)
+    evm = _CAIP10_EVM.fullmatch(name)
+    address = evm.group(1) if evm is not None else name
+    return address.lower() if _EVM_ADDRESS.fullmatch(address) else name
 
 
 def short_wallet(wallet: str) -> str:

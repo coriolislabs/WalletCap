@@ -28,13 +28,19 @@ with budget.pay("$12.50", to=payee) as payment:
 
 - `budget.pay()` reserves the amount on entry and raises `BudgetRefused` if it would pass a
   limit. A clean exit records the payment as settled.
-- If the block raises, the payment still counts, because it may have left the wallet. Raise
-  `NotSent("card declined")` when you know it didn't, and the amount comes back.
+- If the block raises, the payment may still have left the wallet, so it stays in flight,
+  marked unknown: it counts until one window past `settles_by` (a timezone-aware datetime) if
+  you pass one, or until you release it. Raise `NotSent("card declined")` when you know it
+  didn't leave, and the amount comes back.
+- If the payment went through but the budget can't record it, the block raises
+  `PaymentNotRecorded`. It is not a `BudgetError`, so don't pay again.
 - Use `async with budget.pay(...)` in async code.
 - `budget.check("$5")` answers without spending. `budget.status()`, `budget.freeze()`,
   `budget.unfreeze()` and `budget.history()` show and control the budget.
+- `budget.holds()` lists the open payments that still count, and why. A refusal names them.
 - The `walletcap` command (or `python -m walletcap`) has the same commands as `npx walletcap`:
-  `status`, `set`, `freeze`, `unfreeze`, `history` and `release`.
+  `status`, `set`, `freeze`, `unfreeze`, `history`, `holds` and `release`, including
+  `release --all-unknown --older-than 24h`.
 - The x402 guard, the CDP store, the AgentKit guard and the Agentic Wallet wrapper are in the npm
   package. A Python agent can still share their budget: it opens the same file.
 

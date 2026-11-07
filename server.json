@@ -10,13 +10,13 @@
     "id": "1443260841",
     "subfolder": "js"
   },
-  "version": "0.2.4",
+  "version": "0.3.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "walletcap",
-      "version": "0.2.4",
+      "version": "0.3.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

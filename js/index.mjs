@@ -1,44 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 // walletcap: one spend budget per wallet, counted across every process,
-// replica, key, permission and payment rail that pays from it.
+// replica, key, permission and payment rail on one host that pays from it.
 //
 // Agent payment kits count "spent so far" per process, per key, per permission
 // or per period, so a restart, a second replica, one more key or the next
 // period starts the count again. This budget is counted per wallet, in a file
-// every process shares, over a rolling window. Changing a limit never resets
-// what has been spent, a restart can lower a limit but never raise one, and if
-// the count cannot be read, nothing is paid.
+// every process on the host shares, over a rolling window. Changing a limit
+// never resets what has been spent, a restart can lower a limit but never raise
+// one, and if the count cannot be read, nothing is paid.
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { SharedBudgetStore } from './cdp.mjs';
-import { BudgetError, BudgetRefused, isNotSent, notSent } from './errors.mjs';
-import { Ledger, SCHEMA_VERSION } from './ledger.mjs';
+import { BudgetError, BudgetRefused, isNotSent, notSent, PaymentNotRecorded } from './errors.mjs';
+import { checkKeys, Ledger, SCHEMA_VERSION, SETTLES_BY } from './ledger.mjs';
 import {
   defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, limitFlags, MAX_AMOUNT,
   normalizeWallet, parseLimits, shortWallet, toMicros,
 } from './money.mjs';
-import { guardX402ActionProvider, guardX402Client, USD_ASSETS } from './x402.mjs';
+import { guardX402ActionProvider, guardX402Client, MAX_PAYMENT_TIMEOUT_SECONDS, USD_ASSETS } from './x402.mjs';
 
 export {
-  BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, notSent, SCHEMA_VERSION,
-  SharedBudgetStore, toMicros, USD_ASSETS,
+  BudgetError, BudgetRefused, defaultBudgetPath, formatUsd, MAX_AMOUNT, MAX_PAYMENT_TIMEOUT_SECONDS, notSent,
+  PaymentNotRecorded, SCHEMA_VERSION, SharedBudgetStore, toMicros, USD_ASSETS,
 };
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
-const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'clock', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
+const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
+const CDP_STORE_KEYS = new Set(['asset', 'scale']);
 const TO_LIMIT = 256;
 const NOTE_LIMIT = 1024;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
-
-const checkKeys = (source, known, what) => {
-  if (source === null || typeof source !== 'object') throw new BudgetError(`${what} takes an options object`);
-  for (const key of Object.keys(source)) {
-    if (known.has(key)) continue;
-    const plain = key.toLowerCase().replaceAll(/[-_]/g, '');
-    const match = [...known].find(candidate => candidate.toLowerCase() === plain);
-    throw new BudgetError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
-  }
-};
 
 const positive = micros => {
   if (micros === 0n) throw new BudgetError('the amount must be more than $0');
@@ -109,7 +100,10 @@ export class Reservation {
 
   get open() { return this.#state === 'open'; }
 
-  /** The payment settled. It counts for one rolling window from now. */
+  /**
+   * The payment settled. It counts for one rolling window from now, and, with a
+   * settlesBy, at least until one window past it: a commit never shortens a hold.
+   */
   commit({ tx, outcome, error } = {}) {
     if (!this.open) throw new BudgetError(`reservation ${this.#id} is already ${this.#state}`);
     const info = { ...this.#info, ...(tx ? { tx } : {}), ...(outcome ? { outcome } : {}), ...(error ? { error } : {}) };
@@ -124,11 +118,16 @@ export class Reservation {
     this.#state = 'released';
   }
 
-  /** Note what is known about an open payment; it keeps counting. */
+  /** Note what is known about an open payment; it keeps counting, as before. */
   annotate(fields) {
     if (!this.open) return;
     this.#info = { ...this.#info, ...fields };
     this.#ledger.annotate(this.#id, JSON.stringify(this.#info));
+  }
+
+  // Internal (the key is not exported): an open payment learns, once, the last moment it could settle.
+  [SETTLES_BY](settlesByMs) {
+    if (this.open) this.#ledger.settlesBy(this.#id, settlesByMs);
   }
 }
 
@@ -163,7 +162,7 @@ export class Budget {
       throw new BudgetError(`no budget file at ${this.#path}; its owner creates one with: npx walletcap set --wallet ${this.#wallet}${this.#pathFlag()} --per-day <dollars>`);
     }
     if (create) mkdirSync(dirname(this.#path), { recursive: true, mode: 0o700 });
-    this.#ledger = new Ledger(this.#path, { clock: options.clock ?? Date.now, busyTimeoutMs: options.busyTimeoutMs ?? 30_000 });
+    this.#ledger = new Ledger(this.#path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000 });
     try {
       const { looser, row } = this.#ledger.ensure(this.#wallet, limits, { unit: 'usd', create });
       if (looser.length > 0) this.#warnKept(options.onWarning, row, limits);
@@ -197,14 +196,14 @@ export class Budget {
     const { refusal, remaining } = this.#ledger.check(this.#wallet, positive(toMicros(amount)));
     return refusal === null
       ? { ok: true, remaining }
-      : { ok: false, reason: refusal.reason, message: refusal.message, remaining };
+      : { ok: false, reason: refusal.reason, message: refusal.message, brief: refusal.brief, remaining };
   }
 
   /**
    * Take `amount` before paying, or throw BudgetRefused. Commit the reservation
    * when the payment settles; release it only if the payment never left.
    * `settlesBy` is the last moment the payment could still settle, if known: an
-   * open reservation stops counting one window after it.
+   * open reservation stops counting one window after it. It must be after now.
    */
   reserve(amount, { to, note, details, rail = 'js', settlesBy } = {}) {
     const micros = positive(toMicros(amount));
@@ -219,9 +218,13 @@ export class Budget {
 
   /**
    * Reserve `amount`, run `fn` to make the payment, then record it. If `fn`
-   * throws, the payment still counts (it may have left), unless the error is
-   * tagged with notSent(). `fn` receives the reservation; its id makes a good
-   * idempotency key. Returns what `fn` returns.
+   * throws, the payment may still have left, so it stays in flight, marked
+   * unknown: it counts until one window past `settlesBy`, or, without one,
+   * until its owner releases it. An error tagged with notSent() gives the
+   * amount back. If the payment went through but can't be recorded, it throws
+   * PaymentNotRecorded, which is not a BudgetError: don't pay again. `fn`
+   * receives the reservation; its id makes a good idempotency key. Returns what
+   * `fn` returns.
    */
   async pay(amount, fn, options = {}) {
     if (typeof fn !== 'function') throw new BudgetError('pay(amount, fn) calls fn to make the payment, and fn is missing');
@@ -233,7 +236,7 @@ export class Budget {
       if (reservation.open) {
         try {
           if (isNotSent(error)) reservation.release();
-          else reservation.commit({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+          else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
         } catch {
           // Recording failed; the reservation stays open, and keeps counting.
         }
@@ -244,7 +247,7 @@ export class Budget {
       try {
         reservation.commit({ tx: transactionOf(result) });
       } catch (error) {
-        throw new BudgetError(`the payment went through but could not be recorded as settled; it still counts as in flight (${reservation.id})`, { cause: error });
+        throw new PaymentNotRecorded(reservation.id, { cause: error });
       }
     }
     return result;
@@ -283,6 +286,31 @@ export class Budget {
 
   unfreeze() { this.#ledger.unrevoke(this.#wallet); }
 
+  /**
+   * The open payments that still count, oldest first, with why each is open:
+   * 'in flight' (no outcome yet), 'refused' (the payee said it failed but may
+   * still hold the authorization) or 'unknown' (the payment call failed after
+   * the money may have left). `until` is when it stops counting, or null if
+   * only a release ends it. Its owner releases one that never left the wallet.
+   */
+  holds() {
+    return this.#ledger.holds(this.#wallet).map(row => {
+      const info = parseInfo(row.reference);
+      return {
+        id: row.spend_id,
+        amount: row.amount,
+        reason: info.outcome === 'refused' || info.outcome === 'unknown' ? info.outcome : 'in flight',
+        at: new Date(Number(row.at_ms)),
+        ageMs: row.now - row.at_ms,
+        until: row.expires_at_ms === null ? null : new Date(Number(row.expires_at_ms - 1n)),
+        rail: row.rail,
+        to: info.to ?? info.payTo,
+        note: info.note ?? (info.network ? `${info.network}` : undefined),
+        error: info.error,
+      };
+    });
+  }
+
   /** The newest payments first. */
   history({ limit = 20 } = {}) {
     return this.#ledger.history(this.#wallet, { limit }).map(row => {
@@ -308,8 +336,10 @@ export class Budget {
   guardAgentKit(provider, options) { return guardX402ActionProvider(provider, this, options); }
 
   /** A SpendStore for Coinbase's CDP applySpendControls, counting in this budget. For a 6-decimal USD stablecoin. */
-  cdpStore({ asset, scale = 1n, clock = Date.now } = {}) {
-    return new SharedBudgetStore({ path: this.#path, instrument: this.#wallet, asset, scale, clock });
+  cdpStore(options = {}) {
+    checkKeys(options, CDP_STORE_KEYS, 'cdpStore');
+    const { asset, scale = 1n } = options;
+    return new SharedBudgetStore({ path: this.#path, instrument: this.#wallet, asset, scale });
   }
 
   close() { this.#ledger.close(); }

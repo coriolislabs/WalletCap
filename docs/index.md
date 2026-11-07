@@ -1,12 +1,12 @@
 ---
 title: walletcap
-description: "Per-payment and rolling 24-hour spend limits for AI agent wallets that pay in USDC, held across restarts and replicas. Crash test: $0 past a $150 cap."
+description: "Per-payment and rolling 24-hour spend limits for AI agent wallets that pay in USDC, held across restarts and replicas on one host. Crash test: $0 past a $150 cap."
 ---
 
 # walletcap: spend limits for AI agent wallets
 
 Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour
-budget that holds across restarts, replicas and payment rails. walletcap is an npm and PyPI
+budget that holds across restarts, replicas on one host and payment rails. walletcap is an npm and PyPI
 package under Apache-2.0. It plugs into x402 clients, Coinbase CDP's x402 spend controls,
 Coinbase AgentKit, the Coinbase Agentic Wallet CLI and payments MCP server, and Coinbase Spend
 Permissions.
@@ -54,8 +54,9 @@ times. Those runs used `@coinbase/cdp-sdk` 1.61.0, `@x402/core` 2.30.0, SpendPer
 1.0.0 and walletcap 0.2.3.
 
 Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and AgentKit signs
-the merchant's first-listed $1.00 on Base mainnet. walletcap, at 2¢ a payment, refuses it before
-signing. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/crash-test)
+the merchant's first-listed $1.00 on Base mainnet. walletcap, at 2¢ a payment, limits the amount,
+not which offer is paid: it passes over the $1.00, valid 4 days, and the offer left is the 1¢ the
+agent approved. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/crash-test)
 says exactly what runs.
 
 ## Install

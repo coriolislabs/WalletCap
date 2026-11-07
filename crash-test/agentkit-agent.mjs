@@ -35,6 +35,9 @@ const offers = [
   { scheme: 'exact', network: 'eip155:84532', asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', amount: '10000', payTo: merchant, maxTimeoutSeconds: 300, extra: { name: 'USDC', version: '2' } },
 ];
 const approved = offers[1];
+const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+const isApproved = accepted => accepted?.network === approved.network && same(accepted?.asset, approved.asset)
+  && accepted?.amount === approved.amount && same(accepted?.payTo, approved.payTo);
 
 const received = [];
 const server = createServer((req, res) => {
@@ -50,6 +53,7 @@ const server = createServer((req, res) => {
     network: payload.accepted?.network,
     amount: payload.accepted?.amount,
     toStranger: payload.accepted?.payTo === stranger,
+    approved: isApproved(payload.accepted),
     validForSeconds: Number(payload.payload?.authorization?.validBefore) - Math.floor(Date.now() / 1000),
   });
   const settled = { success: true, transaction: `0x${'ab'.repeat(32)}`, network: payload.accepted?.network };

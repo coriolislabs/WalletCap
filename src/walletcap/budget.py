@@ -4,9 +4,9 @@
 Agent payment kits count "spent so far" per process, per key, per permission or
 per period, so a restart, a second replica, one more key or the next period
 starts the count again. This budget is counted per wallet, in a file every
-process shares, over a rolling window. Changing a limit never resets what has
-been spent, a restart can lower a limit but never raise one, and if the count
-cannot be read, nothing is paid::
+process on the host shares, over a rolling window. Changing a limit never
+resets what has been spent, a restart can lower a limit but never raise one,
+and if the count cannot be read, nothing is paid::
 
     from walletcap import open_budget
 
@@ -20,16 +20,16 @@ from __future__ import annotations
 
 import json
 import shlex
-import time
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from walletcap.errors import BudgetError, BudgetWarning, NotSent
+from walletcap import _clock
+from walletcap.errors import BudgetError, BudgetWarning, NotSent, PaymentNotRecorded
 from walletcap.ledger import UNSET, BudgetLimits, Ledger
 from walletcap.money import (
     DAY_MS,
@@ -47,7 +47,7 @@ from walletcap.money import (
     to_window_ms,
 )
 
-__all__ = ["Budget", "Check", "Payment", "Paying", "Reservation", "Status", "open_budget"]
+__all__ = ["Budget", "Check", "Hold", "Payment", "Paying", "Reservation", "Status", "open_budget"]
 
 _TO_LIMIT = 256
 _NOTE_LIMIT = 1024
@@ -110,6 +110,28 @@ class Payment:
     to: str | None
     note: str | None
     tx: str | None
+
+
+@dataclass(frozen=True)
+class Hold:
+    """An open payment that still counts against the budget. ``amount`` is micro-dollars.
+
+    ``reason`` is ``"in flight"`` (no outcome yet), ``"refused"`` (the payee
+    said it failed, but may still hold the authorization) or ``"unknown"``
+    (the payment call failed after the money may have left). ``until`` is when
+    it stops counting, or None if only a release ends it.
+    """
+
+    id: str
+    amount: int
+    reason: str
+    at: datetime
+    age_ms: int
+    until: datetime | None
+    rail: str
+    to: str | None
+    note: str | None
+    error: str | None
 
 
 def _limits(
@@ -175,6 +197,25 @@ def _positive(micros: int) -> int:
     return micros
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+_MILLISECOND = timedelta(milliseconds=1)
+
+
+def _settles_by_ms(settles_by: object) -> int:
+    """A timezone-aware datetime as milliseconds since the epoch, rounded up.
+
+    A naive datetime would be read as this machine's local time, hours from what
+    the caller meant, so it is refused.
+    """
+
+    if not isinstance(settles_by, datetime) or settles_by.utcoffset() is None:
+        raise BudgetError(
+            "settles_by must be a timezone-aware datetime, "
+            "like datetime.now(UTC) + timedelta(minutes=5)"
+        )
+    return -((_EPOCH - settles_by) // _MILLISECOND)
+
+
 def _info(reference: str | None) -> dict[str, Any]:
     try:
         info = json.loads(reference) if reference else {}
@@ -214,7 +255,11 @@ class Reservation:
     def commit(
         self, *, tx: str | None = None, outcome: str | None = None, error: str | None = None
     ) -> None:
-        """The payment settled. It counts for one rolling window from now."""
+        """The payment settled. It counts for one rolling window from now.
+
+        With a ``settles_by``, it counts at least until one window past it: a
+        commit never shortens a hold.
+        """
 
         if not self.open:
             raise BudgetError(f"reservation {self._id} is already {self._state}")
@@ -236,24 +281,48 @@ class Reservation:
         self._ledger.release(self._id)
         self._state = "released"
 
+    def annotate(self, **fields: Any) -> None:
+        """Note what is known about an open payment, like ``outcome="unknown"``.
+
+        It keeps counting, as before.
+        """
+
+        if not self.open:
+            return
+        self._info = {**self._info, **fields}
+        self._ledger.annotate(self._id, json.dumps(self._info))
+
 
 class Paying:
     """``with budget.pay(amount):`` reserves on entry and records the payment on exit.
 
-    A clean exit commits it. An exception commits it as an unknown outcome (it
-    may have left the wallet), unless the exception is ``NotSent``, which gives
-    the amount back. Works with ``async with`` too.
+    A clean exit commits it; if that fails, it raises ``PaymentNotRecorded``,
+    which is not a ``BudgetError``: don't pay again. An exception never settles
+    it: the payment may have left the wallet, so it stays in flight, marked
+    unknown, and counts until one window past ``settles_by``, or, without one,
+    until its owner releases it. ``NotSent`` gives the amount back. Works with
+    ``async with`` too.
     """
 
-    def __init__(self, budget: Budget, amount: object, info: dict[str, Any], rail: str) -> None:
+    def __init__(
+        self,
+        budget: Budget,
+        amount: object,
+        info: dict[str, Any],
+        rail: str,
+        settles_by: datetime | None,
+    ) -> None:
         self._budget = budget
         self._amount = amount
         self._info = info
         self._rail = rail
+        self._settles_by = settles_by
         self._reservation: Reservation | None = None
 
     def __enter__(self) -> Reservation:
-        self._reservation = self._budget._reserve(self._amount, self._info, self._rail, None)
+        self._reservation = self._budget._reserve(
+            self._amount, self._info, self._rail, self._settles_by
+        )
         return self._reservation
 
     def __exit__(
@@ -269,16 +338,13 @@ class Paying:
             try:
                 reservation.commit()
             except BudgetError as error:
-                raise BudgetError(
-                    "the payment went through but could not be recorded as settled; "
-                    f"it still counts as in flight ({reservation.id})"
-                ) from error
+                raise PaymentNotRecorded(reservation.id, error) from error
             return
         try:
             if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:
                 reservation.release()
             else:
-                reservation.commit(outcome="unknown", error=str(exc)[:200])
+                reservation.annotate(outcome="unknown", error=str(exc)[:200])
         except BudgetError:
             pass  # recording failed; the reservation stays open, and keeps counting
 
@@ -310,7 +376,6 @@ class Budget:
         cap: object = None,
         window: object = None,
         max_payments: object = UNSET,
-        clock: Callable[[], float] = time.time,
         busy_timeout_seconds: float = 30.0,
         on_warning: Callable[[str], None] | None = None,
     ) -> None:
@@ -333,7 +398,7 @@ class Budget:
             )
         if create:
             self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._ledger = Ledger(self._path, clock=clock, busy_timeout_seconds=busy_timeout_seconds)
+        self._ledger = Ledger(self._path, busy_timeout_seconds=busy_timeout_seconds)
         ensured = self._ledger.ensure(self._wallet, unit="usd", create=create, **limits)
         if ensured.looser:
             self._warn_kept(on_warning, ensured.budget, limits)
@@ -400,7 +465,9 @@ class Budget:
         """Take ``amount`` before paying, or raise ``BudgetRefused``.
 
         Commit the reservation when the payment settles; release it only if the
-        payment never left the wallet.
+        payment never left the wallet. ``settles_by`` is the last moment the
+        payment could still settle, if known, as a timezone-aware datetime after
+        now: an open reservation stops counting one window after it.
         """
 
         return self._reserve(amount, _describe(to, note, details), rail, settles_by)
@@ -409,7 +476,7 @@ class Budget:
         self, amount: object, info: dict[str, Any], rail: str, settles_by: datetime | None
     ) -> Reservation:
         micros = _positive(to_micros(amount))
-        settles_by_ms = None if settles_by is None else int(settles_by.timestamp() * 1000)
+        settles_by_ms = None if settles_by is None else _settles_by_ms(settles_by)
         spend_id = self._ledger.reserve(
             self._wallet,
             micros,
@@ -427,14 +494,17 @@ class Budget:
         note: str | None = None,
         details: dict[str, Any] | None = None,
         rail: str = "python",
+        settles_by: datetime | None = None,
     ) -> Paying:
         """``with budget.pay("$12.50"):`` reserve, pay inside the block, and record it.
 
         Raises ``BudgetRefused`` on entry if the budget would be passed. If the
-        block raises, the payment still counts, unless it raised ``NotSent``.
+        block raises, the payment stays in flight, marked unknown: it counts
+        until one window past ``settles_by``, or, without one, until its owner
+        releases it. ``NotSent`` gives the amount back.
         """
 
-        return Paying(self, amount, _describe(to, note, details), rail)
+        return Paying(self, amount, _describe(to, note, details), rail, settles_by)
 
     def status(self) -> Status:
         status = self._ledger.status(self._wallet)
@@ -486,6 +556,34 @@ class Budget:
 
     def unfreeze(self) -> None:
         self._ledger.unrevoke(self._wallet)
+
+    def holds(self) -> list[Hold]:
+        """The open payments that still count, oldest first, and why each is open.
+
+        Its owner releases one that never left the wallet: ``walletcap release <id>``.
+        """
+
+        now_ms = _clock.now_ms()
+        holds = []
+        for spend in self._ledger.holds(self._wallet):
+            info = _info(spend.reference)
+            outcome = info.get("outcome")
+            until = spend.expires_at_ms
+            holds.append(
+                Hold(
+                    spend.spend_id,
+                    spend.amount,
+                    outcome if outcome in ("refused", "unknown") else "in flight",
+                    datetime.fromtimestamp(spend.at_ms / 1000, tz=UTC),
+                    max(now_ms - spend.at_ms, 0),
+                    None if until is None else datetime.fromtimestamp((until - 1) / 1000, tz=UTC),
+                    spend.rail,
+                    info.get("to") or info.get("payTo"),
+                    info.get("note") or info.get("network"),
+                    info.get("error"),
+                )
+            )
+        return holds
 
     def history(self, limit: int = 20) -> list[Payment]:
         """The newest payments first."""

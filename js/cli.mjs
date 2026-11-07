@@ -8,7 +8,10 @@ import { parseArgs } from 'node:util';
 import { BudgetError } from './errors.mjs';
 import { openBudget } from './index.mjs';
 import { Ledger } from './ledger.mjs';
-import { defaultBudgetPath, describeLimits, expandHome, formatUsd, formatWindow, normalizeWallet, parseLimits, shortWallet } from './money.mjs';
+import {
+  defaultBudgetPath, describeLimits, expandHome, formatAge, formatUsd, formatWindow, normalizeWallet, parseLimits, shortWallet,
+  storedWalletName, toWindowMs, trimAscii,
+} from './money.mjs';
 
 const { version } = createRequire(import.meta.url)('./package.json');
 
@@ -22,7 +25,13 @@ Commands
   freeze               Refuse every payment from the wallet, in every process, until unfreeze
   unfreeze             Allow payments again
   history              The newest payments first
+  holds                The open payments that still count, and why: in flight, refused or unknown
   release <id>         Give back an in-flight payment you know never left the wallet
+  release --all-unknown --older-than <24h|7d|30m>
+                       Give back every payment of unknown or refused outcome older than that,
+                       once you know none of them left the wallet. One the payee could still
+                       settle stays, and one with no settle-by time stays until it is an hour
+                       and a minute old
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget
   awal-mcp [-- <cmd>]  Coinbase's Agentic Wallet MCP server (~/.payments-mcp) behind a proxy that
                        counts its payments and refuses tools it can't count (--allow-tool <name>)
@@ -49,6 +58,8 @@ const OPTIONS = {
   window: { type: 'string' },
   'max-payments': { type: 'string' },
   limit: { type: 'string' },
+  'all-unknown': { type: 'boolean' },
+  'older-than': { type: 'string' },
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -61,7 +72,7 @@ const json = value => JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v
 const pathOf = values => resolve(expandHome(values.path ?? defaultBudgetPath()));
 
 const limitsOf = values => {
-  const none = value => (value !== undefined && value.trim().toLowerCase() === 'none' ? null : value);
+  const none = value => (value !== undefined && trimAscii(value).toLowerCase() === 'none' ? null : value);
   return parseLimits({
     perPayment: none(values['per-payment']),
     perHour: values['per-hour'],
@@ -77,7 +88,8 @@ const wallets = path => {
   if (!existsSync(path)) return [];
   const ledger = new Ledger(path);
   try {
-    return ledger.budgets().map(row => row.instrument);
+    // A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
+    return [...new Set(ledger.budgets().map(row => storedWalletName(row.instrument)))];
   } finally {
     ledger.close();
   }
@@ -103,6 +115,30 @@ const detail = status => [
   `Left         ${formatUsd(status.remaining)}`,
   `State        ${status.frozen ? 'FROZEN: every payment is refused' : 'active'}`,
 ].join('\n');
+
+// Every payment of unknown or refused outcome older than --older-than that the payee can no longer
+// settle (with no settle-by time, an hour and a minute old), for an owner who has checked the chain.
+function releaseUnknown(values, path, id) {
+  if (id !== undefined) throw new Usage('release takes an id or --all-unknown, not both');
+  if (values['older-than'] === undefined) throw new Usage('release --all-unknown needs --older-than, like --older-than 24h');
+  const olderThan = toWindowMs(values['older-than'], '--older-than');
+  if (!existsSync(path)) throw new BudgetError(`no budget file at ${path}`);
+  const wallet = walletOf(values, path);
+  const ledger = new Ledger(path);
+  try {
+    const released = ledger.releaseUnknown(wallet, olderThan);
+    if (values.json) return json(released.map(row => ({ id: row.spend_id, amount: row.amount })));
+    if (released.length === 0) {
+      return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be released yet. One goes once it is older than `
+        + `${formatWindow(olderThan)} and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old.`;
+    }
+    const total = released.reduce((sum, row) => sum + row.amount, 0n);
+    return `Released ${released.length} payment${released.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `
+      + `(${formatUsd(total)} from ${shortWallet(wallet)}): they no longer count. Only do this for payments you know never left the wallet.`;
+  } finally {
+    ledger.close();
+  }
+}
 
 const commands = {
   status(values, path) {
@@ -170,7 +206,7 @@ const commands = {
   history(values, path) {
     const budget = open(values, path);
     try {
-      const rows = budget.history({ limit: values.limit ?? 20 });
+      const rows = budget.history({ limit: values.limit === undefined ? 20 : trimAscii(values.limit) });
       if (values.json) return json(rows);
       if (rows.length === 0) return `No payments from ${shortWallet(budget.wallet)} yet.`;
       return rows.map(row => [
@@ -187,7 +223,28 @@ const commands = {
     }
   },
 
+  holds(values, path) {
+    const budget = open(values, path);
+    try {
+      const holds = budget.holds();
+      if (values.json) return json(holds);
+      if (holds.length === 0) return `No open payments from ${shortWallet(budget.wallet)}.`;
+      return holds.map(hold => [
+        hold.id,
+        formatUsd(hold.amount).padStart(10),
+        hold.reason.padEnd(9),
+        `${formatAge(hold.ageMs)} old`.padEnd(12),
+        hold.rail.padEnd(6),
+        hold.to ? `to ${shortWallet(hold.to.toLowerCase())}` : hold.note ?? '',
+        hold.until === null ? 'counts until released' : `counts until ${hold.until.toISOString().replace(/\.\d{3}Z$/, 'Z')}`,
+      ].filter(Boolean).join('  ')).join('\n');
+    } finally {
+      budget.close();
+    }
+  },
+
   release(values, path, [id]) {
+    if (values['all-unknown']) return releaseUnknown(values, path, id);
     if (id === undefined) throw new Usage('release needs the id of an in-flight payment; history shows it');
     if (!existsSync(path)) throw new BudgetError(`no budget file at ${path}`);
     const ledger = new Ledger(path);

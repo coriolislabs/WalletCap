@@ -1,10 +1,10 @@
 # walletcap
 
-> Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour budget that holds across restarts, replicas and payment rails. Published as `walletcap` on npm (Node 22.13+) and PyPI (Python 3.11+), Apache-2.0, with no runtime dependencies. Integrations for x402 clients, Coinbase CDP x402 spend controls, Coinbase AgentKit, the Coinbase Agentic Wallet CLI and payments MCP server, and Coinbase Spend Permissions.
+> Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour budget that holds across restarts, replicas on one host and payment rails. Published as `walletcap` on npm (Node 22.13+) and PyPI (Python 3.11+), Apache-2.0, with no runtime dependencies. Integrations for x402 clients, Coinbase CDP x402 spend controls, Coinbase AgentKit, the Coinbase Agentic Wallet CLI and payments MCP server, and Coinbase Spend Permissions.
 
 - The wallet's owner creates the budget once: `npx walletcap set --wallet <address> --per-payment 50 --per-day 150`. Agents open it with `openBudget({ wallet })` in JavaScript or `open_budget(wallet)` in Python. Opening never creates a budget unless `create: true` is passed, which is for demos and first-run setup.
-- `budget.pay(amount, fn)` in JavaScript, or `with budget.pay(amount):` in Python, reserves the amount, runs the payment and records it. A payment that throws keeps counting unless it is marked as never sent.
-- The count lives in one SQLite file per host that every process opens. JavaScript and Python read and write the same file.
+- `budget.pay(amount, fn)` in JavaScript, or `with budget.pay(amount):` in Python, reserves the amount, runs the payment and records it. A payment that throws keeps counting, as unknown, unless it is marked as never sent: until one window past its settle-by time, or until an owner releases it.
+- The count lives in one SQLite file per host that every process on the host opens. JavaScript and Python read and write the same file. It is one host only: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts, so machines can't share a budget through a shared volume, and multiple hosts need a shared service, which isn't shipped yet.
 - JavaScript integrations: `budget.guard(client)` for any `@x402/core` v2 client, including under `@x402/fetch`; `budget.cdpStore({ asset })` as the `store` for Coinbase CDP's `applySpendControls`; `budget.guardAgentKit(new X402ActionProvider())` for Coinbase AgentKit; `npx walletcap awal` and `npx walletcap awal-mcp` for Coinbase's Agentic Wallet CLI and payments MCP server. Put one of `guard()` or `cdpStore()` on a client: with both, each payment counts twice.
 - On chain: `AccountCapSpender` (Solidity) holds every Coinbase Spend Permission an account grants it to one rolling cap. It is unaudited; testnet only.
 - Crash test: `npx walletcap-crash-test` runs offline and sends nothing. In eight runs on 6 November 2026, CDP's x402 controls set as Coinbase's README shows let $1,600–$1,700 and 1,000 EURC past a $150 cap across a restart, 10 replicas, a shared store and a payee who asks for EURC, and Spend Permissions let $300 past. walletcap's guard, its cdpStore and AccountCapSpender let $0.
@@ -26,7 +26,7 @@
 - [Coinbase Agentic Wallet](https://github.com/coriolislabs/WalletCap#coinbase-agentic-wallet-awal-cli-and-mcp-server): the CLI wrapper and the MCP proxy
 - [Coinbase AgentKit](https://github.com/coriolislabs/WalletCap#coinbase-agentkit): `guardAgentKit()`
 - [Coinbase Spend Permissions, on chain](https://github.com/coriolislabs/WalletCap#coinbase-spend-permissions-on-chain): `AccountCapSpender`
-- [The owner's controls](https://github.com/coriolislabs/WalletCap#the-owners-controls): `walletcap status`, `set`, `freeze`, `unfreeze`, `history` and `release`
+- [The owner's controls](https://github.com/coriolislabs/WalletCap#the-owners-controls): `walletcap status`, `set`, `freeze`, `unfreeze`, `history`, `holds` and `release`
 - [What it doesn't do](https://github.com/coriolislabs/WalletCap#what-it-doesnt-do): payments that don't go through it, one file per host, and payments it can't confirm
 
 ## Optional
