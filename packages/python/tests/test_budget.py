@@ -1063,7 +1063,8 @@ def test_the_quickstart_prints_dollars() -> None:
         text=True,
         encoding="utf-8",
         check=False,
-        env={**os.environ, "PYTHONPATH": str(SOURCE)},
+        # The demo prints with Python's own stdout, which on Windows isn't UTF-8 unless asked.
+        env={**os.environ, "PYTHONPATH": str(SOURCE), "PYTHONIOENCODING": "utf-8"},
     )
     assert run.returncode == 0, run.stderr
     assert "Result: $0.15 of $0.15 spent, $0.00 left." in run.stdout
