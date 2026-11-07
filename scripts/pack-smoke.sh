@@ -31,10 +31,14 @@ python3 - "$work"/dist/walletcap-*.tar.gz <<'PY'
 import sys, tarfile
 names = sorted(tarfile.open(sys.argv[1]).getnames())
 top = names[0].split("/")[0]
-allowed = ("src/walletcap/", "tests/", "pyproject.toml", "hatch_build.py", "pytest.ini", "README.md",
-           "LICENSE", "NOTICE", "PKG-INFO", ".gitignore")
+allowed = ("src/walletcap/", "pyproject.toml", "hatch_build.py", "README.md", "LICENSE", "NOTICE",
+           "PKG-INFO")
 stray = [n for n in names if n != top and not n.removeprefix(top + "/").startswith(allowed)]
 assert not stray, f"the sdist holds more than the Python package: {stray}"
+# The tests stay in the repository (they need spec/vectors, spec/fixtures and the npm package),
+# and hatchling's .gitignore is taken out.
+assert f"{top}/tests" not in names and not any(n.startswith(f"{top}/tests/") for n in names), "the sdist holds tests/"
+assert f"{top}/.gitignore" not in names, "the sdist holds .gitignore"
 for spec in ("src/walletcap/spec/schema.sql", "src/walletcap/spec/upgrade.sql"):
     assert f"{top}/{spec}" in names, f"the sdist lacks {spec}"
 assert not any(n.endswith((".mjs", ".ts", ".sol", ".js")) for n in names), "the sdist holds non-Python sources"

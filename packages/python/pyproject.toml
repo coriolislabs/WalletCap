@@ -51,11 +51,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/walletcap"]
 
-# The sdist is the Python package alone.
+# The sdist is the Python package alone, enough to build the wheel. The tests stay in the
+# repository: they read spec/vectors and spec/fixtures and run the npm package beside this one,
+# none of which a Python sdist carries. The spec copies tests make under src/ stay out, and
+# hatch_build.py adds the spec from the repository's spec/. Hatchling packs the repository's
+# .gitignore into every sdist; hatch_build.py takes it out.
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "tests", "pyproject.toml", "hatch_build.py", "pytest.ini", "README.md", "LICENSE", "NOTICE"]
-# The repository's .gitignore stays out; the spec copies tests make under src/ stay out too, and
-# hatch_build.py adds the spec from the repository's spec/.
+only-include = ["src", "pyproject.toml", "hatch_build.py", "README.md", "LICENSE", "NOTICE"]
 ignore-vcs = true
 exclude = ["src/walletcap/spec", "__pycache__", "*.pyc"]
 

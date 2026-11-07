@@ -21,6 +21,12 @@ class SpecHook(BuildHookInterface):  # type: ignore[type-arg]
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
+        if self.target_name == "sdist":
+            # Hatchling adds the repository's .gitignore to every sdist; it isn't the package's.
+            force_include = build_data["force_include"]
+            ignored = [path for path, target in force_include.items() if target == ".gitignore"]
+            for source in ignored:
+                del force_include[source]
         spec = Path(self.root).parent.parent / "spec"
         if not all((spec / name).is_file() for name in FILES):
             if not all(

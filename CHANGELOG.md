@@ -170,7 +170,8 @@ Behaviour:
 - The repository is laid out by what ships: `packages/js` (npm `walletcap`), `packages/python`
   (PyPI `walletcap`), `packages/mcp` (npm `walletcap-mcp`), `contracts/` (was `solidity/`),
   `bench/crash-test/` (was `crash-test/`) and `spec/`. One npm workspace, with one lockfile.
-- The PyPI source distribution ships only the Python package and the SQL it runs.
+- The PyPI source distribution ships only the Python package and the SQL it runs: no tests,
+  which need the repository's spec vectors, fixtures and npm package, and no `.gitignore`.
 - The npm package reads no file of its own at run time: the build compiles `spec/schema.sql` and
   `spec/upgrade.sql` into its JavaScript, so a bundler such as esbuild can bundle it. The two
   files still ship in `dist/spec/`, to read.
