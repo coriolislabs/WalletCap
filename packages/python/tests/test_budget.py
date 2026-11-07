@@ -1020,3 +1020,27 @@ def test_a_refusal_and_the_holds_list_say_what_a_cdp_payment_is(
     )
     history = _cli(path, "history")
     assert re.search(r"refused .*CDP signed it: void it only if the chain shows", history.stdout)
+
+
+def test_the_version_comes_from_the_package_metadata() -> None:
+    import tomllib
+
+    import walletcap
+
+    with (ROOT / "pyproject.toml").open("rb") as file:
+        assert walletcap.__version__ == tomllib.load(file)["project"]["version"]
+    assert _cli(Path("unused.sqlite"), "--version").stdout.strip() == walletcap.__version__
+
+
+def test_the_quickstart_prints_dollars() -> None:
+    run = subprocess.run(
+        [sys.executable, str(REPO / "examples" / "quickstart" / "quickstart.py")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(SOURCE)},
+    )
+    assert run.returncode == 0, run.stderr
+    assert "Result: $0.15 of $0.15 spent, $0.00 left." in run.stdout
+    assert "Spent before the restart: $0.15; after it: $0.15" in run.stdout
+    assert re.search(r"\b150000\b", run.stdout) is None

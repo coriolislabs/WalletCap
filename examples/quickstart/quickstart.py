@@ -21,7 +21,7 @@ for name in ("schema.sql", "upgrade.sql"):
     target.parent.mkdir(exist_ok=True)
     target.write_bytes((ROOT / "spec" / name).read_bytes())
 
-from walletcap import BudgetRefused, open_budget
+from walletcap import BudgetRefused, format_usd, open_budget
 
 PATH = Path(__file__).with_name("demo.sqlite")
 WALLET = "0xd797ead28c38575fdf4fc523866287372340ca02"
@@ -67,12 +67,19 @@ with warnings.catch_warnings(record=True) as caught:
     )
     messages = [str(item.message) for item in caught]
 print(f"\nRestart asks for looser limits; stored limits stay: {messages[0] if messages else 'no warning'}")
-print(f"Count before restart: {before_restart}; after restart: {restarted.status().spent}\n")
+print(
+    f"Spent before the restart: {format_usd(before_restart)}; "
+    f"after it: {format_usd(restarted.status().spent)}\n"
+)
 attempt(restarted, "the same $0.05 after restart", "$0.05")
 
 final = open_budget(WALLET, path=PATH)
 print(f"\nFinal: {final.status().summary}")
-print(f"Result: {final.status().spent} of {final.status().cap} spent, {final.status().remaining} left.")
+status = final.status()
+print(
+    f"Result: {format_usd(status.spent)} of {format_usd(status.cap)} spent, "
+    f"{format_usd(status.remaining)} left."
+)
 print(f"History: {len(final.history())} payments; the first is {final.history()[0].status}.")
 final.close()
 restarted.close()

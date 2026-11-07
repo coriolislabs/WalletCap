@@ -11,6 +11,7 @@ import {
   defaultBudgetPath, describeLimits, expandHome, formatAge, formatUsd, formatWindow, normalizeWallet, shortWallet, storedWalletName, toWindowMs, trimAscii,
 } from '../core/money.js';
 import { openOwner, type Owner } from '../core/owner.js';
+import { toWire } from '../core/wire.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -92,18 +93,9 @@ interface Values {
 
 class Usage extends Error {}
 
-// --json prints what the Python CLI prints, field for field: snake_case keys, amounts and counts
-// as decimal strings, times as ISO strings, and null for a field with no value.
-const snake = (key: string): string => key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-const wire = (value: unknown): unknown => {
-  if (value === undefined || value === null) return null;
-  if (typeof value === 'bigint') return value.toString();
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map(wire);
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, entry]) => [snake(key), wire(entry)]));
-  return value;
-};
-const json = (value: unknown): string => JSON.stringify(wire(value), null, 2);
+// --json prints what the Python CLI prints, field for field (core/wire.ts): snake_case keys,
+// amounts and counts as decimal strings, times as ISO strings, and null for a field with no value.
+const json = (value: unknown): string => JSON.stringify(toWire(value), null, 2);
 
 const pathOf = (values: Values): string => resolve(expandHome(values.path ?? defaultBudgetPath()));
 
@@ -354,7 +346,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
 // Coinbase's Agentic Wallet CLI, with every payment counted.
 const [first, ...after] = process.argv.slice(2);
-if (first === 'awal') {
+if (first === 'awal-mcp') {
+  // 0.3's MCP proxy is its own npm package now.
+  process.stderr.write('walletcap awal-mcp is now its own package: npx walletcap-mcp --wallet <address> [--path <file>] [--allow-tool <name>]\n');
+  process.exitCode = 2;
+} else if (first === 'awal') {
   const { awalMain } = await import('./awal.js');
   process.exitCode = await awalMain(after);
 } else {

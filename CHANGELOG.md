@@ -168,6 +168,12 @@ Behaviour:
 
 ### Changed
 
+- Every result the payer and owner handles return has a `toJSON()`, kept out of its keys, that
+  gives the shape both CLIs print with `--json`, so `JSON.stringify()` of a result doesn't throw
+  on a bigint.
+- `walletcap awal-mcp` says it is now `npx walletcap-mcp` and exits 2.
+- The quickstarts print dollars.
+
 - The repository is laid out by what ships: `packages/js` (npm `walletcap`), `packages/python`
   (PyPI `walletcap`), `packages/mcp` (npm `walletcap-mcp`), `contracts/` (was `solidity/`),
   `bench/crash-test/` (was `crash-test/`) and `spec/`. One npm workspace, with one lockfile.
@@ -189,74 +195,8 @@ Behaviour:
 
 ### Kept from 0.3.0
 
-Every fix in 0.3.0 still holds. The tests that show it, in `packages/js/test`, `packages/mcp/test`
-and `packages/python/tests`:
-
-- **An error never settles a payment.** JavaScript: "an error never settles a payment: an unknown
-  outcome counts until its owner releases it", "an unknown outcome with a settle-by time counts
-  until one window past it", and in the Agentic Wallet tests "a send whose outcome is unknown
-  keeps counting until its owner releases it". Python: `test_an_error_never_settles_a_payment`,
-  `test_an_unknown_outcome_with_a_settle_by_time_counts_one_window_past_it`. Vector: "an open
-  hold counts until evidence settles or voids it, however long".
-- **A commit never shortens a hold.** JavaScript: "a settlement never shortens a hold: it counts
-  until one window past the hold's settle-by time", "a payee's word that a payment settled can't
-  free the budget while the authorization is redeemable" and "the payee's word that a payment on
-  handed-in terms settled doesn't end its hold early". Python:
-  `test_a_settlement_never_shortens_a_hold`. Vector: "a settlement never shortens a hold".
-- **x402 terms over 3600 s are filtered** (`MAX_PAYMENT_TIMEOUT_SECONDS`). JavaScript: "terms
-  valid longer than an hour are passed over for shorter ones on offer", "an authorization valid
-  longer than an hour is refused before it is signed", and "the wallet is handed only the terms
-  walletcap can price and bound; the rest are left out, not refused".
-- **Discovered terms are handed to the Agentic Wallet.** JavaScript: "the wallet is handed the
-  terms walletcap discovered, so the payee's word can't end the hold early", and "npx walletcap
-  awal: payments are counted, everything else is awal".
-- **Permit2 deadlines are read.** JavaScript: "a Permit2 payment, or one whose expiry walletcap
-  can't read, counts until it can no longer settle".
-- **CDP rows count for an hour and a minute.** JavaScript: "a CDP payment counts until an hour
-  after it is recorded, plus one window: its authorization can be redeemed that long", and "an
-  entry CDP backdates still counts from the ledger's own time".
-- **Names are canonical.** JavaScript: "checksummed, lowercase and CAIP-10 addresses spend from
-  one budget", and "a checksummed or CAIP-10 wallet spends from the one lowercase budget". Python:
-  `test_a_checksummed_address_names_the_one_lowercase_budget`.
-- **`PaymentNotRecorded`.** JavaScript: "a payment that went through but cannot be recorded
-  throws PaymentNotRecorded, which is none of the other errors", "a settlement the guard cannot
-  record throws PaymentNotRecorded, and the payment keeps counting", "a refusal or a lost answer
-  the guard can't record throws PaymentNotRecorded too", and "a budget that can't be written after
-  the wallet answered raises PaymentNotRecorded, not one of the errors code retries on". Python:
-  `test_a_payment_that_went_through_but_was_not_recorded`,
-  `test_the_four_errors_share_no_base_and_none_is_a_value_error`.
-- **`BudgetRefused.brief` is what agents see.** JavaScript: "the agent is told why the guard
-  refused, not which holds its owner could release", "a refusal CDP passes on to the agent names
-  no holds and no release instructions", and "the agent is told why a payment was refused, not
-  which holds its owner could release". walletcap-mcp: "the agent is told why a payment was
-  refused, not which holds its owner could void".
-- **The bulk release follows the settle-by and 61-minute rules,** the second now for x402
-  holds only (above). JavaScript: "a bulk release keeps a payment its payee could still settle,
-  and clears refused ones", and "a bulk release keeps a hold with no settle-by time for an hour
-  and a minute, and a CDP roll-back until it can no longer settle". Python:
-  `test_a_bulk_release_keeps_what_the_payee_could_still_settle`,
-  `test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes`. Vector: "the
-  owner's bulk release voids only what can no longer settle".
-- **The schema-2 upgrade.** JavaScript: "a 0.2.x file is upgraded on open: every spelling of a
-  wallet becomes one budget, and every payment still counts", "the upgrade says what it did: a
-  warning names the merged limits, and a wallet in two units is frozen, not the file", and in
-  `upgrade.test.mjs` "every payment in a schema 1 file counts as 0.3.0 counted it" (and schema 2)
-  and "a crash in the middle of the upgrade leaves the file as it was". Python:
-  `test_a_0_2_file_is_upgraded_on_open`, `test_the_upgrade_says_what_it_did`,
-  `test_every_payment_counts_as_0_3_0_counted_it`,
-  `test_a_crash_mid_upgrade_leaves_the_file_as_it_was` and
-  `test_javascript_and_python_open_one_old_file_at_once`.
-- **The rest of 0.3.0:** the clock is not an option ("the clock is not an option: no process can
-  move its own time to empty the budget", `test_the_clock_is_not_an_option`); a settle-by time
-  that isn't after now is refused ("a settle-by time that isn't after now is refused: a payment
-  can't settle before it is made", `test_a_settle_by_time_that_isnt_after_now_is_refused`); no
-  hold lapses while its payment can still settle (`test_a_hold_never_lapses_while_its_payment_can_still_settle`);
-  a naive datetime is refused (`test_a_naive_settle_by_time_is_refused`); amounts stop at
-  `MAX_AMOUNT` and never overflow ("amounts and limits stop at a billion dollars, so no sum of
-  payments can overflow"); the time is read once the write lock is held ("the ledger reads the
-  time once it holds the write lock, so waiting for another process can't make it stale",
-  `test_the_time_is_read_once_the_write_lock_is_held`); and amounts read only ASCII digits, the
-  same way in both languages (`spec/vectors/money.json`).
+Every fix in 0.3.0 still holds; the pull request that made 0.4.0 names the tests in both suites
+that show each one.
 
 ## 0.3.0 — 2026-11-06
 

@@ -22,6 +22,7 @@ import {
   checkKeys, defaultBudgetPath, describeLimits, type Dollars, expandHome, formatUsd, formatWindow, type LimitOptions, type Limits, limitFlags,
   type Micros, normalizeWallet, parseLimits, shortWallet, toMicros,
 } from './money.js';
+import { withJSON } from './wire.js';
 
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
@@ -225,7 +226,7 @@ const noteOf = (info: Info): string | undefined => textOf(info.note) ?? (info.ne
 /** Internal: a history row as a Payment. */
 export function paymentOf(row: PaymentRow): Payment {
   const info = parseInfo(row.info);
-  return {
+  return withJSON({
     id: row.payment,
     amount: row.amount,
     status: label(row, info),
@@ -235,18 +236,18 @@ export function paymentOf(row: PaymentRow): Payment {
     to: textOf(info.to) ?? textOf(info.payTo) ?? null,
     note: noteOf(info) ?? null,
     tx: row.settled_by ?? textOf(info.tx) ?? null,
-  };
+  });
 }
 
 /** Internal: a payment row as its owner sees it. */
 export function recordOf(row: PaymentRow): PaymentRecord {
-  return { ...paymentOf(row), wallet: row.wallet, state: row.state, settlesBy: settlesByOf(row), countsUntil: countsUntilOf(row) };
+  return withJSON({ ...paymentOf(row), wallet: row.wallet, state: row.state, settlesBy: settlesByOf(row), countsUntil: countsUntilOf(row) });
 }
 
 /** Internal: a counting row of a held payment. */
 export function heldPaymentOf(row: PaymentRow): HeldPayment {
   const info = parseInfo(row.info);
-  return {
+  return withJSON({
     id: row.payment,
     amount: row.amount,
     reason: row.outcome ?? 'in flight',
@@ -258,7 +259,7 @@ export function heldPaymentOf(row: PaymentRow): HeldPayment {
     to: textOf(info.to) ?? textOf(info.payTo) ?? null,
     note: noteOf(info) ?? null,
     error: row.noted ?? textOf(info.error) ?? null,
-  };
+  });
 }
 
 /** Internal: a status row as a Status. */
@@ -276,7 +277,7 @@ export function statusOf(row: StatusRow, path: string): Status {
     payments: row.payments,
     frozen: row.frozen_at !== null,
   };
-  return { ...status, summary: summarize(status) };
+  return withJSON({ ...status, summary: summarize(status) });
 }
 
 function summarize({ wallet, cap, windowMs, perPayment, maxPayments, spent, inFlight, remaining, frozen }: Omit<Status, 'summary' | 'path' | 'payments'>): string {
@@ -486,9 +487,11 @@ export class Budget {
   /** Whether `amount` would be paid right now, without holding it. */
   async check(amount: Dollars): Promise<Check> {
     const { refusal, remaining } = await this.#ledger.check(this.#wallet, positive(toMicros(amount)), { limits: this.#limits });
-    return refusal === null
-      ? { ok: true, remaining, code: null, source: null, message: null, brief: null }
-      : { ok: false, remaining, code: refusal.code, source: refusal.source, message: refusal.message, brief: refusal.brief };
+    return withJSON(
+      refusal === null
+        ? { ok: true, remaining, code: null, source: null, message: null, brief: null }
+        : { ok: false, remaining, code: refusal.code, source: refusal.source, message: refusal.message, brief: refusal.brief },
+    );
   }
 
   /**

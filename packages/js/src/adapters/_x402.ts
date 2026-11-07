@@ -136,7 +136,7 @@ export const settlesWithinSeconds = (requirements: PaymentRequirements): number 
 /**
  * USD stablecoins the budget counts at face value, by CAIP-2 network. The EVM entries are from
  * x402 2.28.0's own DEFAULT_ASSETS, plus Circle's native USDC on Optimism and Solana. Add other
- * USD-pegged stablecoins with guard(client, { assets }); their decimals can't be changed.
+ * USD-pegged stablecoins with guard(client, budget, { assets }); their decimals can't be changed.
  */
 export const USD_ASSETS: readonly Readonly<AssetEntry>[] = Object.freeze([
   { network: 'eip155:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },

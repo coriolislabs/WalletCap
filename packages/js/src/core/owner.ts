@@ -15,6 +15,7 @@ import {
 import {
   checkKeys, defaultBudgetPath, DOLLAR_UNITS, expandHome, type LimitOptions, type Micros, normalizeWallet, parseLimits, shortWallet, toWindowMs, type Window,
 } from './money.js';
+import { withJSON } from './wire.js';
 
 const OPTION_KEYS = new Set(['path', 'create', 'busyTimeoutMs']);
 const LIMIT_KEYS = new Set(['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments']);
@@ -76,15 +77,17 @@ export class Owner {
 
   /** Every budget in the file, by name. */
   async budgets(): Promise<BudgetLimits[]> {
-    return (await this.#ledger.budgets()).map(row => ({
-      wallet: row.wallet,
-      unit: row.unit,
-      cap: row.cap,
-      windowMs: row.window_ms,
-      perPayment: row.per_payment,
-      maxPayments: row.max_payments,
-      frozen: row.frozen_at !== null,
-    }));
+    return (await this.#ledger.budgets()).map(row =>
+      withJSON({
+        wallet: row.wallet,
+        unit: row.unit,
+        cap: row.cap,
+        windowMs: row.window_ms,
+        perPayment: row.per_payment,
+        maxPayments: row.max_payments,
+        frozen: row.frozen_at !== null,
+      }),
+    );
   }
 
   /** What counts against `wallet`'s budget now. */
@@ -169,7 +172,7 @@ export class Owner {
   async voidUnknown(wallet: string, { olderThan }: { olderThan: Window }): Promise<VoidedPayment[]> {
     const age = toWindowMs(olderThan, 'olderThan');
     const voided = await this.#ledger.voidUnknown(wallet, age, { evidence: 'voided by its owner: unknown or refused outcome' });
-    return voided.map(row => ({ id: row.payment, amount: row.amount }));
+    return voided.map(row => withJSON({ id: row.payment, amount: row.amount }));
   }
 
   close(): void { this.#ledger.close(); }

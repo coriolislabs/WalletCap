@@ -13,6 +13,7 @@ limits, freezes, and voids or settles payments with evidence.
 """
 
 from walletcap._ledger import MIN_SQLITE_VERSION, SCHEMA_VERSION
+from walletcap._version import version as _version
 from walletcap.budget import (
     Budget,
     Check,
@@ -47,7 +48,7 @@ from walletcap.money import (
 )
 from walletcap.owner import BudgetLimits, Owner, VoidedPayment, open_owner
 
-__version__ = "0.4.0"
+__version__ = _version()
 
 __all__ = [
     "MAX_AMOUNT",

@@ -5,7 +5,7 @@
 import { rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BudgetRefused, openBudget } from '../../packages/js/dist/index.js';
+import { BudgetRefused, formatUsd, openBudget } from '../../packages/js/dist/index.js';
 
 const PATH = join(dirname(fileURLToPath(import.meta.url)), 'demo.sqlite');
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
@@ -48,14 +48,14 @@ const restarted = await openBudget({
   onWarning: message => warnings.push(message),
 });
 console.log(`\nRestart asks for looser limits; stored limits stay: ${warnings[0] ?? 'no warning'}`);
-console.log(`Count before restart: ${beforeRestart}; after restart: ${(await restarted.status()).spent}\n`);
+console.log(`Spent before the restart: ${formatUsd(beforeRestart)}; after it: ${formatUsd((await restarted.status()).spent)}\n`);
 await attempt(restarted, 'the same $0.05 after restart', '$0.05');
 
 const final = await openBudget({ wallet: WALLET, path: PATH });
 const status = await final.status();
 const history = await final.history();
 console.log(`\nFinal: ${status.summary}`);
-console.log(`Result: ${status.spent} of ${status.cap} spent, ${status.remaining} left.`);
+console.log(`Result: ${formatUsd(status.spent)} of ${formatUsd(status.cap)} spent, ${formatUsd(status.remaining)} left.`);
 console.log(`History: ${history.length} payments; the first is ${history[0].status}.`);
 final.close();
 restarted.close();

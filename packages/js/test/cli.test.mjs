@@ -204,3 +204,40 @@ test('mistakes are reported, not guessed', async () => {
   assert.match(ambiguous.err, /holds 2 budgets; pick one with --wallet/);
   assert.match(cli(path, '--version').out, /^\d+\.\d+\.\d+\n$/);
 });
+
+test('every result writes itself as JSON in the shape `--json` prints, so JSON.stringify never meets a bigint', async () => {
+  const path = join(DIR, 'json.sqlite');
+  const budget = await openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
+  await budget.pay('$2', async () => `0x${'ab'.repeat(32)}`);
+  const held = await budget.hold('$1');
+  await held.note('unknown', 'rpc timeout');
+  const status = await budget.status();
+  // toJSON is kept out of the result's own keys.
+  assert.equal(Object.keys(status).includes('toJSON'), false);
+  const written = JSON.parse(JSON.stringify(status));
+  assert.deepEqual(written, JSON.parse(cli(path, 'status', '--json', '--wallet', WALLET).out));
+  assert.deepEqual([written.spent, written.in_flight, written.window_ms], ['2000000', '1000000', '86400000']);
+  for (const result of [await budget.check('$1'), await budget.check('$100'), ...(await budget.history()), ...(await budget.holds())]) {
+    const wire = JSON.parse(JSON.stringify(result));
+    assert.ok(Object.keys(wire).every(key => /^[a-z_]+$/.test(key)), Object.keys(wire).join(' '));
+    assert.equal(typeof (wire.amount ?? wire.remaining), 'string');
+  }
+  // A hold's age moves between the two reads; every other field matches.
+  const ageless = holds => holds.map(({ age_ms: _age, ...hold }) => hold);
+  assert.deepEqual(ageless(JSON.parse(JSON.stringify(await budget.holds()))), ageless(JSON.parse(cli(path, 'holds', '--json', '--wallet', WALLET).out)));
+  budget.close();
+});
+
+test('walletcap awal-mcp points to npx walletcap-mcp, its own package now', () => {
+  const moved = cli(join(DIR, 'awal-mcp.sqlite'), 'awal-mcp', '--wallet', WALLET);
+  assert.equal(moved.code, 2);
+  assert.match(moved.err, /npx walletcap-mcp --wallet/);
+});
+
+test('the quickstart prints dollars', () => {
+  const run = spawnSync(process.execPath, [fileURLToPath(new URL('../../../examples/quickstart/quickstart.mjs', import.meta.url))], { encoding: 'utf8' });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /Result: \$0\.15 of \$0\.15 spent, \$0\.00 left\./);
+  assert.match(run.stdout, /Spent before the restart: \$0\.15; after it: \$0\.15/);
+  assert.doesNotMatch(run.stdout, /\b150000\b/);
+});

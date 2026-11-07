@@ -26,11 +26,6 @@ export const MIN_SQLITE_VERSION = '3.37.0';
  * The rule is in spec/schema.sql (void_unknown); this is its value, for messages.
  */
 export const UNBOUNDED_HOLD_MS = 3_660_000n;
-/**
- * Internal: the key of Reservation's method that gives an open payment, once, the last moment
- * it could still settle: { until } or { withinMs } from the ledger's now. Not exported.
- */
-export const SETTLES_BY = Symbol('walletcap/settles-by');
 /** The most a time or a duration can be, in milliseconds: about 31,700 years. */
 export const MAX_TIME = 10n ** 15n;
 /** The tables walletcap 0.2 and 0.3 create, empty, in a newer file before they refuse it: spend first (it references budgets). */

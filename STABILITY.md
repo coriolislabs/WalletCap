@@ -30,8 +30,18 @@ Each entry point, and the names it exports. Exported TypeScript types are public
 | `walletcap/agentkit` | `guardAgentKit`; type `AssetEntry` |
 | `walletcap/agentic` | `guardAgenticWallet`, `discoverRequirements`, `usdcAtomic`, `AWAL_CHAINS`; types `WalletRequest`, `RequestData`, `PaymentRequired`, `GuardedWallet`, `FetchLike` |
 
-Every method of the payer and owner handles returns a Promise. The package has no runtime
-dependencies, and adding one is a breaking change.
+Every method of the payer and owner handles returns a Promise, except `close()` and
+`[Symbol.dispose]()`, which close the file at once and return nothing; `[Symbol.asyncDispose]()`
+returns a Promise, for `await using`. The CDP store's `close()` does nothing and returns nothing:
+the budget's own `close()` closes the file. The package has no runtime dependencies, and adding
+one is a breaking change.
+
+Every result the handles return (`check`, `status`, `history`, `holds`, `payment`, `budgets`,
+`voidUnknown`) is a plain object with a `toJSON()` kept out of its keys. It gives the shape both
+CLIs print with `--json`: snake_case keys, amounts and counts as decimal strings, times as ISO-8601
+UTC to the millisecond, and `null` for a field with no value. So `JSON.stringify(await
+budget.status())` doesn't throw on a bigint, and prints what `walletcap status --json --wallet`
+prints for that budget, its `path` included.
 
 The `.d.ts` files compile on their own, with `skipLibCheck` off, `lib: ["es2022"]`, no
 `@types/node`, and `nodenext` or `bundler` resolution; a test compiles a project that way against
