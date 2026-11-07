@@ -33,7 +33,8 @@ run stops before anything is built.
    runs both suites, packs the npm tarball, the wheel and the sdist, then publishes them.
 
 To run it again for an existing tag (a failed publish, say): Actions → Publish → Run workflow,
-and give the tag. A run by hand publishes nothing without one.
+pick the tag under "Use workflow from", and give the same tag. The environments allow only the
+release tags, so a run from `main` or another branch stops before anything is built.
 
 ## The first release of walletcap-mcp
 

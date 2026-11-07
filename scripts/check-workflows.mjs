@@ -4,7 +4,8 @@
 // - publish.yml grants contents: read at the top, and id-token: write only to the four publish
 //   jobs, which check out nothing, build nothing and only publish what a build job packed.
 // - Every npm ci and npm install in publish.yml skips install scripts.
-// - A run by hand names a tag; the PyPI build runs the suite on the locked dev group, as CI does.
+// - A run by hand names a tag and runs from it; the PyPI build runs the suite on the locked dev
+//   group, as CI does.
 import { readFileSync } from 'node:fs';
 
 const failures = [];
@@ -61,6 +62,10 @@ if (!/workflow_dispatch:\n\s+inputs:\n\s+tag:\n(?:\s+.*\n)*?\s+required: true/.t
   fail('publish.yml: a run by hand must name the tag it publishes (inputs.tag, required)');
 }
 if (!/git merge-base --is-ancestor "refs\/tags\/\$TAG" origin\/main/.test(publish)) fail('publish.yml: the tag is not checked to be on main');
+// The environments allow only the release tags: a run from a branch must stop before it builds.
+if (!/REF: \$\{\{ github\.ref \}\}/.test(publish) || !/if \[ "\$REF" != "refs\/tags\/\$tag" \]; then\n\s+echo [^\n]*\n\s+exit 1/.test(publish)) {
+  fail('publish.yml: a run is not checked to be from the tag it publishes (github.ref)');
+}
 if (!/uv run --locked pytest -q/.test(jobs.get('build-walletcap') ?? '')) {
   fail('publish.yml: the PyPI build does not run the suite on the locked dev group (uv run --locked pytest -q)');
 }

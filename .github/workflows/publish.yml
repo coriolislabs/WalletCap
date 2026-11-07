@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Publish a release. RELEASING.md has the steps, the first release of walletcap-mcp included.
 #
-# A published GitHub Release, or a run by hand naming its tag, decides what goes out:
+# A published GitHub Release, or a run by hand from its tag and naming it, decides what goes out:
 # - v<version>: walletcap to PyPI (packages/python) and npm (packages/js). Both carry that version.
 # - mcp-v<version>: walletcap-mcp to npm (packages/mcp).
 # - crash-test-v<version>: walletcap-crash-test to npm (bench/crash-test).
@@ -41,6 +41,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          REF: ${{ github.ref }}
         run: |
           tag="${RELEASE_TAG:-$INPUT_TAG}"
           case "$tag" in
@@ -49,6 +50,12 @@ jobs:
             crash-test-v[0-9]*) kind=crash-test ;;
             *) echo "not a release tag: '$tag'" >&2; exit 1 ;;
           esac
+          # The pypi and npm environments allow only the release tags: a run from a branch would
+          # build and pack, then be refused at the publish jobs. Stop it here instead.
+          if [ "$REF" != "refs/tags/$tag" ]; then
+            echo "this run is from $REF: run it from the tag, Run workflow → Use workflow from → $tag" >&2
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
