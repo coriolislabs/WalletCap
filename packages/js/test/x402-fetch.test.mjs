@@ -20,7 +20,13 @@ try {
 }
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-fetch-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 const TX = `0x${'cd'.repeat(32)}`;
 
 test('a guarded @x402/fetch pays, keeps counting what the payee refused, and stops at the cap', {
@@ -31,14 +37,18 @@ test('a guarded @x402/fetch pays, keeps counting what the payee refused, and sto
     const required = {
       x402Version: 2,
       resource: { url: `http://127.0.0.1${request.url}`, description: 'paid', mimeType: 'text/plain' },
-      accepts: [{ scheme: 'exact', network: NETWORK, asset: USDC, amount: '50000', payTo: PAY_TO, maxTimeoutSeconds: 300, extra: { name: 'USDC', version: '2' } }],
+      accepts: [
+        { scheme: 'exact', network: NETWORK, asset: USDC, amount: '50000', payTo: PAY_TO, maxTimeoutSeconds: 300, extra: { name: 'USDC', version: '2' } },
+      ],
     };
     if (!request.headers['payment-signature'] || answer === 'refuse') {
       response.writeHead(402, { 'PAYMENT-REQUIRED': fetchKit.encodePaymentRequiredHeader(required) });
       response.end();
       return;
     }
-    response.writeHead(200, { 'PAYMENT-RESPONSE': fetchKit.encodePaymentResponseHeader({ success: true, transaction: TX, network: NETWORK, payer: kit.account.address }) });
+    response.writeHead(200, {
+      'PAYMENT-RESPONSE': fetchKit.encodePaymentResponseHeader({ success: true, transaction: TX, network: NETWORK, payer: kit.account.address }),
+    });
     response.end('paid content');
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -54,7 +64,10 @@ test('a guarded @x402/fetch pays, keeps counting what the payee refused, and sto
     await assert.rejects(fetchPaid(url), /Failed to create payment payload: \$0\.05 would bring .* over its \$0\.15 limit/);
     const status = await budget.status();
     assert.deepEqual([status.spent, status.inFlight], [100_000n, 50_000n]);
-    assert.deepEqual((await budget.history()).map(entry => entry.status), ['refused', 'settled', 'settled']);
+    assert.deepEqual(
+      (await budget.history()).map(entry => entry.status),
+      ['refused', 'settled', 'settled'],
+    );
   } finally {
     server.close();
   }

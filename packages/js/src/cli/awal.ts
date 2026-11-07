@@ -32,7 +32,9 @@ export function locateAwal(env: NodeJS.ProcessEnv = process.env, from: string = 
   if (env.WALLETCAP_AWAL) candidates.push(resolve(env.WALLETCAP_AWAL));
   try {
     candidates.push(dirname(createRequire(join(from, 'noop.js')).resolve('awal/package.json')));
-  } catch { /* not installed here */ }
+  } catch {
+    /* not installed here */
+  }
   const found = candidates.find(dir => existsSync(join(dir, 'dist', 'ipcClient.js')));
   if (found === undefined) throw new BudgetUnavailable('walletcap awal needs the awal CLI: npm install awal, or set WALLETCAP_AWAL to its package directory');
   return found;
@@ -55,7 +57,6 @@ async function openGuard(env: NodeJS.ProcessEnv, request: WalletRequest, options
   return guardAgenticWallet(budget, { request });
 }
 
-
 const PAY_OPTIONS = {
   method: { type: 'string', short: 'X', default: 'GET' },
   data: { type: 'string', short: 'd' },
@@ -72,11 +73,19 @@ type Values = Record<string, string | boolean | undefined>;
 
 function payData(url: string, values: Values): RequestData {
   const parsed = new URL(url);
-  const data: RequestData = { baseURL: `${parsed.protocol}//${parsed.host}`, path: parsed.pathname + parsed.search, method: String(values.method ?? 'GET').toUpperCase() };
+  const data: RequestData = {
+    baseURL: `${parsed.protocol}//${parsed.host}`,
+    path: parsed.pathname + parsed.search,
+    method: String(values.method ?? 'GET').toUpperCase(),
+  };
   const jsonOption = (name: string, key: string): void => {
     const value = values[name];
     if (value === undefined) return;
-    try { data[key] = JSON.parse(String(value)); } catch { throw new UsageError(`The --${name} option must be valid JSON`); }
+    try {
+      data[key] = JSON.parse(String(value));
+    } catch {
+      throw new UsageError(`The --${name} option must be valid JSON`);
+    }
   };
   jsonOption('data', 'body');
   jsonOption('query', 'queryParams');
@@ -92,9 +101,20 @@ function payData(url: string, values: Values): RequestData {
 }
 
 /** Run one awal command; send and x402 pay go through the budget. Returns the exit code. */
-export async function awalMain(argv: string[], { env = process.env, stdout = process.stdout, stderr = process.stderr, request }: {
-  env?: NodeJS.ProcessEnv; stdout?: Writable; stderr?: Writable; request?: WalletRequest;
-} = {}): Promise<number> {
+export async function awalMain(
+  argv: string[],
+  {
+    env = process.env,
+    stdout = process.stdout,
+    stderr = process.stderr,
+    request,
+  }: {
+    env?: NodeJS.ProcessEnv;
+    stdout?: Writable;
+    stderr?: Writable;
+    request?: WalletRequest;
+  } = {},
+): Promise<number> {
   if (argv.length === 0 || argv[0] === '--walletcap-help') {
     stdout.write(`${HELP}\n`);
     return 0;
@@ -116,7 +136,10 @@ export async function awalMain(argv: string[], { env = process.env, stdout = pro
   let values: Values;
   let positionals: string[];
   try {
-    ({ values, positionals } = parseArgs({ args, options: argv[0] === 'send' ? SEND_OPTIONS : PAY_OPTIONS, allowPositionals: true, strict: true }) as { values: Values; positionals: string[] });
+    ({ values, positionals } = parseArgs({ args, options: argv[0] === 'send' ? SEND_OPTIONS : PAY_OPTIONS, allowPositionals: true, strict: true }) as {
+      values: Values;
+      positionals: string[];
+    });
   } catch (error) {
     stderr.write(`${messageOf(error)}\n`);
     return 2;
@@ -128,28 +151,40 @@ export async function awalMain(argv: string[], { env = process.env, stdout = pro
   };
   let guard: GuardedWallet;
   try {
-    guard = await openGuard(env, request ?? await walletRequest(awalDir ?? ''));
+    guard = await openGuard(env, request ?? (await walletRequest(awalDir ?? '')));
   } catch (error) {
     return fail('BUDGET_UNAVAILABLE', `walletcap: ${messageOf(error)}`);
   }
   try {
     if (argv[0] === 'send') {
       const [amount, recipient] = positionals;
-      if (amount === undefined || recipient === undefined) return fail('INVALID_ARGUMENTS', 'usage: send <amount> <recipient> [--chain <chain>] [--asset USDC]');
+      if (amount === undefined || recipient === undefined)
+        return fail('INVALID_ARGUMENTS', 'usage: send <amount> <recipient> [--chain <chain>] [--asset USDC]');
       if (!/^0x[0-9a-fA-F]{40}$/.test(recipient) && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient)) {
         return fail('INVALID_RECIPIENT', 'walletcap awal send takes an address (0x… or Solana), not an ENS name');
       }
       const asset = String(values.asset).toUpperCase();
       if (asset !== 'USDC') throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset}, so it refuses this send`);
-      const result = await guard.request('send-transaction', { recipient, amountAtomic: usdcAtomic(amount), asset, chain: values.chain }) as { error?: unknown; transactionHash?: unknown } | null;
+      const result = (await guard.request('send-transaction', { recipient, amountAtomic: usdcAtomic(amount), asset, chain: values.chain })) as {
+        error?: unknown;
+        transactionHash?: unknown;
+      } | null;
       if (result?.error) return fail('TRANSACTION_FAILED', `Transaction failed: ${result.error}`);
-      stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `Sent ${formatUsd(BigInt(usdcAtomic(amount)))} to ${recipient}${result?.transactionHash ? ` (${result.transactionHash})` : ''}\n`);
+      stdout.write(
+        values.json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : `Sent ${formatUsd(BigInt(usdcAtomic(amount)))} to ${recipient}${result?.transactionHash ? ` (${result.transactionHash})` : ''}\n`,
+      );
       return 0;
     }
     const [url] = positionals;
     if (url === undefined) return fail('INVALID_ARGUMENTS', 'usage: x402 pay <url> [options]');
-    const result = await guard.request('make-x402-request', payData(url, values)) as { status?: unknown; data?: unknown } | null;
-    stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `Request completed (HTTP ${result?.status})\n${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? null, null, 2)}\n`);
+    const result = (await guard.request('make-x402-request', payData(url, values))) as { status?: unknown; data?: unknown } | null;
+    stdout.write(
+      values.json
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : `Request completed (HTTP ${result?.status})\n${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? null, null, 2)}\n`,
+    );
     return 0;
   } catch (error) {
     if (error instanceof BudgetRefused) return fail('BUDGET_REFUSED', `walletcap refused this payment: ${error.message}`);
@@ -158,4 +193,3 @@ export async function awalMain(argv: string[], { env = process.env, stdout = pro
     guard.budget.close();
   }
 }
-

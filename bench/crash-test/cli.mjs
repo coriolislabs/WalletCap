@@ -31,7 +31,15 @@ const EURC_1000 = { asset: 'EURC', atomic: '1000000000' };
 export const SCENARIOS = [
   { id: 'restart', label: 'restart, then pay again', cdp: 'cdp', agents: 2, together: false, payments: Array(4).fill(FIFTY) },
   { id: 'replicas', label: '10 replicas', cdp: 'cdp', agents: 10, together: true, payments: Array(3).fill(FIFTY) },
-  { id: 'shared-store', label: `10 replicas, shared store ${STORE_LATENCY_MS} ms away`, cdp: 'cdp-shared', storeLatencyMs: STORE_LATENCY_MS, agents: 10, together: true, payments: Array(3).fill(FIFTY) },
+  {
+    id: 'shared-store',
+    label: `10 replicas, shared store ${STORE_LATENCY_MS} ms away`,
+    cdp: 'cdp-shared',
+    storeLatencyMs: STORE_LATENCY_MS,
+    agents: 10,
+    together: true,
+    payments: Array(3).fill(FIFTY),
+  },
   { id: 'asset-switch', label: 'payee asks for EURC, not USDC', cdp: 'cdp', agents: 1, together: false, payments: [EURC_1000] },
 ];
 
@@ -43,19 +51,24 @@ const versionOf = name => {
   return 'not installed';
 };
 
-const runScript = (script, args) => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', chunk => { stdout += chunk; });
-  child.stderr.on('data', chunk => { stderr += chunk; });
-  child.on('error', reject);
-  child.on('close', code => {
-    const line = stdout.split('\n').find(l => l.startsWith('RESULT '));
-    if (code === 0 && line) resolve(JSON.parse(line.slice('RESULT '.length)));
-    else reject(new Error(`an agent exited ${code}: ${stderr.trim().split('\n').slice(-3).join(' ')}`));
+const runScript = (script, args) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', code => {
+      const line = stdout.split('\n').find(l => l.startsWith('RESULT '));
+      if (code === 0 && line) resolve(JSON.parse(line.slice('RESULT '.length)));
+      else reject(new Error(`an agent exited ${code}: ${stderr.trim().split('\n').slice(-3).join(' ')}`));
+    });
   });
-});
 const runAgent = config => runScript(AGENT, [JSON.stringify(config)]);
 
 /** The AgentKit row, or null when @coinbase/agentkit is not installed next to the crash test. */
@@ -92,8 +105,22 @@ async function runControl(scenario, control, payTo) {
       // The owner sets the budget once, as `npx walletcap set` does; every agent opens it.
       (await openBudget({ wallet: privateKeyToAccount(key).address, path: budgetPath, perPayment: '$50', perDay: '$150', create: true })).close();
     }
-    const base = { control, key, payTo, budgetPath, storePath: join(dir, 'cdp-store.sqlite'), storeLatencyMs: scenario.storeLatencyMs ?? 0, payments: scenario.payments };
-    const results = (await runAgents(Array.from({ length: scenario.agents }, () => base), scenario.together, dir)).flat();
+    const base = {
+      control,
+      key,
+      payTo,
+      budgetPath,
+      storePath: join(dir, 'cdp-store.sqlite'),
+      storeLatencyMs: scenario.storeLatencyMs ?? 0,
+      payments: scenario.payments,
+    };
+    const results = (
+      await runAgents(
+        Array.from({ length: scenario.agents }, () => base),
+        scenario.together,
+        dir,
+      )
+    ).flat();
     const signed = asset => results.filter(r => r.signed && r.asset === asset).reduce((sum, r) => sum + BigInt(r.atomic), 0n);
     const usdc = signed('USDC');
     return {
@@ -141,11 +168,14 @@ function agentkitReport(row) {
   if (row === null) {
     return ['AgentKit row skipped: @coinbase/agentkit is not installed next to the crash test. Run it with:', `  ${AGENTKIT_INSTALL}`];
   }
-  const signed = row.agentkit.received.map(p => `signed ${where(p)} to ${p.toStranger ? 'the first-listed address' : 'the merchant'}, valid ${Math.round(p.validForSeconds / 86_400)} days`);
+  const signed = row.agentkit.received.map(
+    p => `signed ${where(p)} to ${p.toStranger ? 'the first-listed address' : 'the merchant'}, valid ${Math.round(p.validForSeconds / 86_400)} days`,
+  );
   const reported = row.agentkit.reported ? `; reported ${where(row.agentkit.reported)}` : '';
-  const guarded = row.walletcap.received.length === 0
-    ? 'refused before signing'
-    : row.walletcap.received.map(p => `signed ${where(p)}, ${p.approved ? 'the offer the agent approved' : 'not the offer the agent approved'}`).join('; ');
+  const guarded =
+    row.walletcap.received.length === 0
+      ? 'refused before signing'
+      : row.walletcap.received.map(p => `signed ${where(p)}, ${p.approved ? 'the offer the agent approved' : 'not the offer the agent approved'}`).join('; ');
   return [
     `Coinbase AgentKit ${row.version}: the agent approves the merchant's 1¢ offer on Base Sepolia; the merchant`,
     'lists $1.00 on Base mainnet, to another address, first.',
@@ -179,10 +209,20 @@ export function report(run) {
     ...sp.rows.map(r => [`  ${r.label}`, pulledCell(r.vendor), pulledCell(r.walletcap), '']),
   ];
   const widths = [0, 1, 2].map(col => Math.max(...rows.map(row => row[col].length)) + 3);
-  const table = rows.map(row => row.map((text, col) => (col < widths.length ? text.padEnd(widths[col]) : text)).join('').trimEnd()).join('\n');
+  const table = rows
+    .map(row =>
+      row
+        .map((text, col) => (col < widths.length ? text.padEnd(widths[col]) : text))
+        .join('')
+        .trimEnd(),
+    )
+    .join('\n');
   const total = side => run.scenarios.reduce((sum, s) => sum + s[side].over, 0n);
   const totalEurc = side => run.scenarios.reduce((sum, s) => sum + s[side].eurc, 0n);
-  const past = side => [total(side) > 0n || totalEurc(side) === 0n ? dollars(total(side)) : null, totalEurc(side) > 0n ? eurc(totalEurc(side)) : null].filter(Boolean).join(' and ');
+  const past = side =>
+    [total(side) > 0n || totalEurc(side) === 0n ? dollars(total(side)) : null, totalEurc(side) > 0n ? eurc(totalEurc(side)) : null]
+      .filter(Boolean)
+      .join(' and ');
   const spOver = side => sp.rows.reduce((sum, r) => sum + r[side].over, 0n);
   const walletcapOver = total('walletcap') + spOver('walletcap');
   const { versions } = run;
@@ -198,7 +238,7 @@ export function report(run) {
     '',
     "CDP's controls: applySpendControls, set as Coinbase's README shows, with its default in-memory store,",
     `or with a shared store built to its SpendStore interface that answers each call after ${STORE_LATENCY_MS} ms, as Redis`,
-    "or Postgres over the network does. CDP reads the total, then records the payment: replicas can read",
+    'or Postgres over the network does. CDP reads the total, then records the payment: replicas can read',
     'the same total before any of them records. walletcap guard: guard(client, budget) on the same x402 client,',
     'with one budget file every agent opens. walletcap cdpStore: the same applySpendControls, set as',
     "walletcap's README shows (USDC the only allowed asset), with store: cdpStore(budget) on that budget",
@@ -224,9 +264,10 @@ export function report(run) {
  * Whether walletcap held: its guard, CDP's controls on its cdpStore, AccountCapSpender and the
  * AgentKit guard, which may sign the offer the agent approved or nothing.
  */
-export const held = run => run.scenarios.every(s => [s.walletcap, s.cdpStore].every(r => r.over === 0n && r.eurc === 0n))
-  && run.spendPermissions.rows.every(r => r.walletcap.over === 0n)
-  && (!run.agentkit || run.agentkit.walletcap.received.every(p => p.approved === true));
+export const held = run =>
+  run.scenarios.every(s => [s.walletcap, s.cdpStore].every(r => r.over === 0n && r.eurc === 0n)) &&
+  run.spendPermissions.rows.every(r => r.walletcap.over === 0n) &&
+  (!run.agentkit || run.agentkit.walletcap.received.every(p => p.approved === true));
 
 const HELP = `walletcap-crash-test: put Coinbase's agent spend controls and walletcap through the same events
 and count what gets past the cap. CDP's x402 controls face a restart, replicas, a shared store and a
@@ -254,16 +295,16 @@ const isMain = () => {
 };
 
 if (process.argv[1] && isMain()) {
-  const { values } = parseArgs({ options: { json: { type: 'boolean' }, agentkit: { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } });
+  const { values } = parseArgs({
+    options: { json: { type: 'boolean' }, agentkit: { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+  });
   if (values.help) {
     process.stdout.write(`${HELP}\n`);
   } else if (values.version) {
     process.stdout.write(`${JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version}\n`);
   } else {
     const run = await crashTest({ agentkit: values.agentkit === true });
-    process.stdout.write(values.json
-      ? `${JSON.stringify(run, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2)}\n`
-      : `${report(run)}\n`);
+    process.stdout.write(values.json ? `${JSON.stringify(run, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2)}\n` : `${report(run)}\n`);
     process.exitCode = held(run) ? 0 : 1;
   }
 }

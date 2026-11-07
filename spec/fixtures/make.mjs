@@ -63,9 +63,27 @@ try {
   spend.run('spend-a', merged, 100_000_000, 'committed', 'cdp', null, T0 - HOUR, null);
   spend.run('spend-b', `eip155:8453:${merged}`, 20_000_000, 'reserved', 'python', null, T0 - 2 * HOUR, null);
   spend.run('spend-c', merged.toLowerCase(), 10_000_000, 'committed', 'js', JSON.stringify({ tx: TX('ab') }), T0 - 10 * MIN, null);
-  spend.run('spend-d', app.toLowerCase(), 30_000_000, 'reserved', 'x402', JSON.stringify({ to: merged, scheme: 'exact' }), T0 - 20 * MIN, T0 + 5 * MIN + DAY + 1);
+  spend.run(
+    'spend-d',
+    app.toLowerCase(),
+    30_000_000,
+    'reserved',
+    'x402',
+    JSON.stringify({ to: merged, scheme: 'exact' }),
+    T0 - 20 * MIN,
+    T0 + 5 * MIN + DAY + 1,
+  );
   spend.run('spend-e', app, 40_000_000, 'committed', 'js', null, T0 - 2 * DAY, null);
-  spend.run('spend-f', `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${solana}`, 5_000_000, 'reserved', 'js', JSON.stringify({ outcome: 'unknown', error: 'rpc timeout' }), T0 - 3 * HOUR, null);
+  spend.run(
+    'spend-f',
+    `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${solana}`,
+    5_000_000,
+    'reserved',
+    'js',
+    JSON.stringify({ outcome: 'unknown', error: 'rpc timeout' }),
+    T0 - 3 * HOUR,
+    null,
+  );
   spend.run('spend-g', card, 2_500_000, 'committed', 'python', JSON.stringify({ tx: TX('cd'), note: 'one API call' }), T0 - 5 * MIN, null);
   db.close();
   copyFileSync(one, join(OUT, 'schema-1.sqlite'));
@@ -75,10 +93,14 @@ try {
   copyFileSync(one, two);
   let now = T0 - 4 * DAY;
   clock030.setClock(() => now);
-  const at = ms => { now = ms; };
+  const at = ms => {
+    now = ms;
+  };
   const agent = v030.openBudget({ wallet: WALLETS.agent, path: two, perPayment: '$50', perDay: '$150', create: true });
   const ok = tx => async () => tx;
-  const fail = message => async () => { throw new Error(message); };
+  const fail = message => async () => {
+    throw new Error(message);
+  };
   at(T0 - 3 * DAY);
   await agent.pay('$9', ok(TX('01')), { to: WALLETS.merged, note: 'aged out' });
   at(T0 - 2 * DAY);
@@ -130,8 +152,12 @@ try {
           continue; // not in this file
         }
         const s = opened.status();
-        budgets[s.wallet] = Object.fromEntries(['cap', 'window', 'perPayment', 'maxPayments', 'spent', 'inFlight', 'remaining', 'payments', 'frozen']
-          .map(key => [key, typeof s[key] === 'bigint' ? Number(s[key]) : s[key]]));
+        budgets[s.wallet] = Object.fromEntries(
+          ['cap', 'window', 'perPayment', 'maxPayments', 'spent', 'inFlight', 'remaining', 'payments', 'frozen'].map(key => [
+            key,
+            typeof s[key] === 'bigint' ? Number(s[key]) : s[key],
+          ]),
+        );
         budgets[s.wallet].holds = opened.holds().map(hold => hold.id);
         opened.close();
       }

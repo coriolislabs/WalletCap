@@ -12,7 +12,14 @@ import type { Budget, Hold } from '../core/budget.js';
 import { BudgetRefused, forAgent, PaymentNotRecorded, UsageError } from '../core/errors.js';
 import { formatUsd, trimAscii } from '../core/money.js';
 import {
-  type AssetEntry, assetKey, assetTable, atomicOf, type PaymentRequirements, settlesWithinSeconds, timeoutRefusal, toMicros as atomicToMicros,
+  type AssetEntry,
+  assetKey,
+  assetTable,
+  atomicOf,
+  type PaymentRequirements,
+  settlesWithinSeconds,
+  timeoutRefusal,
+  toMicros as atomicToMicros,
 } from './_x402.js';
 
 /** The wallet's request channel: awal's sendIpcRequest(channel, data). */
@@ -37,7 +44,6 @@ export const AWAL_CHAINS: Readonly<Record<string, string>> = Object.freeze({
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
 // Room for the wallet's clock, or the chain's, to run ahead of this one.
 const CLOCK_SKEW_MS = 60_000n;
-
 
 const messageOf = (error: unknown): string => String((error as Error | undefined)?.message ?? error);
 
@@ -110,7 +116,10 @@ export interface RequestData {
  * The part of fetch() discoverRequirements uses. globalThis.fetch is one; the type is spelled out
  * so the declarations need neither the DOM's types nor Node's.
  */
-export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; redirect: 'follow'; body?: string }) => Promise<{
+export type FetchLike = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; redirect: 'follow'; body?: string },
+) => Promise<{
   status: number;
   headers: { get(name: string): string | null };
   json(): Promise<unknown>;
@@ -126,7 +135,10 @@ const requestUrl = (data: RequestData): URL => {
  * Ask the endpoint what it charges: its 402 answer, with the payment requirements it accepts
  * (`accepts`) and any `extensions`, or null if it asks for none.
  */
-export async function discoverRequirements(data: RequestData, { fetch: fetchImpl = globalThis.fetch }: { fetch?: FetchLike } = {}): Promise<PaymentRequired | null> {
+export async function discoverRequirements(
+  data: RequestData,
+  { fetch: fetchImpl = globalThis.fetch }: { fetch?: FetchLike } = {},
+): Promise<PaymentRequired | null> {
   const method = String(data.method ?? 'GET').toUpperCase();
   const headers: Record<string, string> = { Accept: 'application/json', ...(data.headers ?? {}) };
   const init: Parameters<FetchLike>[1] = { method, headers, redirect: 'follow' };
@@ -157,11 +169,22 @@ export interface GuardedWallet {
  * it returns the 402 answer (`{ accepts, extensions }`) or just its list of payment requirements,
  * or null when the endpoint asks for no payment.
  */
-export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch: fetchImpl, discover }: {
-  request: WalletRequest; assets?: AssetEntry[]; fetch?: FetchLike; discover?: (data: RequestData) => Promise<unknown>;
-}): GuardedWallet {
+export function guardAgenticWallet(
+  budget: Budget,
+  {
+    request,
+    assets = [],
+    fetch: fetchImpl,
+    discover,
+  }: {
+    request: WalletRequest;
+    assets?: AssetEntry[];
+    fetch?: FetchLike;
+    discover?: (data: RequestData) => Promise<unknown>;
+  },
+): GuardedWallet {
   // The type says request is required; JavaScript callers get the same answer at run time.
-  if (typeof (request as unknown) !== 'function') throw new UsageError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
+  if (typeof (request as unknown) !== 'function') throw new UsageError("guardAgenticWallet needs request(channel, data): the wallet's request channel");
   const wallet = request;
   const table = assetTable(assets);
   const findRequirements = discover ?? ((data: RequestData) => discoverRequirements(data, fetchImpl === undefined ? {} : { fetch: fetchImpl }));
@@ -179,7 +202,8 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
   // (timeoutRefusal), so walletcap can tell how much it pays and how long it can settle.
   const isTerm = (requirement: unknown): requirement is PaymentRequirements => requirement !== null && typeof requirement === 'object';
   const priced = (requirement: PaymentRequirements): boolean => table.has(assetKey(requirement.network, requirement.asset));
-  const payable = (requirement: unknown): requirement is PaymentRequirements => isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
+  const payable = (requirement: unknown): requirement is PaymentRequirements =>
+    isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
 
   // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay
   // any of the terms it is handed, whatever walletcap would pick, so the longest of them counts,
@@ -199,12 +223,15 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
     const recipient = data.recipient;
     if (typeof recipient !== 'string' || recipient.length === 0) throw new UsageError('the send needs a recipient');
     const hold = await budget.hold(atomic, {
-      rail: 'awal', to: recipient, note: `send on ${chain}`, details: { network, asset },
+      rail: 'awal',
+      to: recipient,
+      note: `send on ${chain}`,
+      details: { network, asset },
     });
     let result: { error?: unknown; transactionHash?: unknown } | null;
     try {
       // Only the fields the wallet's send takes, as walletcap read them: nothing else reaches the wallet.
-      result = await wallet('send-transaction', { recipient, amountAtomic: atomic.toString(), asset, chain }) as typeof result;
+      result = (await wallet('send-transaction', { recipient, amountAtomic: atomic.toString(), asset, chain })) as typeof result;
     } catch (error) {
       await failed(hold, error);
       throw error;
@@ -222,7 +249,7 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
     // show it others.
     const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
     const found = handed ? null : await findRequirements(data);
-    const required = (Array.isArray(found) ? { accepts: found } : found ?? null) as PaymentRequired | null;
+    const required = (Array.isArray(found) ? { accepts: found } : (found ?? null)) as PaymentRequired | null;
     const url = requestUrl(data).href.slice(0, 1024);
     if (!handed && required !== null && (!Array.isArray(required.accepts) || required.accepts.length === 0)) {
       throw new BudgetRefused('terms', `${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
@@ -248,8 +275,8 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
     const offered = (handed ? data.paymentRequirements : required?.accepts) as unknown[];
     const usable = offered.filter(payable);
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
-    const wanted = (requirement: PaymentRequirements): boolean => (preferred === undefined || networkOf(requirement) === preferred)
-      && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme);
+    const wanted = (requirement: PaymentRequirements): boolean =>
+      (preferred === undefined || networkOf(requirement) === preferred) && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme);
     const candidates = usable.filter(wanted);
     if (candidates.length === 0) {
       // Nothing left the wallet could pay: say why for the terms it would have picked from.
@@ -263,7 +290,9 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
     const terms = {
       paymentRequirements: usable,
       // The wallet uses the 402's extensions only when it discovers the terms itself.
-      ...(!handed && data.extensions === undefined && extensions !== null && typeof extensions === 'object' && !Array.isArray(extensions) ? { extensions } : {}),
+      ...(!handed && data.extensions === undefined && extensions !== null && typeof extensions === 'object' && !Array.isArray(extensions)
+        ? { extensions }
+        : {}),
     };
     const settlesWithin = settlesWithinMs(usable);
     // The wallet picks the terms itself when it pays, so reserve the most any offer asks and cap
@@ -283,7 +312,7 @@ export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch
     });
     let result: { status?: unknown } | null;
     try {
-      result = await wallet('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) }) as typeof result;
+      result = (await wallet('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) })) as typeof result;
     } catch (error) {
       // The wallet may not have answered yet, and may still sign: it counts until voided.
       await failed(hold, error);
@@ -333,9 +362,7 @@ export function usdcAtomic(amount: unknown): string {
   }
   const [, whole = '0', fraction = ''] = match;
   if (/[^0]/.test(fraction.slice(6))) throw new UsageError(`Invalid amount: ${amount} is finer than one atomic unit of USDC (0.000001).`);
-  const atomic = !/[^0]/.test(fraction) && BigInt(whole) > 100n
-    ? BigInt(whole)
-    : BigInt(whole) * 1_000_000n + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
+  const atomic = !/[^0]/.test(fraction) && BigInt(whole) > 100n ? BigInt(whole) : BigInt(whole) * 1_000_000n + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
   if (atomic === 0n) throw new UsageError(`Invalid amount: ${amount}. Must be a positive number.`);
   return atomic.toString();
 }

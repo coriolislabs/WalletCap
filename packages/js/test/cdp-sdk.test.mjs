@@ -14,7 +14,13 @@ import { NETWORK, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-sdk-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 
 const kit = await x402();
 const skip = kit === null && 'the x402/CDP devDependencies are not installed';
@@ -77,10 +83,7 @@ test('CDP controls added after the guard are refused before signing', { skip }, 
     const client = kit.client();
     guard(client, budget);
     applySpendControls(client, controls(store));
-    await assert.rejects(
-      client.createPaymentPayload(kit.required(50_000)),
-      /CDP spend controls|Use one/,
-    );
+    await assert.rejects(client.createPaymentPayload(kit.required(50_000)), /CDP spend controls|Use one/);
     assert.equal((await budget.status()).inFlight, 0n);
     assert.equal((await budget.status()).inFlight, 0n);
   } finally {

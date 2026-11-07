@@ -37,13 +37,17 @@ const live = new Set();
 let kills = 0;
 let started = 0;
 const start = language => {
-  const child = language === 'js'
-    ? spawn(process.execPath, [join(ROOT, 'scripts/race/worker.mjs'), path, WALLET], { stdio: ['ignore', 'ignore', 'pipe'] })
-    : spawn(values.python, [join(ROOT, 'scripts/race/worker.py'), path, WALLET], {
-      stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env, PYTHONPATH: join(ROOT, 'packages/python/src') },
-    });
+  const child =
+    language === 'js'
+      ? spawn(process.execPath, [join(ROOT, 'scripts/race/worker.mjs'), path, WALLET], { stdio: ['ignore', 'ignore', 'pipe'] })
+      : spawn(values.python, [join(ROOT, 'scripts/race/worker.py'), path, WALLET], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+          env: { ...process.env, PYTHONPATH: join(ROOT, 'packages/python/src') },
+        });
   let stderr = '';
-  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stderr.on('data', chunk => {
+    stderr += chunk;
+  });
   child.on('exit', (code, signal) => {
     live.delete(child);
     if (signal !== 'SIGKILL') failures.push({ language, code, signal, stderr: stderr.slice(-2000) });

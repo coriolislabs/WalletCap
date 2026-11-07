@@ -18,7 +18,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 const solc = createRequire(import.meta.url)('solc');
 // The Foundry project root: the directory above this one unless told otherwise.
 const SRC = process.argv[2] ?? new URL('..', import.meta.url).pathname;
-const CAP = 150_000_000n;       // $150 of a 6-decimal stablecoin
+const CAP = 150_000_000n; // $150 of a 6-decimal stablecoin
 const PER_PAYMENT = 50_000_000n; // $50
 const WINDOW = 86_400n;
 const START = 1_000_000n;
@@ -38,11 +38,15 @@ const sources = {
   'src/AccountCapSpender.sol': { content: readFileSync(join(SRC, 'src/AccountCapSpender.sol'), 'utf8') },
   'test/Mocks.sol': { content: readFileSync(join(SRC, 'test/Mocks.sol'), 'utf8') },
 };
-const out = JSON.parse(solc.compile(JSON.stringify({
-  language: 'Solidity',
-  sources,
-  settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: 'cancun', outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } } },
-})));
+const out = JSON.parse(
+  solc.compile(
+    JSON.stringify({
+      language: 'Solidity',
+      sources,
+      settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: 'cancun', outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } } },
+    }),
+  ),
+);
 const errors = (out.errors ?? []).filter(e => e.severity === 'error');
 if (errors.length) throw new Error(errors.map(e => e.formattedMessage).join('\n'));
 const warnings = (out.errors ?? []).filter(e => e.severity === 'warning');
@@ -72,11 +76,20 @@ async function send(key, to, data) {
     let reason = failure.error;
     const raw = bytesToHex(result.execResult.returnValue);
     for (const abi of [SPENDER.abi, TOKEN.abi, MANAGER.abi]) {
-      try { reason = decodeErrorResult({ abi, data: raw }).errorName ?? reason; break; } catch { /* next */ }
+      try {
+        reason = decodeErrorResult({ abi, data: raw }).errorName ?? reason;
+        break;
+      } catch {
+        /* next */
+      }
     }
     if (reason === 'Error' || reason === failure.error) {
       // A plain require(..., "reason") is Error(string): report the string itself.
-      try { reason = decodeErrorResult({ abi: [{ type: 'error', name: 'Error', inputs: [{ type: 'string' }] }], data: raw }).args[0]; } catch { /* opaque */ }
+      try {
+        reason = decodeErrorResult({ abi: [{ type: 'error', name: 'Error', inputs: [{ type: 'string' }] }], data: raw }).args[0];
+      } catch {
+        /* opaque */
+      }
     }
     return { ok: false, reason, gas: result.totalGasSpent };
   }
@@ -92,7 +105,8 @@ const deployWith = async (contract, args = []) => {
 const call = async (key, to, abi, functionName, args) => send(key, to, encodeFunctionData({ abi, functionName, args }));
 const read = async (to, abi, functionName, args) => {
   const result = await vm.evm.runCall({
-    to: createAddressFromString(to), caller: createAddressFromString(ADDR.deployer),
+    to: createAddressFromString(to),
+    caller: createAddressFromString(ADDR.deployer),
     data: hexToBytes(encodeFunctionData({ abi, functionName, args })),
     block: createBlock({ header: { number: height, timestamp: now } }, { common }),
   });
@@ -107,11 +121,18 @@ await call(KEYS.deployer, token, TOKEN.abi, 'mint', [ADDR.account, 1_000_000_000
 await call(KEYS.account, token, TOKEN.abi, 'approve', [manager, 1_000_000_000n]);
 
 const permission = (salt, overrides = {}) => ({
-  account: ADDR.account, spender, token, allowance: CAP, period: Number(WINDOW),
-  start: Number(START), end: Number(START + 365n * 86_400n), salt, extraData: '0x', ...overrides,
+  account: ADDR.account,
+  spender,
+  token,
+  allowance: CAP,
+  period: Number(WINDOW),
+  start: Number(START),
+  end: Number(START + 365n * 86_400n),
+  salt,
+  extraData: '0x',
+  ...overrides,
 });
-const pay = (perm, amount, payee = PAYEE, key = KEYS.agent) =>
-  call(key, spender, SPENDER.abi, 'pay', [perm, amount, payee]);
+const pay = (perm, amount, payee = PAYEE, key = KEYS.agent) => call(key, spender, SPENDER.abi, 'pay', [perm, amount, payee]);
 
 // --- the cases -------------------------------------------------------------------------
 const results = [];
@@ -120,21 +141,23 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'OK  ' : 'FAIL'}  ${name}${detail ? `  (${detail})` : ''}`);
 };
 
-{ // Two permissions, one budget: Coinbase counts each permission separately.
+{
+  // Two permissions, one budget: Coinbase counts each permission separately.
   const a = permission(1n);
   const b = permission(2n);
   for (const p of [a, a, b]) await pay(p, PER_PAYMENT);
   const refused = await pay(b, PER_PAYMENT);
   const spent = await read(spender, SPENDER.abi, 'spentInWindow', [ADDR.account, token]);
-  check('two permissions share one budget', !refused.ok && refused.reason === 'OverBudget' && spent === CAP,
-    `spent ${spent}, 4th refused: ${refused.reason}`);
+  check('two permissions share one budget', !refused.ok && refused.reason === 'OverBudget' && spent === CAP, `spent ${spent}, 4th refused: ${refused.reason}`);
 }
-{ // A period boundary refills the permission's allowance, not the account's budget.
+{
+  // A period boundary refills the permission's allowance, not the account's budget.
   now += WINDOW / 2n;
   const refused = await pay(permission(3n), 1_000_000n);
   check('a period boundary does not refill the budget', !refused.ok && refused.reason === 'OverBudget', refused.reason);
 }
-{ // A payment counts as if made at its bucket's last second, for one window from there.
+{
+  // A payment counts as if made at its bucket's last second, for one window from there.
   const width = await read(spender, SPENDER.abi, 'bucketWidth', []);
   const bucketEnd = (START / width + 1n) * width - 1n;
   now = bucketEnd + WINDOW;
@@ -167,25 +190,34 @@ const check = (name, ok, detail = '') => {
   const revoked = await pay(perm, 1_000_000n);
   check('a revoked permission cannot be drawn', !revoked.ok && revoked.reason === 'revoked', revoked.reason);
 }
-{ // perPayment > cap, an empty payee list, and a window that isn't a multiple of BUCKETS
+{
+  // perPayment > cap, an empty payee list, and a window that isn't a multiple of BUCKETS
   // are configuration errors.
-  const deploy = args => send(KEYS.deployer, undefined,
-    `0x${SPENDER.evm.bytecode.object}${encodeAbiParameters(SPENDER.abi.find(f => f.type === 'constructor').inputs, args).slice(2)}`);
+  const deploy = args =>
+    send(
+      KEYS.deployer,
+      undefined,
+      `0x${SPENDER.evm.bytecode.object}${encodeAbiParameters(SPENDER.abi.find(f => f.type === 'constructor').inputs, args).slice(2)}`,
+    );
   const refused = [
     await deploy([manager, ADDR.agent, PER_PAYMENT, WINDOW, CAP, [PAYEE]]),
     await deploy([manager, ADDR.agent, CAP, WINDOW, PER_PAYMENT, []]),
     await deploy([manager, ADDR.agent, CAP, WINDOW + 1n, PER_PAYMENT, [PAYEE]]),
   ];
-  check('the constructor refuses a bad configuration',
-    refused.every(r => !r.ok && r.reason === 'InvalidConfiguration'), refused.map(r => r.reason).join(' / '));
+  check(
+    'the constructor refuses a bad configuration',
+    refused.every(r => !r.ok && r.reason === 'InvalidConfiguration'),
+    refused.map(r => r.reason).join(' / '),
+  );
 }
-{ // The money actually moved to the payee, and only to the payee.
+{
+  // The money actually moved to the payee, and only to the payee.
   const paid = await read(token, TOKEN.abi, 'balanceOf', [PAYEE]);
   const held = await read(token, TOKEN.abi, 'balanceOf', [spender]);
-  check('every drawn payment reached the payee', paid === CAP + PER_PAYMENT && held === 0n,
-    `payee ${paid}, spender holds ${held}`);
+  check('every drawn payment reached the payee', paid === CAP + PER_PAYMENT && held === 0n, `payee ${paid}, spender holds ${held}`);
 }
-{ // A burst of tiny payments, then a quiet window: the next payment still runs, at the
+{
+  // A burst of tiny payments, then a quiet window: the next payment still runs, at the
   // same cost. An unbounded log made it cost ~6M gas after 1,000 payments.
   const burst = await deployWith(SPENDER, [manager, ADDR.agent, CAP, WINDOW, PER_PAYMENT, [OTHER_PAYEE]]);
   const perm = { ...permission(10n), spender: burst, start: Number(now), end: Number(now + 365n * 86_400n) };
@@ -197,8 +229,11 @@ const check = (name, ok, detail = '') => {
   }
   now += WINDOW * 2n;
   const after = await call(KEYS.agent, burst, SPENDER.abi, 'pay', [perm, PER_PAYMENT, OTHER_PAYEE]);
-  check('a burst then a quiet window does not lock the account', after.ok && after.gas < 250_000n,
-    `${after.ok ? 'paid' : after.reason}, ${after.gas} gas (first burst payment ${first})`);
+  check(
+    'a burst then a quiet window does not lock the account',
+    after.ok && after.gas < 250_000n,
+    `${after.ok ? 'paid' : after.reason}, ${after.gas} gas (first burst payment ${first})`,
+  );
 }
 
 const failed = results.filter(r => !r.ok);

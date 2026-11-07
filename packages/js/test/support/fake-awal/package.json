@@ -1,1 +1,6 @@
-{ "name": "awal", "version": "0.0.0-test", "type": "module", "private": true }
+{
+  "name": "awal",
+  "version": "0.0.0-test",
+  "type": "module",
+  "private": true
+}

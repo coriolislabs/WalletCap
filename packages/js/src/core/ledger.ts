@@ -142,7 +142,8 @@ export interface OpenHold {
 }
 
 /** Why a process without a payment's token can't move it. */
-export const heldElsewhere = (payment: string, verb: string): string => `payment ${payment} was held by another process: only that process, or the budget's owner, can ${verb} it`;
+export const heldElsewhere = (payment: string, verb: string): string =>
+  `payment ${payment} was held by another process: only that process, or the budget's owner, can ${verb} it`;
 
 const HOLDER = /^[0-9a-f]{32}$/;
 const holderToken = (value: string | null): string | null => {
@@ -258,7 +259,9 @@ const section = (spec: Spec, name: string): string => {
 };
 
 // A statement's :named parameters, outside its string literals.
-const parameterNames = (sql: string): string[] => [...new Set([...sql.replace(/'(?:[^']|'')*'/g, "''").matchAll(/:([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1] ?? ''))];
+const parameterNames = (sql: string): string[] => [
+  ...new Set([...sql.replace(/'(?:[^']|'')*'/g, "''").matchAll(/:([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1] ?? '')),
+];
 
 const versionAtLeast = (version: string, least: string): boolean => {
   const [a, b] = [version, least].map(text => text.split('.').map(Number)) as [number[], number[]];
@@ -311,10 +314,12 @@ const text = (value: unknown, label: string, limit: number): string | null => {
 // --- Wording ------------------------------------------------------------------------------
 
 const plural = (count: bigint): string => (count === 1n ? '' : 's');
-const mergedNote = (names: string[]): string => `The 0.3.0 upgrade merged the budget${names.length === 1 ? '' : 's'} 0.2.x kept under ${names.join(', ')} `
-  + "into this one, with the tighter of each limit; its owner can change them with 'walletcap set'";
-const frozenNote = ({ kept, aside }: { kept: string; aside: { name: string; unit: string }[] }): string => `The 0.3.0 upgrade froze it: 0.2.x also kept ${aside.map(({ name, unit }) => `a budget in ${unit} under ${name}`).join(' and ')} `
-  + `for this wallet, which can't be merged with this one in ${kept}, so ${aside.length === 1 ? 'that budget no longer counts' : 'those budgets no longer count'}`;
+const mergedNote = (names: string[]): string =>
+  `The 0.3.0 upgrade merged the budget${names.length === 1 ? '' : 's'} 0.2.x kept under ${names.join(', ')} ` +
+  "into this one, with the tighter of each limit; its owner can change them with 'walletcap set'";
+const frozenNote = ({ kept, aside }: { kept: string; aside: { name: string; unit: string }[] }): string =>
+  `The 0.3.0 upgrade froze it: 0.2.x also kept ${aside.map(({ name, unit }) => `a budget in ${unit} under ${name}`).join(' and ')} ` +
+  `for this wallet, which can't be merged with this one in ${kept}, so ${aside.length === 1 ? 'that budget no longer counts' : 'those budgets no longer count'}`;
 const parsedNote = <T>(json: string | null | undefined, word: (value: T) => string): string | null => {
   if (json === null || json === undefined) return null;
   try {
@@ -332,15 +337,18 @@ const isoSeconds = (ms: bigint): string => new Date(Number(ms)).toISOString().re
  * What a payment the CDP store holds is, for an owner deciding whether to void it: CDP signed its
  * authorization, which a payee can redeem until an hour and a minute after CDP recorded it.
  */
-export const cdpHoldNote = (hold: { payment: string; until: bigint | null }): string => `${hold.payment} is a payment CDP signed: `
-  + `its authorization can be redeemed until ${hold.until === null ? 'an hour and a minute after CDP recorded it' : isoSeconds(hold.until)}, `
-  + 'so void it only if the chain shows it was never redeemed';
+export const cdpHoldNote = (hold: { payment: string; until: bigint | null }): string =>
+  `${hold.payment} is a payment CDP signed: ` +
+  `its authorization can be redeemed until ${hold.until === null ? 'an hour and a minute after CDP recorded it' : isoSeconds(hold.until)}, ` +
+  'so void it only if the chain shows it was never redeemed';
 
 const heldNote = (heldPayments: bigint, holds: OpenHold[]): string => {
   const more = heldPayments > BigInt(holds.length) ? ` and ${heldPayments - BigInt(holds.length)} more` : '';
   const cdp = holds.filter(hold => hold.rail === 'cdp').map(cdpHoldNote);
-  return `${holds.map(hold => hold.payment).join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can void it`
-    + (cdp.length === 0 ? '' : `. ${cdp.join('; ')}`);
+  return (
+    `${holds.map(hold => hold.payment).join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can void it` +
+    (cdp.length === 0 ? '' : `. ${cdp.join('; ')}`)
+  );
 };
 
 /**
@@ -360,12 +368,16 @@ export function refusal(why: RefusalRow, amount: bigint, limits: OwnLimits, open
   }
   if (source === 'process') {
     const own = limits.windowMs === null ? window : formatWindow(limits.windowMs);
-    if (why.code === 'per_payment') return refused('per_payment', `${money(amount)} is over the ${money(limits.perPayment ?? 0n)} limit per payment this process set`);
+    if (why.code === 'per_payment')
+      return refused('per_payment', `${money(amount)} is over the ${money(limits.perPayment ?? 0n)} limit per payment this process set`);
     if (why.code === 'budget') {
       const cap = limits.cap ?? 0n;
       const left = cap > why.p_counted ? cap - why.p_counted : 0n;
-      return refused('budget', `${money(amount)} would bring ${name} to ${money(why.p_counted + amount)} in the last ${own}, `
-        + `over the ${money(cap)} limit this process set (${money(left)} left)`);
+      return refused(
+        'budget',
+        `${money(amount)} would bring ${name} to ${money(why.p_counted + amount)} in the last ${own}, ` +
+          `over the ${money(cap)} limit this process set (${money(left)} left)`,
+      );
     }
     return refused('max_payments', `${name} already made ${why.p_payments} payment${plural(why.p_payments)} in the last ${own}, the most this process allows`);
   }
@@ -381,14 +393,16 @@ export function refusal(why: RefusalRow, amount: bigint, limits: OwnLimits, open
   if (held === 0n) {
     return refused('max_payments', `${name} already made ${why.payments} payment${plural(why.payments)} in the last ${window}, the most its budget allows`);
   }
-  const brief = `${name} has ${why.payments} payment${plural(why.payments)} counting in the last ${window}, the most its budget allows, `
-    + `and ${held} of them ${held === 1n ? 'is' : 'are'} still open`;
+  const brief =
+    `${name} has ${why.payments} payment${plural(why.payments)} counting in the last ${window}, the most its budget allows, ` +
+    `and ${held} of them ${held === 1n ? 'is' : 'are'} still open`;
   return refused('max_payments', `${brief} (${heldNote(held, openIds())})`, brief);
 }
 
 // --- The ledger ---------------------------------------------------------------------------
 
-const unusable = (path: string, error: unknown): BudgetUnavailable => new BudgetUnavailable(`the budget file ${path} cannot be used: ${(error as Error)?.message ?? error}`, { cause: error });
+const unusable = (path: string, error: unknown): BudgetUnavailable =>
+  new BudgetUnavailable(`the budget file ${path} cannot be used: ${(error as Error)?.message ?? error}`, { cause: error });
 
 /** A guard trigger's refusal ('walletcap: …'), or null. */
 const guardMessage = (error: unknown): string | null => {
@@ -410,7 +424,10 @@ interface Prepared {
 }
 
 const ownLimits = (limits: ProcessLimits): OwnLimits => ({
-  perPayment: limits.perPayment ?? null, cap: limits.cap ?? null, windowMs: limits.windowMs ?? null, maxPayments: limits.maxPayments ?? null,
+  perPayment: limits.perPayment ?? null,
+  cap: limits.cap ?? null,
+  windowMs: limits.windowMs ?? null,
+  maxPayments: limits.maxPayments ?? null,
 });
 
 /**
@@ -482,7 +499,9 @@ export class Ledger {
     return ledger;
   }
 
-  get path(): string { return this.#path; }
+  get path(): string {
+    return this.#path;
+  }
 
   // The schema the file is at: null for an empty file.
   #schema(): string | null {
@@ -544,7 +563,11 @@ export class Ledger {
     });
     // WAL lets readers through while one process writes. A file another process holds open
     // stays in its journal mode until it can switch; either mode is correct.
-    try { this.#db.exec('PRAGMA journal_mode = WAL'); } catch { /* busy: keep the journal mode */ }
+    try {
+      this.#db.exec('PRAGMA journal_mode = WAL');
+    } catch {
+      /* busy: keep the journal mode */
+    }
   }
 
   #statement(name: string): Prepared {
@@ -565,16 +588,22 @@ export class Ledger {
     const bound: Record<string, SQLInputValue> = {};
     for (const key of names) {
       const value = args[key];
-      bound[key] = value === undefined ? null : typeof value === 'boolean' ? (value ? 1 : 0) : value as SQLInputValue;
+      bound[key] = value === undefined ? null : typeof value === 'boolean' ? (value ? 1 : 0) : (value as SQLInputValue);
     }
     return statement.all(bound) as unknown as T[];
   }
 
-  #get<T>(name: string, args: Args = {}): T | null { return this.#all<T>(name, args)[0] ?? null; }
+  #get<T>(name: string, args: Args = {}): T | null {
+    return this.#all<T>(name, args)[0] ?? null;
+  }
 
-  #write<T>(work: () => T): Promise<T> { return this.#attempt(() => this.#run('BEGIN IMMEDIATE', work)); }
+  #write<T>(work: () => T): Promise<T> {
+    return this.#attempt(() => this.#run('BEGIN IMMEDIATE', work));
+  }
 
-  #read<T>(work: () => T): Promise<T> { return this.#attempt(() => this.#run('BEGIN', work)); }
+  #read<T>(work: () => T): Promise<T> {
+    return this.#attempt(() => this.#run('BEGIN', work));
+  }
 
   // One try: a whole transaction, synchronous, so nothing else on this thread sees it half done.
   #run<T>(begin: string, work: () => T): T {
@@ -590,7 +619,11 @@ export class Ledger {
       this.#db.exec('COMMIT');
       return result;
     } catch (error) {
-      try { this.#db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+      try {
+        this.#db.exec('ROLLBACK');
+      } catch {
+        /* already rolled back */
+      }
       throw isWalletcapError(error) || error instanceof Busy ? error : this.#failure(error);
     }
   }
@@ -607,7 +640,9 @@ export class Ledger {
         if (!(error instanceof Busy)) throw error;
         const left = deadline - Date.now();
         if (left <= 0) {
-          throw new BudgetUnavailable(`the budget file ${this.#path} is busy: another process held its write lock for more than ${this.#busyTimeoutMs} ms`, { cause: error.cause });
+          throw new BudgetUnavailable(`the budget file ${this.#path} is busy: another process held its write lock for more than ${this.#busyTimeoutMs} ms`, {
+            cause: error.cause,
+          });
         }
         await sleep(Math.min(left, wait + Math.random() * wait));
         wait = Math.min(wait * 2, MAX_BACKOFF_MS);
@@ -627,22 +662,42 @@ export class Ledger {
   }
 
   /** The ledger's time, in milliseconds. */
-  now(): Promise<bigint> { return this.#read(() => (this.#get<{ now: bigint }>('now') as { now: bigint }).now); }
+  now(): Promise<bigint> {
+    return this.#read(() => (this.#get<{ now: bigint }>('now') as { now: bigint }).now);
+  }
 
   budget(name: string): Promise<BudgetRow | null> {
     const wallet = walletKey(name);
     return this.#read(() => this.#get<BudgetRow>('budget', { wallet }));
   }
 
-  budgets(): Promise<BudgetRow[]> { return this.#read(() => this.#all<BudgetRow>('budgets')); }
+  budgets(): Promise<BudgetRow[]> {
+    return this.#read(() => this.#all<BudgetRow>('budgets'));
+  }
 
   /** Create a budget. Its limits are checked by the table's constraints too. */
-  createBudget(name: string, { unit = 'usd', cap, windowMs, perPayment = null, maxPayments = null }: {
-    unit?: string; cap: bigint; windowMs: bigint; perPayment?: bigint | null; maxPayments?: bigint | null;
-  }): Promise<BudgetRow> {
+  createBudget(
+    name: string,
+    {
+      unit = 'usd',
+      cap,
+      windowMs,
+      perPayment = null,
+      maxPayments = null,
+    }: {
+      unit?: string;
+      cap: bigint;
+      windowMs: bigint;
+      perPayment?: bigint | null;
+      maxPayments?: bigint | null;
+    },
+  ): Promise<BudgetRow> {
     const wallet = walletKey(name);
     const values = {
-      wallet, unit: railName(unit), cap: units(cap, 'cap', { allowZero: true }), window_ms: millis(windowMs, 'windowMs', { min: 1n }),
+      wallet,
+      unit: railName(unit),
+      cap: units(cap, 'cap', { allowZero: true }),
+      window_ms: millis(windowMs, 'windowMs', { min: 1n }),
       per_payment: perPayment === null ? null : units(perPayment, 'perPayment'),
       max_payments: maxPayments === null ? null : whole(maxPayments, 'maxPayments', { min: 0n, max: 1n << 62n }),
     };
@@ -657,9 +712,20 @@ export class Ledger {
    * The owner's change, up or down; a field left undefined stays. What was spent keeps counting.
    * The window changes only while nothing counts.
    */
-  setLimits(name: string, { cap, windowMs, perPayment, maxPayments }: {
-    cap?: bigint; windowMs?: bigint; perPayment?: bigint | null; maxPayments?: bigint | null;
-  }): Promise<BudgetRow> {
+  setLimits(
+    name: string,
+    {
+      cap,
+      windowMs,
+      perPayment,
+      maxPayments,
+    }: {
+      cap?: bigint;
+      windowMs?: bigint;
+      perPayment?: bigint | null;
+      maxPayments?: bigint | null;
+    },
+  ): Promise<BudgetRow> {
     const wallet = walletKey(name);
     const values = {
       wallet,
@@ -700,7 +766,12 @@ export class Ledger {
     const spend = units(amount, 'amount');
     return this.#read(() => {
       const why = this.#get<RefusalRow>('refusal', {
-        wallet, amount: spend, p_per_payment: own.perPayment, p_cap: own.cap, p_window_ms: own.windowMs, p_max_payments: own.maxPayments,
+        wallet,
+        amount: spend,
+        p_per_payment: own.perPayment,
+        p_cap: own.cap,
+        p_window_ms: own.windowMs,
+        p_max_payments: own.maxPayments,
       });
       if (why === null) throw this.#noBudget(wallet);
       const remaining = (why.frozen_at !== null || why.counted > why.cap ? 0n : why.cap - why.counted) as Micros;
@@ -715,9 +786,25 @@ export class Ledger {
    * are the paying process's own, tighter ones. Holding an identity already in the ledger
    * returns that payment if the wallet and amount match.
    */
-  hold(name: string, amount: bigint, { payment = null, until = null, withinMs = null, rail, info = null, limits = {} }: {
-    payment?: string | null; until?: bigint | Date | null; withinMs?: bigint | null; rail: string; info?: string | null; limits?: ProcessLimits;
-  }): Promise<Held> {
+  hold(
+    name: string,
+    amount: bigint,
+    {
+      payment = null,
+      until = null,
+      withinMs = null,
+      rail,
+      info = null,
+      limits = {},
+    }: {
+      payment?: string | null;
+      until?: bigint | Date | null;
+      withinMs?: bigint | null;
+      rail: string;
+      info?: string | null;
+      limits?: ProcessLimits;
+    },
+  ): Promise<Held> {
     const wallet = walletKey(name);
     const own = ownLimits(limits);
     const args = {
@@ -729,7 +816,10 @@ export class Ledger {
       rail: railName(rail),
       info: text(info, 'info', INFO_LIMIT),
       holder: randomBytes(16).toString('hex'),
-      p_per_payment: own.perPayment, p_cap: own.cap, p_window_ms: own.windowMs, p_max_payments: own.maxPayments,
+      p_per_payment: own.perPayment,
+      p_cap: own.cap,
+      p_window_ms: own.windowMs,
+      p_max_payments: own.maxPayments,
     };
     return this.#write((): Held => {
       const held = this.#get<{ payment: string; at: bigint; until: bigint | null }>('hold', args);
@@ -743,7 +833,9 @@ export class Ledger {
         if (existing.wallet === wallet && BigInt(existing.amount) === args.amount) {
           return { payment: args.payment as string, at: null, until: null, state: existing.state, created: false, holder: null };
         }
-        throw new UsageError(`payment ${args.payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`);
+        throw new UsageError(
+          `payment ${args.payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`,
+        );
       }
       if (why.settles_too_soon) {
         const iso = (ms: bigint): string => new Date(Number(ms)).toISOString();
@@ -776,8 +868,9 @@ export class Ledger {
    * process that held it (`holder`). Settling a settled payment is a no-op, for anyone.
    */
   settle(payment: string, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<PaymentRow> {
-    return this.#move('settle', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) },
-      (current, mine) => (current.state === 'settled' || mine() ? null : heldElsewhere(current.payment, 'settle')));
+    return this.#move('settle', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) }, (current, mine) =>
+      current.state === 'settled' || mine() ? null : heldElsewhere(current.payment, 'settle'),
+    );
   }
 
   /** held -> void, by the process that held it: evidence that the payment never moved money. */
@@ -792,7 +885,10 @@ export class Ledger {
    * held with no until -> held until `until`, or `withinMs` from now, by the process that held
    * it. One that has an until keeps it.
    */
-  bound(payment: string, { until = null, withinMs = null, holder }: { until?: bigint | Date | null; withinMs?: bigint | null; holder: string | null }): Promise<PaymentRow> {
+  bound(
+    payment: string,
+    { until = null, withinMs = null, holder }: { until?: bigint | Date | null; withinMs?: bigint | null; holder: string | null },
+  ): Promise<PaymentRow> {
     const args = {
       until: until === null ? null : millis(until, 'until'),
       within_ms: withinMs === null ? null : millis(withinMs, 'withinMs', { min: 1n }),
@@ -810,8 +906,9 @@ export class Ledger {
   /** Note a held payment's outcome, by the process that held it: 'unknown' or 'refused'. It counts the same. */
   note(payment: string, outcome: Outcome, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<PaymentRow> {
     if (outcome !== 'unknown' && outcome !== 'refused') throw new UsageError("outcome is 'unknown' or 'refused'");
-    return this.#move('note', payment, { outcome, evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) },
-      (current, mine) => (mine() ? null : heldElsewhere(current.payment, 'note')));
+    return this.#move('note', payment, { outcome, evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) }, (current, mine) =>
+      mine() ? null : heldElsewhere(current.payment, 'note'),
+    );
   }
 
   /** The owner's reconciliation: held or void -> settled, whoever held it. Idempotent. */
@@ -821,8 +918,9 @@ export class Ledger {
 
   /** The owner's reconciliation: held -> void, whoever held it. A settled payment stays settled. */
   ownerVoid(payment: string, { evidence = null }: { evidence?: string | null } = {}): Promise<PaymentRow> {
-    return this.#move('owner_void', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT) },
-      current => (current.state === 'settled' ? `payment ${current.payment} is settled; a settled payment can't be voided` : null));
+    return this.#move('owner_void', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT) }, current =>
+      current.state === 'settled' ? `payment ${current.payment} is settled; a settled payment can't be voided` : null,
+    );
   }
 
   /** One payment, or null. */
@@ -858,7 +956,11 @@ export class Ledger {
    * The owner's bulk release: void every held payment of unknown or refused outcome, held at
    * least `olderThanMs` ago, that can no longer settle. Returns { payment, amount } for each.
    */
-  voidUnknown(name: string, olderThanMs: bigint, { evidence = 'voided by its owner: unknown or refused outcome' }: { evidence?: string } = {}): Promise<{ payment: string; amount: Micros }[]> {
+  voidUnknown(
+    name: string,
+    olderThanMs: bigint,
+    { evidence = 'voided by its owner: unknown or refused outcome' }: { evidence?: string } = {},
+  ): Promise<{ payment: string; amount: Micros }[]> {
     const wallet = walletKey(name);
     const age = millis(olderThanMs, 'olderThanMs');
     const note = text(evidence, 'evidence', EVIDENCE_LIMIT);
@@ -873,6 +975,10 @@ export class Ledger {
     this.#closed = true;
     this.#statements.clear();
     detachClock(this.#db);
-    try { this.#db.close(); } catch { /* already closed */ }
+    try {
+      this.#db.close();
+    } catch {
+      /* already closed */
+    }
   }
 }

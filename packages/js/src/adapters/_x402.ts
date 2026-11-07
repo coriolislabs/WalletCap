@@ -74,11 +74,11 @@ const GUARDED = Symbol.for('walletcap/x402-guard');
 // Set by @coinbase/cdp-sdk/x402's applySpendControls. The CDP store and this guard both count
 // one payment, so a client may have one counter, not both.
 const CDP_APPLIED = '@coinbase/cdp-sdk/x402/spend-controls/applied';
-const hasCdpControls = (client: object): boolean => Object.getOwnPropertySymbols(client)
-  .some(symbol => symbol.description === CDP_APPLIED);
-const oneCounter = (): UsageError => new UsageError(
-  'this x402 client already has Coinbase CDP spend controls; the CDP store and the budget guard both count the payment. Use one: guard(client, budget), or applySpendControls with cdpStore(budget), not both.',
-);
+const hasCdpControls = (client: object): boolean => Object.getOwnPropertySymbols(client).some(symbol => symbol.description === CDP_APPLIED);
+const oneCounter = (): UsageError =>
+  new UsageError(
+    'this x402 client already has Coinbase CDP spend controls; the CDP store and the budget guard both count the payment. Use one: guard(client, budget), or applySpendControls with cdpStore(budget), not both.',
+  );
 // The guard's state for one payment, on the context @x402/core passes from hook to hook.
 const SLOT = Symbol('walletcap/x402-payment');
 type Slotted = { [SLOT]?: Slot };
@@ -98,11 +98,17 @@ export const timeoutRefusal = (requirements: PaymentRequirements | undefined): B
   const seconds = requirements?.maxTimeoutSeconds;
   if (typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds > 0 && seconds <= MAX_PAYMENT_TIMEOUT_SECONDS) return null;
   if (typeof seconds !== 'number' || !Number.isSafeInteger(seconds) || seconds <= 0) {
-    return new BudgetRefused('timeout', `the payee's terms give no whole number of seconds for how long the payment can be redeemed `
-      + `(maxTimeoutSeconds: ${JSON.stringify(seconds) ?? 'none'}), so walletcap can't tell when it stops counting`);
+    return new BudgetRefused(
+      'timeout',
+      `the payee's terms give no whole number of seconds for how long the payment can be redeemed ` +
+        `(maxTimeoutSeconds: ${JSON.stringify(seconds) ?? 'none'}), so walletcap can't tell when it stops counting`,
+    );
   }
-  return new BudgetRefused('timeout', `the payee asks for an authorization it could redeem for ${seconds} seconds; `
-    + `walletcap signs for at most ${MAX_PAYMENT_TIMEOUT_SECONDS} seconds (an hour), as Coinbase's CDP spend controls do`);
+  return new BudgetRefused(
+    'timeout',
+    `the payee asks for an authorization it could redeem for ${seconds} seconds; ` +
+      `walletcap signs for at most ${MAX_PAYMENT_TIMEOUT_SECONDS} seconds (an hour), as Coinbase's CDP spend controls do`,
+  );
 };
 
 // A Solana payment is a signed transaction, which the chain takes until its blockhash is 150
@@ -129,7 +135,7 @@ export const settlesWithinSeconds = (requirements: PaymentRequirements): number 
   if (timeoutRefusal(requirements) !== null) return null;
   const { network, maxTimeoutSeconds } = requirements;
   const seconds = maxTimeoutSeconds as number;
-  const caip2 = Object.hasOwn(V1_NETWORKS, network) ? V1_NETWORKS[network] ?? network : String(network);
+  const caip2 = Object.hasOwn(V1_NETWORKS, network) ? (V1_NETWORKS[network] ?? network) : String(network);
   return caip2.startsWith('solana:') ? Math.max(seconds, SOLANA_TRANSACTION_SECONDS) : seconds;
 };
 
@@ -138,18 +144,20 @@ export const settlesWithinSeconds = (requirements: PaymentRequirements): number 
  * x402 2.28.0's own DEFAULT_ASSETS, plus Circle's native USDC on Optimism and Solana. Add other
  * USD-pegged stablecoins with guard(client, budget, { assets }); their decimals can't be changed.
  */
-export const USD_ASSETS: readonly Readonly<AssetEntry>[] = Object.freeze([
-  { network: 'eip155:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
-  { network: 'eip155:10', asset: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', decimals: 6 },
-  { network: 'eip155:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', decimals: 6 },
-  { network: 'eip155:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 },
-  { network: 'eip155:84532', asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', decimals: 6 },
-  { network: 'eip155:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 },
-  { network: 'eip155:421614', asset: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', decimals: 6 },
-  { network: 'eip155:43114', asset: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', decimals: 6 },
-  { network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6 },
-  { network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', decimals: 6 },
-].map(entry => Object.freeze(entry)));
+export const USD_ASSETS: readonly Readonly<AssetEntry>[] = Object.freeze(
+  [
+    { network: 'eip155:1', asset: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', decimals: 6 },
+    { network: 'eip155:10', asset: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85', decimals: 6 },
+    { network: 'eip155:137', asset: '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359', decimals: 6 },
+    { network: 'eip155:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', decimals: 6 },
+    { network: 'eip155:84532', asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', decimals: 6 },
+    { network: 'eip155:42161', asset: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', decimals: 6 },
+    { network: 'eip155:421614', asset: '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d', decimals: 6 },
+    { network: 'eip155:43114', asset: '0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E', decimals: 6 },
+    { network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', asset: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', decimals: 6 },
+    { network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1', asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', decimals: 6 },
+  ].map(entry => Object.freeze(entry)),
+);
 
 export const assetKey = (network: string, asset: string): string => {
   const caip2 = V1_NETWORKS[network] ?? network;
@@ -185,7 +193,11 @@ export function assetTable(extra: unknown): Map<string, number> {
 export const atomicOf = (requirements: PaymentRequirements): bigint => {
   const raw = requirements.amount ?? requirements.maxAmountRequired;
   let atomic: bigint;
-  try { atomic = BigInt(raw as string); } catch { throw new BudgetRefused('terms', `the x402 amount ${JSON.stringify(raw)} is not an integer`); }
+  try {
+    atomic = BigInt(raw as string);
+  } catch {
+    throw new BudgetRefused('terms', `the x402 amount ${JSON.stringify(raw)} is not an integer`);
+  }
   if (atomic < 0n) throw new BudgetRefused('terms', 'the x402 amount is negative');
   return atomic;
 };
@@ -242,8 +254,12 @@ const identityOf = (payload: SignedPayload | undefined): string | undefined => {
   }
   const permit2 = signed?.permit2Authorization;
   const nonce = permit2?.nonce;
-  if (typeof permit2?.from === 'string' && HEX.test(permit2.from) && (typeof nonce === 'string' || typeof nonce === 'number' || typeof nonce === 'bigint')
-    && /^[0-9]+$/.test(String(nonce))) {
+  if (
+    typeof permit2?.from === 'string' &&
+    HEX.test(permit2.from) &&
+    (typeof nonce === 'string' || typeof nonce === 'number' || typeof nonce === 'bigint') &&
+    /^[0-9]+$/.test(String(nonce))
+  ) {
     return `permit2:${permit2.from.toLowerCase()}:${String(nonce)}`;
   }
   return undefined;
@@ -289,8 +305,11 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
   const price = (requirements: PaymentRequirements): bigint => {
     const decimals = table.get(assetKey(requirements.network, requirements.asset));
     if (decimals === undefined) {
-      throw new BudgetRefused('asset', `the budget cannot price ${requirements.asset} on ${requirements.network}. `
-        + `If it is a USD stablecoin, add it: guard(client, budget, { assets: [{ network: '${requirements.network}', asset: '${requirements.asset}', decimals: 6 }] })`);
+      throw new BudgetRefused(
+        'asset',
+        `the budget cannot price ${requirements.asset} on ${requirements.network}. ` +
+          `If it is a USD stablecoin, add it: guard(client, budget, { assets: [{ network: '${requirements.network}', asset: '${requirements.asset}', decimals: 6 }] })`,
+      );
     }
     return toMicros(atomicOf(requirements), decimals);
   };
@@ -431,7 +450,8 @@ export function guardAgentKit<P extends object>(provider: P, budget: Budget, opt
   if (target[GUARDED_PROVIDER] !== undefined) throw new UsageError('this provider already has a budget guard');
   assetTable(options.assets ?? []); // a bad asset list fails here, not at the first payment
   Object.defineProperty(provider, 'createX402Client', {
-    value: async (walletProvider: unknown) => guard(await (create as (wallet: unknown) => Promise<X402HookedClient>).call(provider, walletProvider), budget, options),
+    value: async (walletProvider: unknown) =>
+      guard(await (create as (wallet: unknown) => Promise<X402HookedClient>).call(provider, walletProvider), budget, options),
   });
   Object.defineProperty(provider, GUARDED_PROVIDER, { value: budget });
   return provider;

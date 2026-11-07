@@ -13,7 +13,13 @@ import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-agentkit-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 const kit = await x402();
 const BASE_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const STRANGER = '0x1111111111111111111111111111111111111111';
@@ -24,7 +30,7 @@ const settled = { success: true, transaction: `0x${'cd'.repeat(32)}`, network: N
 const standIn = async () => {
   const { x402Client } = await import('@x402/core/client');
   const { registerExactEvmScheme } = await import('@x402/evm/exact/client');
-  return new class X402ActionProvider {
+  return new (class X402ActionProvider {
     async createX402Client(walletProvider) {
       const client = registerExactEvmScheme(new x402Client(), { signer: walletProvider.account });
       client.setSpendControls(false); // x402's own default cap stays out of the measurement
@@ -37,7 +43,7 @@ const standIn = async () => {
       await client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: settled });
       return payload.accepted;
     }
-  }();
+  })();
 };
 
 const skip = kit === null && 'the x402 devDependencies are not installed';
@@ -54,7 +60,10 @@ test("every client an AgentKit provider builds is guarded, and the merchant's fi
   for (let i = 0; i < 5; i += 1) await provider.pay(wallet, kit.required(10_000));
   await assert.rejects(provider.pay(wallet, kit.required(10_000)), error => error instanceof BudgetRefused && error.code === 'budget');
   assert.equal((await budget.status()).spent, 50_000n);
-  assert.deepEqual((await budget.history()).map(p => p.to), Array(5).fill(PAY_TO));
+  assert.deepEqual(
+    (await budget.history()).map(p => p.to),
+    Array(5).fill(PAY_TO),
+  );
   budget.close();
 });
 

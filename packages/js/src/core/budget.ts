@@ -15,15 +15,35 @@ import { resolve } from 'node:path';
 import { registerLedger } from './_ledgers.js';
 import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, UsageError } from './errors.js';
 import {
-  type BudgetRow, Ledger, mergedNoteOf, OPEN, type Outcome, type PaymentRow, type PaymentState, type ProcessLimits, type StatusRow,
+  type BudgetRow,
+  Ledger,
+  mergedNoteOf,
+  OPEN,
+  type Outcome,
+  type PaymentRow,
+  type PaymentState,
+  type ProcessLimits,
+  type StatusRow,
   heldElsewhere,
 } from './ledger.js';
 import {
-  checkKeys, defaultBudgetPath, describeLimits, type Dollars, expandHome, formatUsd, formatWindow, type LimitOptions, type Limits, limitFlags,
-  type Micros, normalizeWallet, parseLimits, shortWallet, toMicros,
+  checkKeys,
+  defaultBudgetPath,
+  describeLimits,
+  type Dollars,
+  expandHome,
+  formatUsd,
+  formatWindow,
+  type LimitOptions,
+  type Limits,
+  limitFlags,
+  type Micros,
+  normalizeWallet,
+  parseLimits,
+  shortWallet,
+  toMicros,
 } from './money.js';
 import { withJSON } from './wire.js';
-
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
 const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
@@ -174,8 +194,10 @@ const durationMs = (value: unknown, label: string): bigint => {
 
 const describe = (to: unknown, note: unknown, details: unknown): Info | null => {
   if (to !== undefined && (typeof to !== 'string' || to.length > TO_LIMIT)) throw new UsageError(`to must be a string of at most ${TO_LIMIT} characters`);
-  if (note !== undefined && (typeof note !== 'string' || note.length > NOTE_LIMIT)) throw new UsageError(`note must be a string of at most ${NOTE_LIMIT} characters`);
-  if (details !== undefined && (details === null || typeof details !== 'object' || Array.isArray(details))) throw new UsageError('details must be a plain object');
+  if (note !== undefined && (typeof note !== 'string' || note.length > NOTE_LIMIT))
+    throw new UsageError(`note must be a string of at most ${NOTE_LIMIT} characters`);
+  if (details !== undefined && (details === null || typeof details !== 'object' || Array.isArray(details)))
+    throw new UsageError('details must be a plain object');
   const info: Info = { ...(details as Info | undefined), ...(to === undefined ? {} : { to }), ...(note === undefined ? {} : { note }) };
   for (const key of Object.keys(info)) if (info[key] === undefined || info[key] === null) delete info[key];
   return Object.keys(info).length === 0 ? null : info;
@@ -195,7 +217,7 @@ const transactionOf = (result: unknown): string | undefined => {
 const parseInfo = (text: string | null): Info => {
   try {
     const info: unknown = text ? JSON.parse(text) : {};
-    return info !== null && typeof info === 'object' ? info as Info : {};
+    return info !== null && typeof info === 'object' ? (info as Info) : {};
   } catch {
     return {};
   }
@@ -217,9 +239,8 @@ const label = (row: PaymentRow, info: Info): Payment['status'] => {
 const settlesByOf = (row: PaymentRow): Date | null => (row.until === null ? null : new Date(Number(row.until)));
 
 // When a payment stops counting, or null while only evidence can end it.
-const countsUntilOf = (row: PaymentRow): Date | null => (row.counts_from === null || row.counts_from === OPEN
-  ? null
-  : new Date(Number(row.counts_from + row.window_ms)));
+const countsUntilOf = (row: PaymentRow): Date | null =>
+  row.counts_from === null || row.counts_from === OPEN ? null : new Date(Number(row.counts_from + row.window_ms));
 
 const noteOf = (info: Info): string | undefined => textOf(info.note) ?? (info.network ? String(info.network) : undefined);
 
@@ -280,7 +301,17 @@ export function statusOf(row: StatusRow, path: string): Status {
   return withJSON({ ...status, summary: summarize(status) });
 }
 
-function summarize({ wallet, cap, windowMs, perPayment, maxPayments, spent, inFlight, remaining, frozen }: Omit<Status, 'summary' | 'path' | 'payments'>): string {
+function summarize({
+  wallet,
+  cap,
+  windowMs,
+  perPayment,
+  maxPayments,
+  spent,
+  inFlight,
+  remaining,
+  frozen,
+}: Omit<Status, 'summary' | 'path' | 'payments'>): string {
   const parts = [`${shortWallet(wallet)}: ${formatUsd(spent)} spent of ${formatUsd(cap)} per ${formatWindow(windowMs)}, ${formatUsd(remaining)} left`];
   if (inFlight > 0n) parts.push(`${formatUsd(inFlight)} in flight`);
   if (perPayment !== null) parts.push(`at most ${formatUsd(perPayment)} a payment`);
@@ -374,16 +405,24 @@ export class Hold {
   }
 
   /** The payment's identity in the ledger: a good idempotency key for the rail you pay through. */
-  get id(): string { return this.#id; }
+  get id(): string {
+    return this.#id;
+  }
 
   /** In micro-dollars. */
-  get amount(): Micros { return this.#amount; }
+  get amount(): Micros {
+    return this.#amount;
+  }
 
   /** The state this handle last saw: 'held', 'settled' or 'void'. */
-  get state(): PaymentState { return this.#state; }
+  get state(): PaymentState {
+    return this.#state;
+  }
 
   /** False when the id was already in the ledger, for this wallet and amount: this is that payment. */
-  get created(): boolean { return this.#created; }
+  get created(): boolean {
+    return this.#created;
+  }
 
   /**
    * The payment settled. It counts through one window from now, or from its settle-by time if
@@ -411,7 +450,9 @@ export class Hold {
 
   /** What is known about a held payment's outcome; it counts the same. */
   async note(outcome: Outcome, detail?: string): Promise<void> {
-    this.#state = (await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024), holder: this.#token('note') })).state;
+    this.#state = (
+      await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024), holder: this.#token('note') })
+    ).state;
   }
 }
 
@@ -452,18 +493,26 @@ export class Budget {
     const create = options.create ?? false;
     const asked = parseLimits(options);
     if (!create && !existsSync(path)) {
-      throw new BudgetUnavailable(`no budget file at ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`);
+      throw new BudgetUnavailable(
+        `no budget file at ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`,
+      );
     }
     const ledger = await Ledger.open(path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000, create });
     try {
       let row = await ledger.budget(wallet);
       if (row === null) {
-        if (!create) throw new BudgetUnavailable(`${shortWallet(wallet)} has no budget in ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`);
+        if (!create)
+          throw new BudgetUnavailable(
+            `${shortWallet(wallet)} has no budget in ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`,
+          );
         if (asked.cap === undefined || asked.windowMs === undefined) {
           throw new UsageError(`${shortWallet(wallet)} has no budget yet: give it a rolling limit, like perDay: '$150'`);
         }
         row = await ledger.createBudget(wallet, {
-          cap: asked.cap, windowMs: asked.windowMs, perPayment: asked.perPayment ?? null, maxPayments: asked.maxPayments ?? null,
+          cap: asked.cap,
+          windowMs: asked.windowMs,
+          perPayment: asked.perPayment ?? null,
+          maxPayments: asked.maxPayments ?? null,
         });
       }
       if (row.unit !== 'usd' && row.unit !== 'usdc') throw new UsageError(`${shortWallet(wallet)}'s budget counts in ${row.unit}, not usd`);
@@ -479,10 +528,14 @@ export class Budget {
   }
 
   /** The name the budget is kept under: an EVM address, lowercased. */
-  get wallet(): string { return this.#wallet; }
+  get wallet(): string {
+    return this.#wallet;
+  }
 
   /** The budget file. */
-  get path(): string { return this.#path; }
+  get path(): string {
+    return this.#path;
+  }
 
   /** Whether `amount` would be paid right now, without holding it. */
   async check(amount: Dollars): Promise<Check> {
@@ -572,20 +625,27 @@ export class Budget {
     return (await this.#ledger.counting(this.#wallet, { heldOnly: true })).map(heldPaymentOf);
   }
 
-  close(): void { this.#ledger.close(); }
+  close(): void {
+    this.#ledger.close();
+  }
 
-  [Symbol.dispose](): void { this.close(); }
+  [Symbol.dispose](): void {
+    this.close();
+  }
 
-  async [Symbol.asyncDispose](): Promise<void> { this.close(); }
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.close();
+  }
 }
 
 function warnLooser(onWarning: ((message: string) => void) | undefined, row: BudgetRow, asked: Limits, path: string): void {
   const stored = { cap: row.cap, windowMs: row.window_ms, perPayment: row.per_payment, maxPayments: row.max_payments };
   const merged = mergedNoteOf(row.merged_from);
-  const message = `walletcap: ${shortWallet(row.wallet)} keeps its stored limits (${describeLimits(stored)}); `
-    + `your code asks for ${describeLimits(asked, { window: row.window_ms, nulls: true })}. A process can tighten the limits for itself, never loosen them. `
-    + `To raise them, its owner runs: npx walletcap set --wallet ${row.wallet}${pathFlag(path)} ${limitFlags(asked)}`.trimEnd()
-    + (merged === null ? '' : `. ${merged}`);
+  const message =
+    `walletcap: ${shortWallet(row.wallet)} keeps its stored limits (${describeLimits(stored)}); ` +
+    `your code asks for ${describeLimits(asked, { window: row.window_ms, nulls: true })}. A process can tighten the limits for itself, never loosen them. ` +
+    `To raise them, its owner runs: npx walletcap set --wallet ${row.wallet}${pathFlag(path)} ${limitFlags(asked)}`.trimEnd() +
+    (merged === null ? '' : `. ${merged}`);
   if (typeof onWarning === 'function') onWarning(message);
   else process.emitWarning(message, { type: 'BudgetWarning', code: 'WALLETCAP_LIMIT_KEPT' });
 }

@@ -9,11 +9,19 @@
 import { resolve } from 'node:path';
 import { UsageError } from './errors.js';
 import { Ledger } from './ledger.js';
+import { heldPaymentOf, type HeldPayment, type Payment, paymentOf, type PaymentRecord, recordOf, type Status, statusOf } from './budget.js';
 import {
-  heldPaymentOf, type HeldPayment, type Payment, paymentOf, type PaymentRecord, recordOf, type Status, statusOf,
-} from './budget.js';
-import {
-  checkKeys, defaultBudgetPath, DOLLAR_UNITS, expandHome, type LimitOptions, type Micros, normalizeWallet, parseLimits, shortWallet, toWindowMs, type Window,
+  checkKeys,
+  defaultBudgetPath,
+  DOLLAR_UNITS,
+  expandHome,
+  type LimitOptions,
+  type Micros,
+  normalizeWallet,
+  parseLimits,
+  shortWallet,
+  toWindowMs,
+  type Window,
 } from './money.js';
 import { withJSON } from './wire.js';
 
@@ -73,7 +81,9 @@ export class Owner {
   }
 
   /** The budget file. */
-  get path(): string { return this.#path; }
+  get path(): string {
+    return this.#path;
+  }
 
   /** Every budget in the file, by name. */
   async budgets(): Promise<BudgetLimits[]> {
@@ -126,7 +136,10 @@ export class Owner {
         throw new UsageError(`${shortWallet(name)} has no budget yet: give it a rolling limit too, like --per-day 150`);
       }
       await this.#ledger.createBudget(name, {
-        cap: parsed.cap, windowMs: parsed.windowMs, perPayment: parsed.perPayment ?? null, maxPayments: parsed.maxPayments ?? null,
+        cap: parsed.cap,
+        windowMs: parsed.windowMs,
+        perPayment: parsed.perPayment ?? null,
+        maxPayments: parsed.maxPayments ?? null,
       });
     } else {
       if (!DOLLAR_UNITS.has(row.unit)) throw new UsageError(`${shortWallet(name)}'s budget counts in ${row.unit}, not usd`);
@@ -141,10 +154,14 @@ export class Owner {
   }
 
   /** Refuse every payment from `wallet`, on every rail and in every process, until unfreeze(). */
-  async freeze(wallet: string): Promise<void> { await this.#ledger.freeze(wallet); }
+  async freeze(wallet: string): Promise<void> {
+    await this.#ledger.freeze(wallet);
+  }
 
   /** Allow payments again, after freeze() or after an upgrade froze the budget. */
-  async unfreeze(wallet: string): Promise<void> { await this.#ledger.unfreeze(wallet); }
+  async unfreeze(wallet: string): Promise<void> {
+    await this.#ledger.unfreeze(wallet);
+  }
 
   /**
    * Void a held payment: evidence that it never moved money, such as the chain showing its
@@ -175,10 +192,15 @@ export class Owner {
     return voided.map(row => withJSON({ id: row.payment, amount: row.amount }));
   }
 
-  close(): void { this.#ledger.close(); }
+  close(): void {
+    this.#ledger.close();
+  }
 
-  [Symbol.dispose](): void { this.close(); }
+  [Symbol.dispose](): void {
+    this.close();
+  }
 
-  async [Symbol.asyncDispose](): Promise<void> { this.close(); }
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.close();
+  }
 }
-

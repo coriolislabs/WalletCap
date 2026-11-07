@@ -17,7 +17,10 @@ try {
   const path = join(dir, 'budget.sqlite');
   const budget = await openBudget({ wallet, path, perPayment: '$0.75', perDay: '$1', create: true });
   await budget.pay('$0.60', async () => `0x${'ab'.repeat(32)}`);
-  await assert.rejects(budget.pay('$0.50', async () => 'never'), error => error instanceof BudgetRefused && error.code === 'budget');
+  await assert.rejects(
+    budget.pay('$0.50', async () => 'never'),
+    error => error instanceof BudgetRefused && error.code === 'budget',
+  );
   const owner = await openOwner({ path });
   assert.equal((await owner.status(wallet)).spent, 600_000n);
   owner.close();

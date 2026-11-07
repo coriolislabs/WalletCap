@@ -28,17 +28,17 @@ const FACTORY_ABI = parseAbi([
   'function createAccount(bytes[] owners, uint256 nonce) payable returns (address)',
   'function getAddress(bytes[] owners, uint256 nonce) view returns (address)',
 ]);
-const WALLET_ABI = parseAbi([
-  'function addOwnerAddress(address owner)',
-  'function execute(address target, uint256 value, bytes data) payable',
-]);
+const WALLET_ABI = parseAbi(['function addOwnerAddress(address owner)', 'function execute(address target, uint256 value, bytes data) payable']);
 const SPENDER_ABI = WALLETCAP.AccountCapSpender.abi;
 const TOKEN_ABI = WALLETCAP.MockToken.abi;
-const ERROR_ABIS = [SPENDER_ABI, parseAbi([
-  'error ExceededSpendPermission(uint256 value, uint256 allowance)',
-  'error UnauthorizedSpendPermission()',
-  'error InvalidSender(address sender, address expected)',
-])];
+const ERROR_ABIS = [
+  SPENDER_ABI,
+  parseAbi([
+    'error ExceededSpendPermission(uint256 value, uint256 allowance)',
+    'error UnauthorizedSpendPermission()',
+    'error InvalidSender(address sender, address expected)',
+  ]),
+];
 
 const DAY = 86_400n;
 const CAP = 150_000_000n; // $150 of a 6-decimal stablecoin
@@ -73,14 +73,20 @@ async function chain() {
     if (!failure) return { ok: true, created: result.createdAddress?.toString() };
     let reason = failure.error;
     for (const abi of ERROR_ABIS) {
-      try { reason = decodeErrorResult({ abi, data: bytesToHex(result.execResult.returnValue) }).errorName; break; } catch { /* next */ }
+      try {
+        reason = decodeErrorResult({ abi, data: bytesToHex(result.execResult.returnValue) }).errorName;
+        break;
+      } catch {
+        /* next */
+      }
     }
     return { ok: false, reason };
   };
   const call = (key, to, abi, functionName, args) => send(key, to, encodeFunctionData({ abi, functionName, args }));
   const read = async (to, abi, functionName, args) => {
     const result = await vm.evm.runCall({
-      to: createAddressFromString(to), caller: createAddressFromString(who.owner),
+      to: createAddressFromString(to),
+      caller: createAddressFromString(who.owner),
       data: hexToBytes(encodeFunctionData({ abi, functionName, args })),
       block: createBlock({ header: { number: height, timestamp: now } }, { common }),
     });
@@ -107,12 +113,33 @@ async function chain() {
   await must(call(keys.owner, token, TOKEN_ABI, 'mint', [wallet, 1_000_000_000n]));
 
   const permission = (spender, salt) => ({
-    account: wallet, spender, token, allowance: CAP, period: Number(DAY),
-    start: Number(START), end: Number(START + 30n * DAY), salt, extraData: '0x',
+    account: wallet,
+    spender,
+    token,
+    allowance: CAP,
+    period: Number(DAY),
+    start: Number(START),
+    end: Number(START + 30n * DAY),
+    salt,
+    extraData: '0x',
   });
-  const grant = perm => must(call(keys.owner, wallet, WALLET_ABI, 'execute', [MANAGER, 0n, encodeFunctionData({ abi: MANAGER_ABI, functionName: 'approve', args: [perm] })]));
+  const grant = perm =>
+    must(call(keys.owner, wallet, WALLET_ABI, 'execute', [MANAGER, 0n, encodeFunctionData({ abi: MANAGER_ABI, functionName: 'approve', args: [perm] })]));
   const balance = async address => read(token, TOKEN_ABI, 'balanceOf', [address]);
-  return { keys, who, wallet, token, permission, grant, balance, call, deploy, at: t => { now = t; } };
+  return {
+    keys,
+    who,
+    wallet,
+    token,
+    permission,
+    grant,
+    balance,
+    call,
+    deploy,
+    at: t => {
+      now = t;
+    },
+  };
 }
 
 // The agent pulls from Spend Permissions granted to it directly.

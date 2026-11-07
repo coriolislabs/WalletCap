@@ -137,7 +137,12 @@ export function toWindowMs(value: unknown, label = 'window'): bigint {
 
 /** How long ago, roughly: "3d 4h", "4h 12m", "12m 5s" or "5s". */
 export function formatAge(ms: bigint): string {
-  const units: [string, bigint][] = [['d', 86_400_000n], ['h', 3_600_000n], ['m', 60_000n], ['s', 1_000n]];
+  const units: [string, bigint][] = [
+    ['d', 86_400_000n],
+    ['h', 3_600_000n],
+    ['m', 60_000n],
+    ['s', 1_000n],
+  ];
   const parts: string[] = [];
   let left = ms < 0n ? 0n : ms;
   for (const [suffix, size] of units) {
@@ -166,7 +171,7 @@ const checksumOk = (address: string): boolean => {
   for (let i = 0; i < hex.length; i += 1) {
     const char = hex.charAt(i);
     if (/\d/.test(char)) continue;
-    if ((parseInt(digest.charAt(i), 16) >= 8) !== (char === char.toUpperCase())) return false;
+    if (parseInt(digest.charAt(i), 16) >= 8 !== (char === char.toUpperCase())) return false;
   }
   return true;
 };
@@ -315,7 +320,12 @@ export function parseLimits(source: LimitOptions): Limits {
  * With `nulls`, a field set to null reads as "no limit".
  */
 export function describeLimits(
-  { cap, windowMs, perPayment, maxPayments }: { cap?: bigint | undefined; windowMs?: bigint | undefined; perPayment?: bigint | null | undefined; maxPayments?: bigint | null | undefined },
+  {
+    cap,
+    windowMs,
+    perPayment,
+    maxPayments,
+  }: { cap?: bigint | undefined; windowMs?: bigint | undefined; perPayment?: bigint | null | undefined; maxPayments?: bigint | null | undefined },
   { window = windowMs, nulls = false }: { window?: bigint | undefined; nulls?: boolean } = {},
 ): string {
   const parts: string[] = [];

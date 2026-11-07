@@ -80,12 +80,18 @@ test("CDP's controls on walletcap's cdpStore, set as walletcap's README shows, h
   // Ten replicas record into one budget file: three $50 payments, and 27 refused.
   assert.equal(by.replicas.cdpStore.usdc, 150n * USD);
   assert.equal(by.replicas.cdpStore.refused, 27);
-  assert.ok(by.replicas.cdpStore.reasons.every(reason => refusals.has(reason)), by.replicas.cdpStore.reasons.join(', '));
+  assert.ok(
+    by.replicas.cdpStore.reasons.every(reason => refusals.has(reason)),
+    by.replicas.cdpStore.reasons.join(', '),
+  );
 
   // With the store 1 ms away, more replicas pass CDP's check together; the store's re-check holds.
   assert.equal(by['shared-store'].cdpStore.usdc, 150n * USD);
   assert.equal(by['shared-store'].cdpStore.refused, 27);
-  assert.ok(by['shared-store'].cdpStore.reasons.every(reason => refusals.has(reason)), by['shared-store'].cdpStore.reasons.join(', '));
+  assert.ok(
+    by['shared-store'].cdpStore.reasons.every(reason => refusals.has(reason)),
+    by['shared-store'].cdpStore.reasons.join(', '),
+  );
 
   // allowedAssets, which walletcap's README sets, refuses EURC before signing.
   assert.equal(by['asset-switch'].cdpStore.eurc, 0n);
@@ -126,12 +132,20 @@ const agentkitInstalled = (() => {
   }
 })();
 
-test("AgentKit signs the merchant's first-listed $1.00 on mainnet and reports the 1¢ it was given; walletcap signs the 1¢", { skip: !agentkitInstalled && '@coinbase/agentkit is not installed alongside' }, async () => {
+test("AgentKit signs the merchant's first-listed $1.00 on mainnet and reports the 1¢ it was given; walletcap signs the 1¢", {
+  skip: !agentkitInstalled && '@coinbase/agentkit is not installed alongside',
+}, async () => {
   const row = await agentkitRow();
-  assert.deepEqual(row.agentkit.received.map(p => [p.network, p.amount, p.toStranger]), [['eip155:8453', '1000000', true]]);
+  assert.deepEqual(
+    row.agentkit.received.map(p => [p.network, p.amount, p.toStranger]),
+    [['eip155:8453', '1000000', true]],
+  );
   assert.deepEqual([row.agentkit.reported.network, row.agentkit.reported.amount], ['eip155:84532', '10000']);
   // walletcap passes over the $1.00, valid 4 days; the offer left is the 1¢ the agent approved.
-  assert.deepEqual(row.walletcap.received.map(p => [p.network, p.amount, p.toStranger, p.approved]), [['eip155:84532', '10000', false, true]]);
+  assert.deepEqual(
+    row.walletcap.received.map(p => [p.network, p.amount, p.toStranger, p.approved]),
+    [['eip155:84532', '10000', false, true]],
+  );
   assert.equal(row.walletcap.refused, false);
 });
 

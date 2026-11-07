@@ -9,5 +9,11 @@
 // longer settle, whatever the payee answers. Terms valid longer than an hour are passed over.
 export { guard, MAX_PAYMENT_TIMEOUT_SECONDS, USD_ASSETS } from './_x402.js';
 export type {
-  AssetEntry, PaymentCreatedContext, PaymentCreationContext, PaymentCreationFailureContext, PaymentRequirements, PaymentResponseContext, X402HookedClient,
+  AssetEntry,
+  PaymentCreatedContext,
+  PaymentCreationContext,
+  PaymentCreationFailureContext,
+  PaymentRequirements,
+  PaymentResponseContext,
+  X402HookedClient,
 } from './_x402.js';

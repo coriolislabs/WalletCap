@@ -29,10 +29,18 @@ export async function x402() {
       return {
         x402Version: 2,
         resource: { url: 'https://api.example/paid', description: 'owned test resource', mimeType: 'text/plain' },
-        accepts: [{
-          scheme: 'exact', network: NETWORK, asset: USDC, amount: String(atomic), payTo: PAY_TO, maxTimeoutSeconds: 300,
-          extra: { name: 'USDC', version: '2' }, ...overrides,
-        }],
+        accepts: [
+          {
+            scheme: 'exact',
+            network: NETWORK,
+            asset: USDC,
+            amount: String(atomic),
+            payTo: PAY_TO,
+            maxTimeoutSeconds: 300,
+            extra: { name: 'USDC', version: '2' },
+            ...overrides,
+          },
+        ],
       };
     },
   };

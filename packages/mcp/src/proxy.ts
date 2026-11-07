@@ -39,9 +39,16 @@ const MCP_PAYMENT_TOOLS: Readonly<Record<string, string>> = { make_http_request_
  * a tool walletcap does not know may move money it cannot count.
  */
 export const MCP_PASS_THROUGH_TOOLS: readonly string[] = Object.freeze([
-  'bazaar_get_resource_details', 'bazaar_list', 'bazaar_search', 'check_session_status',
-  'get_wallet_address', 'get_wallet_balance', 'show_wallet_app', 'sign_in_with_email',
-  'verify_email_otp', 'x402_discover_payment_requirements',
+  'bazaar_get_resource_details',
+  'bazaar_list',
+  'bazaar_search',
+  'check_session_status',
+  'get_wallet_address',
+  'get_wallet_balance',
+  'show_wallet_app',
+  'sign_in_with_email',
+  'verify_email_otp',
+  'x402_discover_payment_requirements',
 ]);
 
 /**
@@ -83,9 +90,22 @@ interface JsonRpc {
  * counted, the tools in MCP_PASS_THROUGH_TOOLS and --allow-tool pass through, and every other
  * tool is refused and left out of tools/list. Resolves with the server's exit code.
  */
-export async function proxy(argv: string[], { env = process.env, input = process.stdin, output = process.stdout, stderr = process.stderr, home }: {
-  env?: NodeJS.ProcessEnv; input?: Readable; output?: Writable; stderr?: Writable; home?: string;
-} = {}): Promise<number> {
+export async function proxy(
+  argv: string[],
+  {
+    env = process.env,
+    input = process.stdin,
+    output = process.stdout,
+    stderr = process.stderr,
+    home,
+  }: {
+    env?: NodeJS.ProcessEnv;
+    input?: Readable;
+    output?: Writable;
+    stderr?: Writable;
+    home?: string;
+  } = {},
+): Promise<number> {
   const split = argv.indexOf('--');
   const own = split < 0 ? argv : argv.slice(0, split);
   const { values } = parseArgs({
@@ -100,26 +120,36 @@ export async function proxy(argv: string[], { env = process.env, input = process
     return 2;
   }
   if (split < 0 && !existsSync(server[1] ?? '')) {
-    stderr.write(`walletcap: Coinbase's Agentic Wallet MCP server is not installed at ${server[1]}. `
-      + 'Install it once with: npx @coinbase/payments-mcp install --client other --no-auto-config '
-      + '(or give walletcap the server command after --)\n');
+    stderr.write(
+      `walletcap: Coinbase's Agentic Wallet MCP server is not installed at ${server[1]}. ` +
+        'Install it once with: npx @coinbase/payments-mcp install --client other --no-auto-config ' +
+        '(or give walletcap the server command after --)\n',
+    );
     return 1;
   }
   const passed = new Set([...MCP_PASS_THROUGH_TOOLS, ...(values['allow-tool'] ?? [])]);
   const offered = (name: unknown): boolean => (typeof name === 'string' && Object.hasOwn(MCP_PAYMENT_TOOLS, name)) || passed.has(String(name));
   const child = spawn(command, commandArgs, { stdio: ['pipe', 'pipe', 'inherit'], env });
-  const write = (stream: Writable, message: unknown): void => { stream.write(`${JSON.stringify(message)}\n`); };
+  const write = (stream: Writable, message: unknown): void => {
+    stream.write(`${JSON.stringify(message)}\n`);
+  };
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   const listing = new Set<string>(); // the client's tools/list requests, whose answers are filtered
-  const callTool = (name: string | undefined, args: Record<string, unknown>): Promise<unknown> => new Promise((resolveCall, rejectCall) => {
-    const id = `walletcap-${randomUUID()}`;
-    pending.set(id, { resolve: resolveCall, reject: rejectCall });
-    write(child.stdin, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
-  });
+  const callTool = (name: string | undefined, args: Record<string, unknown>): Promise<unknown> =>
+    new Promise((resolveCall, rejectCall) => {
+      const id = `walletcap-${randomUUID()}`;
+      pending.set(id, { resolve: resolveCall, reject: rejectCall });
+      write(child.stdin, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+    });
 
   createInterface({ input: child.stdout }).on('line', line => {
     let message: JsonRpc;
-    try { message = JSON.parse(line) as JsonRpc; } catch { output.write(`${line}\n`); return; }
+    try {
+      message = JSON.parse(line) as JsonRpc;
+    } catch {
+      output.write(`${line}\n`);
+      return;
+    }
     const waiting = typeof message?.id === 'string' ? pending.get(message.id) : undefined;
     if (waiting !== undefined && typeof message.id === 'string') {
       pending.delete(message.id);
@@ -139,16 +169,20 @@ export async function proxy(argv: string[], { env = process.env, input = process
   // concurrent calls keep their own answers; the agent gets the server's own answer back, or
   // the refusal.
   const TOOL_OF: Readonly<Record<string, string>> = {
-    ...Object.fromEntries(Object.entries(MCP_PAYMENT_TOOLS).map(([tool, channel]) => [channel, tool])), 'get-wallet-address': 'get_wallet_address',
+    ...Object.fromEntries(Object.entries(MCP_PAYMENT_TOOLS).map(([tool, channel]) => [channel, tool])),
+    'get-wallet-address': 'get_wallet_address',
   };
   let budget: Budget | undefined;
   const budgetOf = async (): Promise<Budget> => {
     if (budget === undefined) {
-      const opened = await openGuard({
-        ...env,
-        ...(values.wallet ? { WALLETCAP_WALLET: values.wallet } : {}),
-        ...(values.path ? { WALLETCAP_PATH: values.path } : {}),
-      }, async (channel, data) => toolResult(await callTool(TOOL_OF[channel], data)));
+      const opened = await openGuard(
+        {
+          ...env,
+          ...(values.wallet ? { WALLETCAP_WALLET: values.wallet } : {}),
+          ...(values.path ? { WALLETCAP_PATH: values.path } : {}),
+        },
+        async (channel, data) => toolResult(await callTool(TOOL_OF[channel], data)),
+      );
       budget = opened.budget;
     }
     return budget;
@@ -166,52 +200,60 @@ export async function proxy(argv: string[], { env = process.env, input = process
       await guard.request(MCP_PAYMENT_TOOLS[String(message.params?.name)] ?? '', message.params?.arguments ?? {});
       write(output, { jsonrpc: '2.0', id: message.id, result: raw });
     } catch (error) {
-      const result = raw === undefined
-        ? { content: [{ type: 'text', text: `walletcap refused this payment: ${messageOf(error)}` }], isError: true }
-        : raw;
+      const result = raw === undefined ? { content: [{ type: 'text', text: `walletcap refused this payment: ${messageOf(error)}` }], isError: true } : raw;
       write(output, { jsonrpc: '2.0', id: message.id, result });
     }
   };
 
-  createInterface({ input }).on('line', line => {
-    let message: unknown;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      stderr.write('walletcap: dropped a line from the MCP client that is not JSON\n');
-      return;
-    }
-    if (Array.isArray(message)) {
-      // A batch would carry calls past the checks below; MCP dropped batches in 2025-06-18.
-      write(output, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'walletcap does not forward JSON-RPC batches' } });
-      return;
-    }
-    const rpc = message as JsonRpc;
-    if (rpc?.method === 'tools/call') {
-      const name = String(rpc.params?.name);
-      if (Object.hasOwn(MCP_PAYMENT_TOOLS, name)) {
-        handle(rpc).catch(error => stderr.write(`walletcap: ${messageOf(error)}\n`));
+  createInterface({ input })
+    .on('line', line => {
+      let message: unknown;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        stderr.write('walletcap: dropped a line from the MCP client that is not JSON\n');
         return;
       }
-      if (!passed.has(name)) {
-        write(output, {
-          jsonrpc: '2.0',
-          id: rpc.id,
-          result: {
-            content: [{ type: 'text', text: `walletcap refused ${name}: it can't tell whether this tool moves money, so it can't count it. `
-              + `The wallet's owner can let it through, uncounted, with --allow-tool ${name}` }],
-            isError: true,
-          },
-        });
+      if (Array.isArray(message)) {
+        // A batch would carry calls past the checks below; MCP dropped batches in 2025-06-18.
+        write(output, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'walletcap does not forward JSON-RPC batches' } });
         return;
       }
-    }
-    if (rpc?.method === 'tools/list' && rpc.id !== undefined && rpc.id !== null) listing.add(JSON.stringify(rpc.id));
-    child.stdin.write(`${line}\n`);
-  }).on('close', () => child.stdin.end());
+      const rpc = message as JsonRpc;
+      if (rpc?.method === 'tools/call') {
+        const name = String(rpc.params?.name);
+        if (Object.hasOwn(MCP_PAYMENT_TOOLS, name)) {
+          handle(rpc).catch(error => stderr.write(`walletcap: ${messageOf(error)}\n`));
+          return;
+        }
+        if (!passed.has(name)) {
+          write(output, {
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+              content: [
+                {
+                  type: 'text',
+                  text:
+                    `walletcap refused ${name}: it can't tell whether this tool moves money, so it can't count it. ` +
+                    `The wallet's owner can let it through, uncounted, with --allow-tool ${name}`,
+                },
+              ],
+              isError: true,
+            },
+          });
+          return;
+        }
+      }
+      if (rpc?.method === 'tools/list' && rpc.id !== undefined && rpc.id !== null) listing.add(JSON.stringify(rpc.id));
+      child.stdin.write(`${line}\n`);
+    })
+    .on('close', () => child.stdin.end());
 
-  return new Promise(resolveExit => child.on('exit', code => {
-    budget?.close();
-    resolveExit(code ?? 1);
-  }));
+  return new Promise(resolveExit =>
+    child.on('exit', code => {
+      budget?.close();
+      resolveExit(code ?? 1);
+    }),
+  );
 }

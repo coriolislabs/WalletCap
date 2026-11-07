@@ -2,9 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import {
-  budgetPathFor, formatUsd, formatWindow, normalizeWallet, parseLimits, toMicros, toWindowMs,
-} from '../dist/core/money.js';
+import { budgetPathFor, formatUsd, formatWindow, normalizeWallet, parseLimits, toMicros, toWindowMs } from '../dist/core/money.js';
 
 // The cases the Python suite checks too (tests/test_money.py).
 const VECTORS = JSON.parse(readFileSync(new URL('../../../spec/vectors/money.json', import.meta.url), 'utf8'));
@@ -77,7 +75,6 @@ test('one wallet is one budget, however its address is written', async () => {
   assert.throws(() => normalizeWallet('has space'), { name: 'UsageError' });
   assert.throws(() => normalizeWallet(''), { name: 'UsageError' });
 });
-
 
 test('mixed-case EVM addresses are checked against EIP-55, and Solana CAIP-10 is one wallet', async () => {
   const sol = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';

@@ -3,11 +3,11 @@
 
 This puts Coinbase's agent spend controls through the events that hand an AI agent a fresh budget, runs walletcap through the same events, and counts what gets past the cap.
 
-| Control | Events |
-|---|---|
+| Control                                                    | Events                                                           |
+| ---------------------------------------------------------- | ---------------------------------------------------------------- |
 | CDP's x402 controls, on their own store and on walletcap's | a restart, replicas, a shared store, a payee who switches assets |
-| Spend Permissions | a second permission, a period boundary |
-| AgentKit (`--agentkit`) | a merchant who lists a bigger offer first |
+| Spend Permissions                                          | a second permission, a period boundary                           |
+| AgentKit (`--agentkit`)                                    | a merchant who lists a bigger offer first                        |
 
 It runs offline in under fifteen seconds and sends nothing.
 
@@ -47,12 +47,12 @@ The three controls:
 
 The events, each from a fresh start, once per control:
 
-| Event | What happens |
-|---|---|
-| Restart | One process pays until it is refused. A second process, the restart, pays again. |
-| 10 replicas | Ten processes start together and pay. |
+| Event                     | What happens                                                                                                                                                          |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Restart                   | One process pays until it is refused. A second process, the restart, pays again.                                                                                      |
+| 10 replicas               | Ten processes start together and pay.                                                                                                                                 |
 | 10 replicas, shared store | The same, with CDP's ledger in one shared store built to its `SpendStore` interface. In the cdpStore column, walletcap's store answers each call after the same 1 ms. |
-| EURC instead of USDC | The payee asks for 1,000 EURC. |
+| EURC instead of USDC      | The payee asks for 1,000 EURC.                                                                                                                                        |
 
 The shared store is what Coinbase's docs advise for replicas: "implement this interface against a shared durable backend (Redis, Postgres, DynamoDB, etc.)". The store in `spend-store.mjs` does exactly what the interface says, and answers each call after 1 ms, as a network database does.
 
@@ -66,10 +66,10 @@ Coinbase's `SpendPermissionManager` v1.0.0 and Smart Wallet run on an in-process
 
 A Smart Wallet holds $1,000 of a test token that stands in for USDC, and grants the agent permissions of $150 a day.
 
-| Event | What happens |
-|---|---|
-| A second permission | The wallet grants two permissions with different salts, and the agent pulls $150 from each. |
-| A period boundary | The agent pulls $150 in the last second of one day and $150 in the first second of the next. |
+| Event               | What happens                                                                                 |
+| ------------------- | -------------------------------------------------------------------------------------------- |
+| A second permission | The wallet grants two permissions with different salts, and the agent pulls $150 from each.  |
+| A period boundary   | The agent pulls $150 in the last second of one day and $150 in the first second of the next. |
 
 The manager counts each permission, and each period, on its own, so both events pull $300. Within one permission and one period it holds: the test suite checks that a fourth $50 is refused with `ExceededSpendPermission`.
 

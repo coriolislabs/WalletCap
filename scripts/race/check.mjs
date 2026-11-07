@@ -45,7 +45,9 @@ export function check(path) {
   insert('wc_entry', entries);
   const rebuilt = replay.prepare('SELECT * FROM wc_current ORDER BY payment');
   rebuilt.setReadBigInts(true);
-  const replayed = JSON.stringify(rebuilt.all(), (_, v) => (typeof v === 'bigint' ? String(v) : v)) === JSON.stringify(current, (_, v) => (typeof v === 'bigint' ? String(v) : v));
+  const replayed =
+    JSON.stringify(rebuilt.all(), (_, v) => (typeof v === 'bigint' ? String(v) : v)) ===
+    JSON.stringify(current, (_, v) => (typeof v === 'bigint' ? String(v) : v));
   replay.close();
 
   // Every admission, recomputed from the entries before it.
@@ -66,10 +68,16 @@ export function check(path) {
       const b = budget.get(e.wallet);
       const counting = [...payments.values()].filter(p => p.wallet === e.wallet && countsFrom(p) !== null && countsFrom(p) >= e.at - b.window_ms);
       const counted = counting.reduce((sum, p) => sum + p.amount, 0n);
-      const why = b.frozen_at !== null ? 'frozen'
-        : b.per_payment !== null && e.amount > b.per_payment ? 'per_payment'
-          : counted + e.amount > b.cap ? 'budget'
-            : b.max_payments !== null && BigInt(counting.length) >= b.max_payments ? 'max_payments' : null;
+      const why =
+        b.frozen_at !== null
+          ? 'frozen'
+          : b.per_payment !== null && e.amount > b.per_payment
+            ? 'per_payment'
+            : counted + e.amount > b.cap
+              ? 'budget'
+              : b.max_payments !== null && BigInt(counting.length) >= b.max_payments
+                ? 'max_payments'
+                : null;
       if (why !== null) violations.push({ seq: Number(e.seq), payment: e.payment, why, counted: String(counted), amount: String(e.amount) });
       payments.set(e.payment, { wallet: e.wallet, amount: e.amount, state: 'held', heldAt: e.at, until: e.until, settledAt: null });
       continue;

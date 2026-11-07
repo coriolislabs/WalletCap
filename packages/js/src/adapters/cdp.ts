@@ -54,19 +54,20 @@ const normalizeAsset = (asset: unknown): string => {
 const parseInfo = (text: string | null): Record<string, unknown> | null => {
   try {
     const parsed: unknown = text ? JSON.parse(text) : null;
-    return parsed !== null && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
+    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
   } catch {
     return null;
   }
 };
 
-const fingerprint = (entry: SpendLedgerEntryInput): string => JSON.stringify({
-  atomicAmount: String(entry.atomicAmount),
-  asset: entry.asset,
-  network: entry.network,
-  payTo: entry.payTo,
-  at: Number(entry.at),
-});
+const fingerprint = (entry: SpendLedgerEntryInput): string =>
+  JSON.stringify({
+    atomicAmount: String(entry.atomicAmount),
+    asset: entry.asset,
+    network: entry.network,
+    payTo: entry.payTo,
+    at: Number(entry.at),
+  });
 
 const CAIP2 = /^[^:]+:.+$/;
 
@@ -94,7 +95,8 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
   const ledger = ledgerOf(budget);
   const { asset: given, scale: givenScale = 1n } = options;
   if (typeof given !== 'string' || given.trim().length === 0) throw new UsageError('asset is required');
-  if (!(typeof givenScale === 'bigint' || Number.isSafeInteger(givenScale)) || BigInt(givenScale) <= 0n) throw new UsageError('scale must be a positive integer');
+  if (!(typeof givenScale === 'bigint' || Number.isSafeInteger(givenScale)) || BigInt(givenScale) <= 0n)
+    throw new UsageError('scale must be a positive integer');
   const asset = normalizeAsset(given);
   const scale = BigInt(givenScale);
   const wallet = budget.wallet;
@@ -118,7 +120,9 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
         if (own?.atomicAmount !== undefined && normalizeAsset(own.asset) === asset && typeof network === 'string' && CAIP2.test(network)) {
           try {
             return { atomicAmount: BigInt(own.atomicAmount as string), asset, network: network as `${string}:${string}`, payTo: String(own.payTo), at };
-          } catch { /* not a CDP entry after all */ }
+          } catch {
+            /* not a CDP entry after all */
+          }
         }
         // Spend from another rail (or another asset) counts in this asset's units, rounded up.
         return { atomicAmount: ceilDiv(row.amount, scale), asset, network: `ledger:${row.rail}`, payTo: `ledger:${row.payment}`, at };
@@ -129,7 +133,11 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
       const paid = normalizeAsset(entry.asset);
       if (paid !== asset) throw new BudgetRefused('asset', `this CDP store counts ${asset}, not ${paid}`);
       let atomic: bigint;
-      try { atomic = BigInt(entry.atomicAmount); } catch { throw new BudgetRefused('terms', 'atomicAmount must be an integer'); }
+      try {
+        atomic = BigInt(entry.atomicAmount);
+      } catch {
+        throw new BudgetRefused('terms', 'atomicAmount must be an integer');
+      }
       if (atomic < 0n) throw new BudgetRefused('terms', 'atomicAmount must be an integer');
       if (atomic === 0n) return;
       const spend = atomic * scale;

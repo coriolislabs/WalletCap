@@ -22,7 +22,9 @@ export class SharedSpendStore {
   constructor(path, { latencyMs = 1 } = {}) {
     this.#db = new DatabaseSync(path);
     this.#db.exec('PRAGMA busy_timeout = 10000');
-    this.#db.exec('CREATE TABLE IF NOT EXISTS ledger (atomic TEXT NOT NULL, asset TEXT NOT NULL, network TEXT NOT NULL, pay_to TEXT NOT NULL, at INTEGER NOT NULL)');
+    this.#db.exec(
+      'CREATE TABLE IF NOT EXISTS ledger (atomic TEXT NOT NULL, asset TEXT NOT NULL, network TEXT NOT NULL, pay_to TEXT NOT NULL, at INTEGER NOT NULL)',
+    );
     this.#latency = latencyMs;
   }
 
@@ -36,15 +38,23 @@ export class SharedSpendStore {
   }
 
   async load() {
-    return this.#roundTrip(() => this.#db.prepare('SELECT * FROM ledger ORDER BY at').all().map(row => ({
-      atomicAmount: BigInt(row.atomic), asset: row.asset, network: row.network, payTo: row.pay_to, at: Number(row.at),
-    })));
+    return this.#roundTrip(() =>
+      this.#db
+        .prepare('SELECT * FROM ledger ORDER BY at')
+        .all()
+        .map(row => ({
+          atomicAmount: BigInt(row.atomic),
+          asset: row.asset,
+          network: row.network,
+          payTo: row.pay_to,
+          at: Number(row.at),
+        })),
+    );
   }
 
   async append(entry) {
     return this.#roundTrip(() => {
-      this.#db.prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)')
-        .run(String(entry.atomicAmount), entry.asset, entry.network, entry.payTo, entry.at);
+      this.#db.prepare('INSERT INTO ledger VALUES (?, ?, ?, ?, ?)').run(String(entry.atomicAmount), entry.asset, entry.network, entry.payTo, entry.at);
     });
   }
 
@@ -56,7 +66,8 @@ export class SharedSpendStore {
 
   async removeEntry(entry) {
     return this.#roundTrip(() => {
-      this.#db.prepare('DELETE FROM ledger WHERE rowid = (SELECT rowid FROM ledger WHERE atomic = ? AND asset = ? AND network = ? AND pay_to = ? AND at = ? LIMIT 1)')
+      this.#db
+        .prepare('DELETE FROM ledger WHERE rowid = (SELECT rowid FROM ledger WHERE atomic = ? AND asset = ? AND network = ? AND pay_to = ? AND at = ? LIMIT 1)')
         .run(String(entry.atomicAmount), entry.asset, entry.network, entry.payTo, entry.at);
     });
   }
@@ -71,10 +82,12 @@ export class SharedSpendStore {
  * row puts walletcap's store at the same distance, so CDP's check and its record are as far apart.
  */
 export function withLatency(store, latencyMs) {
-  const call = method => async (...args) => {
-    await sleep(latencyMs);
-    return store[method](...args);
-  };
+  const call =
+    method =>
+    async (...args) => {
+      await sleep(latencyMs);
+      return store[method](...args);
+    };
   return {
     size: call('size'),
     load: call('load'),

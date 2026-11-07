@@ -8,7 +8,17 @@ import type { Status } from '../core/budget.js';
 import { BudgetUnavailable, isWalletcapError } from '../core/errors.js';
 import type { LimitOptions } from '../core/money.js';
 import {
-  defaultBudgetPath, describeLimits, expandHome, formatAge, formatUsd, formatWindow, normalizeWallet, shortWallet, storedWalletName, toWindowMs, trimAscii,
+  defaultBudgetPath,
+  describeLimits,
+  expandHome,
+  formatAge,
+  formatUsd,
+  formatWindow,
+  normalizeWallet,
+  shortWallet,
+  storedWalletName,
+  toWindowMs,
+  trimAscii,
 } from '../core/money.js';
 import { openOwner, type Owner } from '../core/owner.js';
 import { toWire } from '../core/wire.js';
@@ -147,16 +157,17 @@ const withWallet = async <T>(values: Values, path: string, work: (owner: Owner, 
   return withOwner(path, owner => work(owner, wallet));
 };
 
-const detail = (status: Status): string => [
-  `Wallet       ${status.wallet}`,
-  `Limit        ${formatUsd(status.cap)} per ${formatWindow(status.windowMs)}, rolling`,
-  `Per payment  ${status.perPayment === null ? 'no limit' : formatUsd(status.perPayment)}`,
-  ...(status.maxPayments === null ? [] : [`Payments     at most ${status.maxPayments} per ${formatWindow(status.windowMs)}`]),
-  `Spent        ${formatUsd(status.spent)} in the last ${formatWindow(status.windowMs)} (${status.payments} payment${status.payments === 1n ? '' : 's'})`,
-  `In flight    ${formatUsd(status.inFlight)}`,
-  `Left         ${formatUsd(status.remaining)}`,
-  `State        ${status.frozen ? 'FROZEN: every payment is refused' : 'active'}`,
-].join('\n');
+const detail = (status: Status): string =>
+  [
+    `Wallet       ${status.wallet}`,
+    `Limit        ${formatUsd(status.cap)} per ${formatWindow(status.windowMs)}, rolling`,
+    `Per payment  ${status.perPayment === null ? 'no limit' : formatUsd(status.perPayment)}`,
+    ...(status.maxPayments === null ? [] : [`Payments     at most ${status.maxPayments} per ${formatWindow(status.windowMs)}`]),
+    `Spent        ${formatUsd(status.spent)} in the last ${formatWindow(status.windowMs)} (${status.payments} payment${status.payments === 1n ? '' : 's'})`,
+    `In flight    ${formatUsd(status.inFlight)}`,
+    `Left         ${formatUsd(status.remaining)}`,
+    `State        ${status.frozen ? 'FROZEN: every payment is refused' : 'active'}`,
+  ].join('\n');
 
 // Every payment of unknown or refused outcome older than --older-than that the payee can no longer
 // settle (an x402 payment with no settle-by time, once an hour and a minute old), for an owner
@@ -169,13 +180,17 @@ async function voidUnknown(values: Values, path: string, id: string | undefined)
     const voided = await owner.voidUnknown(wallet, { olderThan });
     if (values.json) return json(voided);
     if (voided.length === 0) {
-      return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be voided yet. One goes once it is older than `
-        + `${formatWindow(olderThan)} and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old. `
-        + 'Any other payment with no settle-by time, a transfer say, goes only by id, once the chain shows it never moved: walletcap void <id> --evidence <what shows it>.';
+      return (
+        `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be voided yet. One goes once it is older than ` +
+        `${formatWindow(olderThan)} and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old. ` +
+        'Any other payment with no settle-by time, a transfer say, goes only by id, once the chain shows it never moved: walletcap void <id> --evidence <what shows it>.'
+      );
     }
     const total = voided.reduce((sum, row) => sum + row.amount, 0n);
-    return `Voided ${voided.length} payment${voided.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `
-      + `(${formatUsd(total)} from ${shortWallet(wallet)}): they no longer count. Only do this for payments you know never left the wallet.`;
+    return (
+      `Voided ${voided.length} payment${voided.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} ` +
+      `(${formatUsd(total)} from ${shortWallet(wallet)}): they no longer count. Only do this for payments you know never left the wallet.`
+    );
   });
 }
 
@@ -195,11 +210,14 @@ const commands: Record<string, Command> = {
   async status(values, path) {
     if (values.wallet === undefined) {
       const known = await wallets(path);
-      const statuses = known.length === 0 ? [] : await withOwner(path, async owner => {
-        const all: Status[] = [];
-        for (const wallet of known) all.push(await owner.status(wallet));
-        return all;
-      });
+      const statuses =
+        known.length === 0
+          ? []
+          : await withOwner(path, async owner => {
+              const all: Status[] = [];
+              for (const wallet of known) all.push(await owner.status(wallet));
+              return all;
+            });
       if (values.json) return json({ path, budgets: statuses });
       if (statuses.length === 0) return `No budget in ${path} yet. Create one:\n  npx walletcap set --wallet <address> --per-day 150 --per-payment 50`;
       return [`Budget file ${path}`, '', ...statuses.map(status => status.summary)].join('\n');
@@ -224,7 +242,9 @@ const commands: Record<string, Command> = {
   async freeze(values, path) {
     return withWallet(values, path, async (owner, wallet) => {
       await owner.freeze(wallet);
-      return values.json ? json(await owner.status(wallet)) : `Frozen ${shortWallet(wallet)}: every payment from it is refused, on every rail and in every process, until you run unfreeze.`;
+      return values.json
+        ? json(await owner.status(wallet))
+        : `Frozen ${shortWallet(wallet)}: every payment from it is refused, on every rail and in every process, until you run unfreeze.`;
     });
   },
 
@@ -241,16 +261,22 @@ const commands: Record<string, Command> = {
       const rows = await owner.history(wallet, { limit: values.limit === undefined ? 20 : trimAscii(values.limit) });
       if (values.json) return json(rows);
       if (rows.length === 0) return `No payments from ${shortWallet(wallet)} yet.`;
-      return rows.map(row => [
-        iso(row.at),
-        formatUsd(row.amount).padStart(10),
-        row.status.padEnd(9),
-        row.rail.padEnd(6),
-        row.to ? `to ${shortWallet(row.to.toLowerCase())}` : '',
-        row.tx ? `tx ${row.tx}` : row.note ?? '',
-        row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown' ? `(${row.id})` : '',
-        row.rail === 'cdp' && (row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown') ? CDP_HISTORY : '',
-      ].filter(Boolean).join('  ')).join('\n');
+      return rows
+        .map(row =>
+          [
+            iso(row.at),
+            formatUsd(row.amount).padStart(10),
+            row.status.padEnd(9),
+            row.rail.padEnd(6),
+            row.to ? `to ${shortWallet(row.to.toLowerCase())}` : '',
+            row.tx ? `tx ${row.tx}` : (row.note ?? ''),
+            row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown' ? `(${row.id})` : '',
+            row.rail === 'cdp' && (row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown') ? CDP_HISTORY : '',
+          ]
+            .filter(Boolean)
+            .join('  '),
+        )
+        .join('\n');
     });
   },
 
@@ -259,16 +285,22 @@ const commands: Record<string, Command> = {
       const holds = await owner.holds(wallet);
       if (values.json) return json(holds);
       if (holds.length === 0) return `No open payments from ${shortWallet(wallet)}.`;
-      return holds.map(hold => [
-        hold.id,
-        formatUsd(hold.amount).padStart(10),
-        hold.reason.padEnd(9),
-        `${formatAge(hold.ageMs)} old`.padEnd(12),
-        hold.rail.padEnd(6),
-        hold.to ? `to ${shortWallet(hold.to.toLowerCase())}` : hold.note ?? '',
-        hold.countsUntil === null ? 'counts until voided or settled' : `counts until ${iso(hold.countsUntil)}`,
-        hold.rail === 'cdp' ? cdpSigned(hold.settlesBy) : '',
-      ].filter(Boolean).join('  ')).join('\n');
+      return holds
+        .map(hold =>
+          [
+            hold.id,
+            formatUsd(hold.amount).padStart(10),
+            hold.reason.padEnd(9),
+            `${formatAge(hold.ageMs)} old`.padEnd(12),
+            hold.rail.padEnd(6),
+            hold.to ? `to ${shortWallet(hold.to.toLowerCase())}` : (hold.note ?? ''),
+            hold.countsUntil === null ? 'counts until voided or settled' : `counts until ${iso(hold.countsUntil)}`,
+            hold.rail === 'cdp' ? cdpSigned(hold.settlesBy) : '',
+          ]
+            .filter(Boolean)
+            .join('  '),
+        )
+        .join('\n');
     });
   },
 
@@ -300,8 +332,9 @@ const commands: Record<string, Command> = {
 
 // A payment the CDP store holds isn't one that never left: CDP signed it, and its payee can
 // redeem the authorization until an hour and a minute after CDP recorded it.
-const cdpSigned = (until: Date | null): string => `CDP signed it: its authorization can be redeemed until ${until === null ? 'an hour and a minute after CDP recorded it' : iso(until)}, `
-  + 'so void it only if the chain shows it was never redeemed';
+const cdpSigned = (until: Date | null): string =>
+  `CDP signed it: its authorization can be redeemed until ${until === null ? 'an hour and a minute after CDP recorded it' : iso(until)}, ` +
+  'so void it only if the chain shows it was never redeemed';
 const CDP_HISTORY = 'CDP signed it: void it only if the chain shows it was never redeemed';
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {

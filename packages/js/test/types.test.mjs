@@ -17,7 +17,13 @@ const TYPES = join(JS, 'test', 'types');
 const require = createRequire(import.meta.url);
 const TSC = require.resolve('typescript/bin/tsc');
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-types-'));
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 
 const read = path => readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
 const tsc = (cwd, ...args) => spawnSync(process.execPath, [TSC, '--noEmit', '--strict', '--target', 'es2022', ...args], { cwd, encoding: 'utf8' });
@@ -45,14 +51,19 @@ const findPackage = (from, name) => {
 };
 const version = (from, name) => JSON.parse(read(join(findPackage(from, name), 'package.json'))).version;
 
-const SNIPPETS = readdirSync(TYPES).filter(name => /^readme-.*\.ts$/.test(name)).sort();
+const SNIPPETS = readdirSync(TYPES)
+  .filter(name => /^readme-.*\.ts$/.test(name))
+  .sort();
 const WITHOUT_AGENTKIT = SNIPPETS.filter(name => name !== 'readme-agentkit.ts').map(name => `test/types/${name}`);
 
 test('every JavaScript snippet in the README is a test/types/readme-*.ts file, word for word', () => {
   const blocks = [...read(join(ROOT, 'README.md')).matchAll(/^```js\n([\s\S]*?)^```/gm)].map(match => match[1]);
   const files = SNIPPETS.map(name => read(join(TYPES, name)));
   for (const block of blocks) {
-    assert.ok(files.some(text => text.includes(`// --- README ---\n${block}// --- end ---\n`)), `no test/types/readme-*.ts holds this README snippet:\n${block}`);
+    assert.ok(
+      files.some(text => text.includes(`// --- README ---\n${block}// --- end ---\n`)),
+      `no test/types/readme-*.ts holds this README snippet:\n${block}`,
+    );
   }
   assert.equal(blocks.length, SNIPPETS.length, 'a test/types/readme-*.ts file holds a snippet the README no longer has');
 });
@@ -74,8 +85,8 @@ test("guard() takes @x402/core's own client and returns its type, from packages/
 // installs it and names the folder in WALLETCAP_AGENTKIT_DIR, and a checkout that has it
 // installed uses that.
 const agentkit = findPackage(process.env.WALLETCAP_AGENTKIT_DIR ?? JS, '@coinbase/agentkit');
-const agentkitSkip = agentkit === null && process.env.WALLETCAP_REQUIRE_AGENTKIT !== '1'
-  && 'AgentKit is not installed: set WALLETCAP_AGENTKIT_DIR to a folder where it is';
+const agentkitSkip =
+  agentkit === null && process.env.WALLETCAP_REQUIRE_AGENTKIT !== '1' && 'AgentKit is not installed: set WALLETCAP_AGENTKIT_DIR to a folder where it is';
 
 test("the README's AgentKit recipe compiles against AgentKit's own types; the 0.2.2 subclass doesn't", { skip: agentkitSkip }, () => {
   assert.notEqual(agentkit, null, 'WALLETCAP_REQUIRE_AGENTKIT is set, and AgentKit is not installed');
@@ -94,7 +105,9 @@ test("the README's AgentKit recipe compiles against AgentKit's own types; the 0.
 test("the packed package's declarations stand on their own: no skipLibCheck, es2022's library, no @types/node", () => {
   const npm = process.env.npm_execpath;
   const listed = spawnSync(npm ? process.execPath : 'npm', [...(npm ? [npm] : []), 'pack', '--dry-run', '--json', '--ignore-scripts'], {
-    cwd: JS, encoding: 'utf8', shell: !npm && process.platform === 'win32',
+    cwd: JS,
+    encoding: 'utf8',
+    shell: !npm && process.platform === 'win32',
   });
   assert.equal(listed.status, 0, listed.stderr);
   const [{ files }] = JSON.parse(listed.stdout);
@@ -103,7 +116,10 @@ test("the packed package's declarations stand on their own: no skipLibCheck, es2
   for (const { path } of files) cpSync(join(JS, path), join(installed, path), { recursive: true });
   cpSync(join(TYPES, 'consumer.ts'), join(dir, 'src', 'consumer.ts'));
   const options = { strict: true, noEmit: true, skipLibCheck: false, lib: ['es2022'], types: [], target: 'es2022' };
-  for (const [name, resolution] of [['nodenext', { module: 'nodenext', moduleResolution: 'nodenext' }], ['bundler', { module: 'esnext', moduleResolution: 'bundler' }]]) {
+  for (const [name, resolution] of [
+    ['nodenext', { module: 'nodenext', moduleResolution: 'nodenext' }],
+    ['bundler', { module: 'esnext', moduleResolution: 'bundler' }],
+  ]) {
     writeFileSync(join(dir, `tsconfig.${name}.json`), JSON.stringify({ compilerOptions: { ...options, ...resolution }, files: ['src/consumer.ts'] }));
     const result = spawnSync(process.execPath, [TSC, '-p', `tsconfig.${name}.json`], { cwd: dir, encoding: 'utf8' });
     compiles(result, `moduleResolution ${name}`);

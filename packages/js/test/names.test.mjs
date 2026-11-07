@@ -13,7 +13,13 @@ const walletcap = { ...(await import('../dist/index.js')) };
 const NAMES = JSON.parse(readFileSync(new URL('../../../spec/vectors/names.json', import.meta.url), 'utf8'));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-names-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 afterEach(resetClock);
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 const sorted = keys => [...keys].sort();
@@ -79,7 +85,11 @@ test('every shared option is one the call takes, and an unknown one is refused',
   const unknown = error => error instanceof walletcap.UsageError && /unknown option/.test(error.message);
   // A wrong value may be refused, but never as an unknown option.
   const takes = async (call, key) => {
-    try { await call({ [key]: Symbol('wrong') }); } catch (error) { assert.ok(!unknown(error), `${key}: ${error.message}`); }
+    try {
+      await call({ [key]: Symbol('wrong') });
+    } catch (error) {
+      assert.ok(!unknown(error), `${key}: ${error.message}`);
+    }
   };
   for (const key of NAMES.options.openBudget) await takes(options => walletcap.openBudget({ wallet: WALLET, path, ...options }), key);
   for (const key of NAMES.options.openOwner) await takes(options => walletcap.openOwner({ path, ...options }), key);

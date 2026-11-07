@@ -12,8 +12,12 @@ export function run(script, config) {
     const child = spawn(process.execPath, [join(HERE, script), JSON.stringify(config)], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk; });
-    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', chunk => {
+      stderr += chunk;
+    });
     child.on('error', reject);
     child.on('close', code => (code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(`${script} exited ${code}: ${stderr}`))));
   });

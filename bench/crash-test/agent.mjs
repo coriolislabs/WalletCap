@@ -42,10 +42,17 @@ const required = (payment, payTo) => {
   return {
     x402Version: 2,
     resource: { url: 'https://payee.example/report', description: 'crash-test resource', mimeType: 'application/json' },
-    accepts: [{
-      scheme: 'exact', network: BASE, asset: asset.address, amount: payment.atomic, payTo,
-      maxTimeoutSeconds: 300, extra: { name: asset.name, version: asset.version },
-    }],
+    accepts: [
+      {
+        scheme: 'exact',
+        network: BASE,
+        asset: asset.address,
+        amount: payment.atomic,
+        payTo,
+        maxTimeoutSeconds: 300,
+        extra: { name: asset.name, version: asset.version },
+      },
+    ],
   };
 };
 

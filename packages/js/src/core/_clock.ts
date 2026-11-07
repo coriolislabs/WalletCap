@@ -11,11 +11,12 @@ const connections = new Set<DatabaseSync>();
 
 // SQLite keeps 'now' fixed for a whole statement; a test clock is read once per transaction, so
 // a moving one (Date.now) can't give one statement two times.
-const install = (db: DatabaseSync): void => db.function('julianday', { varargs: true, deterministic: false }, (...args) => {
-  if (args.length !== 1 || args[0] !== 'now') throw new Error("walletcap's test clock answers julianday('now') only");
-  read ??= Number(source === null ? Date.now() : source());
-  return read / 86_400_000 + 2_440_587.5;
-});
+const install = (db: DatabaseSync): void =>
+  db.function('julianday', { varargs: true, deterministic: false }, (...args) => {
+    if (args.length !== 1 || args[0] !== 'now') throw new Error("walletcap's test clock answers julianday('now') only");
+    read ??= Number(source === null ? Date.now() : source());
+    return read / 86_400_000 + 2_440_587.5;
+  });
 
 /** Internal: the ledger calls this as each transaction begins. */
 export function clockTick(): void {

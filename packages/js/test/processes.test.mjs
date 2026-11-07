@@ -14,7 +14,13 @@ import { x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-processes-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 const LIMITS = { perPayment: '$50', perDay: '$150' };
@@ -35,7 +41,11 @@ test('replicas racing for the last of the budget cannot both win', async () => {
   const path = join(DIR, 'race.sqlite');
   (await openBudget({ wallet: WALLET, path, ...LIMITS, create: true })).close();
   // Four replicas, three $50 payments each, against $150: exactly three may win.
-  const results = await race('payer.mjs', DIR, Array.from({ length: 4 }, () => ({ wallet: WALLET, path, limits: LIMITS, payments: ['$50', '$50', '$50'] })));
+  const results = await race(
+    'payer.mjs',
+    DIR,
+    Array.from({ length: 4 }, () => ({ wallet: WALLET, path, limits: LIMITS, payments: ['$50', '$50', '$50'] })),
+  );
   assert.equal(count(results, 'paid'), 3);
   assert.equal(count(results, 'budget'), 9);
   assert.equal((await (await openBudget({ wallet: WALLET, path })).status()).spent, 150_000_000n);
@@ -46,7 +56,11 @@ test('x402 replicas racing with guarded clients cannot pass the shared cap', asy
   if (kit === null) return t.skip('the x402 devDependencies are not installed');
   const path = join(DIR, 'x402-race.sqlite');
   (await openBudget({ wallet: kit.account.address, path, ...LIMITS, create: true })).close();
-  const results = await race('x402-payer.mjs', DIR, Array.from({ length: 3 }, () => ({ path, limits: LIMITS, payments: [50_000_000, 50_000_000, 50_000_000] })));
+  const results = await race(
+    'x402-payer.mjs',
+    DIR,
+    Array.from({ length: 3 }, () => ({ path, limits: LIMITS, payments: [50_000_000, 50_000_000, 50_000_000] })),
+  );
   assert.equal(count(results, 'paid'), 3);
   assert.equal((await (await openBudget({ wallet: kit.account.address, path })).status()).spent, 150_000_000n);
   return undefined;
@@ -56,13 +70,22 @@ test("the ledger reads the time once it holds the write lock, so waiting for ano
   const path = join(DIR, 'lock.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, ...LIMITS, create: true });
   // Another process takes the write lock and holds it for 400 ms.
-  const holder = spawn(process.execPath, ['--input-type=module', '-e', [
-    "import { DatabaseSync } from 'node:sqlite';",
-    'const db = new DatabaseSync(process.argv[1]);',
-    "db.exec('BEGIN IMMEDIATE');",
-    "process.stdout.write('locked\\n');",
-    "setTimeout(() => { db.exec('COMMIT'); db.close(); }, 400);",
-  ].join(' '), path], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const holder = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      [
+        "import { DatabaseSync } from 'node:sqlite';",
+        'const db = new DatabaseSync(process.argv[1]);',
+        "db.exec('BEGIN IMMEDIATE');",
+        "process.stdout.write('locked\\n');",
+        "setTimeout(() => { db.exec('COMMIT'); db.close(); }, 400);",
+      ].join(' '),
+      path,
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
   const exited = new Promise(resolve => holder.on('exit', resolve));
   await new Promise(resolve => holder.stdout.once('data', resolve));
   const asked = Date.now();
@@ -76,17 +99,26 @@ test("the ledger reads the time once it holds the write lock, so waiting for ano
   budget.close();
 });
 
-test("while another process holds the write lock, the event loop is never stalled for long", async () => {
+test('while another process holds the write lock, the event loop is never stalled for long', async () => {
   const path = join(DIR, 'event-loop.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, ...LIMITS, create: true });
   // Another process takes the write lock and holds it for about 500 ms.
-  const holder = spawn(process.execPath, ['--input-type=module', '-e', [
-    "import { DatabaseSync } from 'node:sqlite';",
-    'const db = new DatabaseSync(process.argv[1]);',
-    "db.exec('BEGIN IMMEDIATE');",
-    "process.stdout.write('locked\\n');",
-    "setTimeout(() => { db.exec('COMMIT'); db.close(); }, 500);",
-  ].join(' '), path], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const holder = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      [
+        "import { DatabaseSync } from 'node:sqlite';",
+        'const db = new DatabaseSync(process.argv[1]);',
+        "db.exec('BEGIN IMMEDIATE');",
+        "process.stdout.write('locked\\n');",
+        "setTimeout(() => { db.exec('COMMIT'); db.close(); }, 500);",
+      ].join(' '),
+      path,
+    ],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
   const exited = new Promise(resolve => holder.on('exit', resolve));
   await new Promise(resolve => holder.stdout.once('data', resolve));
   const delay = monitorEventLoopDelay({ resolution: 10 });

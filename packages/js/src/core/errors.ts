@@ -53,9 +53,12 @@ export class PaymentNotRecorded extends Error {
   readonly paymentId: string;
 
   constructor(paymentId: string, { settled = true, ...options }: { settled?: boolean; cause?: unknown } = {}) {
-    super(settled
-      ? `the payment went through but could not be recorded as settled; it still counts as in flight (${paymentId})`
-      : `what happened to the payment could not be recorded; it still counts as in flight (${paymentId})`, options);
+    super(
+      settled
+        ? `the payment went through but could not be recorded as settled; it still counts as in flight (${paymentId})`
+        : `what happened to the payment could not be recorded; it still counts as in flight (${paymentId})`,
+      options,
+    );
     this.name = 'PaymentNotRecorded';
     this.paymentId = paymentId;
   }
@@ -74,13 +77,12 @@ export class UsageError extends Error {
 }
 
 /** Whether `error` is one walletcap threw about its own state or input (not a PaymentNotRecorded). */
-export const isWalletcapError = (error: unknown): error is BudgetUnavailable | BudgetRefused | UsageError => error instanceof BudgetUnavailable
-  || error instanceof BudgetRefused || error instanceof UsageError;
+export const isWalletcapError = (error: unknown): error is BudgetUnavailable | BudgetRefused | UsageError =>
+  error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError;
 
 /** `error` as an agent should be told it: a BudgetRefused's brief form, anything else as it is. */
-export const forAgent = (error: unknown): unknown => (error instanceof BudgetRefused && error.brief !== error.message
-  ? new BudgetRefused(error.code, error.brief, { source: error.source })
-  : error);
+export const forAgent = (error: unknown): unknown =>
+  error instanceof BudgetRefused && error.brief !== error.message ? new BudgetRefused(error.code, error.brief, { source: error.source }) : error;
 
 /** An error tagged with notSent(). */
 export type NotSent<E> = E & { notSent: true };
@@ -91,7 +93,9 @@ export type NotSent<E> = E & { notSent: true };
  * counting, because a payment that failed halfway may still have moved money.
  */
 export function notSent<E>(error?: E): E extends Error ? NotSent<E> : NotSent<Error> {
-  const tagged = (error instanceof Error ? error : new Error(error === undefined ? 'the payment was not sent' : String(error))) as Error & { notSent?: boolean };
+  const tagged = (error instanceof Error ? error : new Error(error === undefined ? 'the payment was not sent' : String(error))) as Error & {
+    notSent?: boolean;
+  };
   tagged.notSent = true;
   return tagged as E extends Error ? NotSent<E> : NotSent<Error>;
 }

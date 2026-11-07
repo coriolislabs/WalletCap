@@ -29,15 +29,19 @@ export const COINBASE_ADDRESSES = {
 function compileWalletcap() {
   const solc = createRequire(import.meta.url)('solc');
   const read = path => readFileSync(new URL(path, SOLIDITY), 'utf8');
-  const out = JSON.parse(solc.compile(JSON.stringify({
-    language: 'Solidity',
-    sources: {
-      'src/AccountCapSpender.sol': { content: read('src/AccountCapSpender.sol') },
-      'test/Mocks.sol': { content: read('test/Mocks.sol') },
-    },
-    // The same settings as contracts/foundry.toml and contracts/evm/check.mjs.
-    settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: 'cancun', outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } } },
-  })));
+  const out = JSON.parse(
+    solc.compile(
+      JSON.stringify({
+        language: 'Solidity',
+        sources: {
+          'src/AccountCapSpender.sol': { content: read('src/AccountCapSpender.sol') },
+          'test/Mocks.sol': { content: read('test/Mocks.sol') },
+        },
+        // The same settings as contracts/foundry.toml and contracts/evm/check.mjs.
+        settings: { optimizer: { enabled: true, runs: 200 }, evmVersion: 'cancun', outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } } },
+      }),
+    ),
+  );
   const errors = (out.errors ?? []).filter(e => e.severity === 'error');
   if (errors.length) throw new Error(errors.map(e => e.formattedMessage).join('\n'));
   const pick = (file, name) => ({ abi: out.contracts[file][name].abi, bytecode: `0x${out.contracts[file][name].evm.bytecode.object}` });
@@ -49,7 +53,11 @@ function compileWalletcap() {
 }
 
 async function rpc(method, params) {
-  const response = await fetch(RPC, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+  const response = await fetch(RPC, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
   const body = await response.json();
   if (body.error) throw new Error(`${method}: ${body.error.message}`);
   return body.result;
@@ -57,7 +65,8 @@ async function rpc(method, params) {
 
 async function fetchCoinbase() {
   const block = await rpc('eth_blockNumber', []);
-  const call = async (to, abi, functionName) => decodeFunctionResult({ abi, functionName, data: await rpc('eth_call', [{ to, data: encodeFunctionData({ abi, functionName }) }, block]) });
+  const call = async (to, abi, functionName) =>
+    decodeFunctionResult({ abi, functionName, data: await rpc('eth_call', [{ to, data: encodeFunctionData({ abi, functionName }) }, block]) });
   const manager = COINBASE_ADDRESSES.SpendPermissionManager;
   const factory = COINBASE_ADDRESSES.CoinbaseSmartWalletFactory;
   const addresses = {
@@ -80,7 +89,8 @@ const walletcap = compileWalletcap();
 if (args.has('--check')) {
   const shipped = JSON.parse(readFileSync(WALLETCAP, 'utf8'));
   for (const name of ['AccountCapSpender', 'MockToken']) {
-    if (shipped[name].bytecode !== walletcap[name].bytecode) throw new Error(`contracts/walletcap.json is stale: ${name} no longer matches contracts/; run node contracts/build.mjs`);
+    if (shipped[name].bytecode !== walletcap[name].bytecode)
+      throw new Error(`contracts/walletcap.json is stale: ${name} no longer matches contracts/; run node contracts/build.mjs`);
   }
   const coinbase = JSON.parse(readFileSync(COINBASE, 'utf8'));
   for (const [name, entry] of Object.entries(coinbase.contracts)) {

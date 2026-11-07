@@ -14,7 +14,13 @@ import { build } from 'esbuild';
 const JS = fileURLToPath(new URL('..', import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-bundle-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 
 const APP = `
 import { openBudget } from 'walletcap';
@@ -33,7 +39,15 @@ test('an esbuild bundle of an app that uses walletcap runs from another folder',
   symlinkSync(JS, join(source, 'node_modules', 'walletcap'), 'junction');
   writeFileSync(join(source, 'app.mjs'), APP);
   const bundled = join(DIR, 'out', 'app.mjs');
-  await build({ entryPoints: [join(source, 'app.mjs')], bundle: true, platform: 'node', format: 'esm', target: 'node22', outfile: bundled, logLevel: 'silent' });
+  await build({
+    entryPoints: [join(source, 'app.mjs')],
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: 'node22',
+    outfile: bundled,
+    logLevel: 'silent',
+  });
   const text = readFileSync(bundled, 'utf8');
   assert.match(text, /CREATE TABLE wc_entry/, "the ledger's schema is in the bundle");
   assert.doesNotMatch(text, /new URL\([^)]*spec\//, 'nothing in the bundle looks for the spec beside it');

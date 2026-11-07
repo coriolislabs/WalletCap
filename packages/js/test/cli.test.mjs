@@ -14,7 +14,13 @@ import { cdpStore } from 'walletcap/cdp';
 const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cli-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 afterEach(resetClock);
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 
@@ -40,7 +46,10 @@ test('an owner sets, reads, freezes and unfreezes a budget from the command line
   assert.match(cli(path, 'history').out, /\$40\.00\s+settled\s+js\s+to 0x4165…5efd\s+tx 0xabab/);
 
   assert.equal(cli(path, 'freeze').code, 0);
-  await assert.rejects(budget.pay('$1', async () => 'x'), { code: 'frozen' });
+  await assert.rejects(
+    budget.pay('$1', async () => 'x'),
+    { code: 'frozen' },
+  );
   const frozen = JSON.parse(cli(path, 'status', '--json').out);
   assert.equal(frozen.budgets[0].frozen, true);
   assert.equal(frozen.budgets[0].spent, '40000000');
@@ -82,7 +91,12 @@ test('void gives back only a held payment, and settle records one that paid', as
 test('an owner can void a payment whose outcome is unknown, once the chain shows it never left', async () => {
   const path = join(DIR, 'unknown.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
-  await assert.rejects(budget.pay('$4', async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
+  await assert.rejects(
+    budget.pay('$4', async () => {
+      throw new Error('rpc timeout');
+    }),
+    /rpc timeout/,
+  );
   const [payment] = await budget.history();
   assert.match(cli(path, 'history').out, new RegExp(`unknown .*\\(${payment.id}\\)`));
   const released = cli(path, 'void', payment.id);
@@ -94,7 +108,17 @@ test('an owner lists the open holds and voids the unknown ones in bulk', async (
   const path = join(DIR, 'holds.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
   setClock(() => Date.now() - 2 * 3_600_000); // these two x402 payments failed two hours ago
-  for (const amount of ['$1', '$2']) await assert.rejects(budget.pay(amount, async () => { throw new Error('rpc timeout'); }, { rail: 'x402' }), /rpc timeout/);
+  for (const amount of ['$1', '$2'])
+    await assert.rejects(
+      budget.pay(
+        amount,
+        async () => {
+          throw new Error('rpc timeout');
+        },
+        { rail: 'x402' },
+      ),
+      /rpc timeout/,
+    );
   resetClock();
   const recent = await budget.hold('$3');
   const listed = cli(path, 'holds');
@@ -106,7 +130,10 @@ test('an owner lists the open holds and voids the unknown ones in bulk', async (
   const released = cli(path, 'void', '--all-unknown', '--older-than', '1h');
   assert.equal(released.code, 0, released.err);
   assert.match(released.out, /Voided 2 payments of unknown or refused outcome older than 1h \(\$3\.00 from 0xd797…ca02\)/);
-  assert.deepEqual((await budget.holds()).map(hold => hold.id), [recent.id]);
+  assert.deepEqual(
+    (await budget.holds()).map(hold => hold.id),
+    [recent.id],
+  );
   assert.match(cli(path, 'void', '--all-unknown', '--older-than', '1h').out, /No payment of unknown or refused outcome/);
   budget.close();
 });
@@ -117,19 +144,40 @@ test('a bulk release leaves a transfer with no settle-by time: its owner voids i
   setClock(() => Date.now() - 30 * 86_400_000); // a month ago
   // A transfer whose receipt wait timed out, and an Agentic Wallet send that failed: an ordinary
   // transaction has no expiry, so either can still be mined, however long ago it was sent.
-  await assert.rejects(budget.pay('$1', async () => { throw new Error('receipt timeout'); }), /receipt timeout/);
-  const sender = guardAgenticWallet(budget, { request: async () => { throw new Error('IPC request timed out'); } });
-  await assert.rejects(sender.request('send-transaction', { recipient: '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', amountAtomic: '2000000', chain: 'base-sepolia' }), /timed out/);
+  await assert.rejects(
+    budget.pay('$1', async () => {
+      throw new Error('receipt timeout');
+    }),
+    /receipt timeout/,
+  );
+  const sender = guardAgenticWallet(budget, {
+    request: async () => {
+      throw new Error('IPC request timed out');
+    },
+  });
+  await assert.rejects(
+    sender.request('send-transaction', { recipient: '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', amountAtomic: '2000000', chain: 'base-sepolia' }),
+    /timed out/,
+  );
   resetClock();
   // 0.3.0's bulk release voided both once they were an hour and a minute old.
   const swept = cli(path, 'void', '--all-unknown', '--older-than', '1h');
   assert.equal(swept.code, 0, swept.err);
   assert.match(swept.out, /No payment of unknown or refused outcome .*Any other payment with no settle-by time, a transfer say, goes only by id/);
   const holds = await budget.holds();
-  assert.deepEqual(holds.map(hold => [hold.rail, hold.reason]), [['js', 'unknown'], ['awal', 'unknown']]);
+  assert.deepEqual(
+    holds.map(hold => [hold.rail, hold.reason]),
+    [
+      ['js', 'unknown'],
+      ['awal', 'unknown'],
+    ],
+  );
   const voided = cli(path, 'void', holds[0].id, '--evidence', 'the chain shows it was never mined');
   assert.equal(voided.code, 0, voided.err);
-  assert.deepEqual((await budget.holds()).map(hold => hold.id), [holds[1].id]);
+  assert.deepEqual(
+    (await budget.holds()).map(hold => hold.id),
+    [holds[1].id],
+  );
   assert.equal((await budget.status()).inFlight, 2_000_000n);
   budget.close();
 });
@@ -151,7 +199,10 @@ test('a bulk release keeps a payment its payee could still settle, and clears re
   const released = cli(path, 'void', '--all-unknown', '--older-than', '1h');
   assert.equal(released.code, 0, released.err);
   assert.match(released.out, /Voided 2 payments of unknown or refused outcome older than 1h \(\$30\.00 from 0xd797…ca02\)/);
-  assert.deepEqual((await budget.holds()).map(hold => hold.id), [live.id]);
+  assert.deepEqual(
+    (await budget.holds()).map(hold => hold.id),
+    [live.id],
+  );
   assert.equal((await budget.check('$100')).ok, false);
   budget.close();
 });
@@ -160,11 +211,25 @@ test('a bulk release keeps a hold with no settle-by time for an hour and a minut
   const path = join(DIR, 'unbounded.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
   const USDC = '0x036cbd53842c5426634e7929541ec2318f3dcf7e';
-  const terms = { scheme: 'exact', network: 'eip155:84532', asset: USDC, amount: '50000', payTo: '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', maxTimeoutSeconds: 3600 };
+  const terms = {
+    scheme: 'exact',
+    network: 'eip155:84532',
+    asset: USDC,
+    amount: '50000',
+    payTo: '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a',
+    maxTimeoutSeconds: 3600,
+  };
   // An Agentic Wallet call that threw after the wallet may have signed terms valid an hour, and a
   // payment CDP rolled back: one pair taken 62 minutes ago, one pair now.
-  const failed = () => guardAgenticWallet(budget, { request: async () => { throw new Error('IPC request timed out'); }, discover: async () => ({ accepts: [terms] }) })
-    .request('make-x402-request', { baseURL: 'http://127.0.0.1:9', path: '/' }).catch(() => {});
+  const failed = () =>
+    guardAgenticWallet(budget, {
+      request: async () => {
+        throw new Error('IPC request timed out');
+      },
+      discover: async () => ({ accepts: [terms] }),
+    })
+      .request('make-x402-request', { baseURL: 'http://127.0.0.1:9', path: '/' })
+      .catch(() => {});
   const rolledBack = async () => {
     const store = cdpStore(budget, { asset: USDC });
     const entry = { atomicAmount: 50_000n, asset: USDC, network: 'eip155:84532', payTo: terms.payTo, at: Date.now() };
@@ -184,10 +249,18 @@ test('a bulk release keeps a hold with no settle-by time for an hour and a minut
   assert.equal(released.code, 0, released.err);
   assert.match(released.out, /Voided 2 payments of unknown or refused outcome older than 10ms \(\$0\.10 from 0xd797…ca02\)/);
   const holds = await budget.holds();
-  assert.deepEqual(holds.map(hold => [hold.reason, hold.countsUntil === null]), [['unknown', true], ['refused', false]]);
+  assert.deepEqual(
+    holds.map(hold => [hold.reason, hold.countsUntil === null]),
+    [
+      ['unknown', true],
+      ['refused', false],
+    ],
+  );
   assert.equal((await budget.status()).inFlight, 100_000n);
-  assert.match(cli(path, 'void', '--all-unknown', '--older-than', '10ms').out,
-    /can be voided yet\. One goes once it is older than 10ms and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old\./);
+  assert.match(
+    cli(path, 'void', '--all-unknown', '--older-than', '10ms').out,
+    /can be voided yet\. One goes once it is older than 10ms and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old\./,
+  );
   budget.close();
 });
 
@@ -219,7 +292,10 @@ test('every result writes itself as JSON in the shape `--json` prints, so JSON.s
   assert.deepEqual([written.spent, written.in_flight, written.window_ms], ['2000000', '1000000', '86400000']);
   for (const result of [await budget.check('$1'), await budget.check('$100'), ...(await budget.history()), ...(await budget.holds())]) {
     const wire = JSON.parse(JSON.stringify(result));
-    assert.ok(Object.keys(wire).every(key => /^[a-z_]+$/.test(key)), Object.keys(wire).join(' '));
+    assert.ok(
+      Object.keys(wire).every(key => /^[a-z_]+$/.test(key)),
+      Object.keys(wire).join(' '),
+    );
     assert.equal(typeof (wire.amount ?? wire.remaining), 'string');
   }
   // A hold's age moves between the two reads; every other field matches.

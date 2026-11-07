@@ -23,7 +23,11 @@ const results = [];
 for (const atomic of config.payments) {
   try {
     const payload = await client.createPaymentPayload(kit.required(atomic));
-    await client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: { success: true, transaction: `0x${'cd'.repeat(32)}`, network: NETWORK } });
+    await client.handlePaymentResponse({
+      paymentPayload: payload,
+      requirements: payload.accepted,
+      settleResponse: { success: true, transaction: `0x${'cd'.repeat(32)}`, network: NETWORK },
+    });
     results.push('paid');
   } catch (error) {
     if (error.name !== 'BudgetRefused') throw error;

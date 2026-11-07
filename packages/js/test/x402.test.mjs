@@ -14,7 +14,13 @@ import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-x402-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
-after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
+after(() => {
+  try {
+    rmSync(DIR, { recursive: true, force: true });
+  } catch {
+    /* open on Windows */
+  }
+});
 afterEach(resetClock);
 const kit = await x402();
 const DAY = 86_400_000;
@@ -36,7 +42,9 @@ const pay = async (client, atomic, answer = { settleResponse: settled }) => {
 };
 const refusedFor = code => error => error instanceof BudgetRefused && error.code === code;
 
-test('settled x402 payments count, and the next one past the cap is refused before it is signed', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('settled x402 payments count, and the next one past the cap is refused before it is signed', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client } = await setup();
   for (let i = 0; i < 3; i += 1) await pay(client, 50_000);
   await assert.rejects(pay(client, 50_000), refusedFor('budget'));
@@ -48,7 +56,9 @@ test('settled x402 payments count, and the next one past the cap is refused befo
   assert.deepEqual([newest.status, newest.tx, newest.to, newest.rail], ['settled', TX, PAY_TO, 'x402']);
 });
 
-test('a payee that says the payment failed still holds the authorization, so it counts until that expires', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('a payee that says the payment failed still holds the authorization, so it counts until that expires', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client, clock } = await setup();
   const payload = await pay(client, 50_000, { paymentRequired: kit.required(50_000) });
   assert.equal((await budget.status()).inFlight, 50_000n);
@@ -60,7 +70,9 @@ test('a payee that says the payment failed still holds the authorization, so it 
   assert.equal((await budget.status()).inFlight, 0n);
 });
 
-test('a lost answer keeps the payment counting, and a cloned payload is still recognized', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('a lost answer keeps the payment counting, and a cloned payload is still recognized', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client } = await setup();
   await pay(client, 50_000, { error: new Error('socket hang up') });
   assert.equal((await budget.history())[0].status, 'unknown');
@@ -80,15 +92,22 @@ test('a later control that aborts or fails leaves nothing reserved', { skip: kit
   assert.equal((await aborted.budget.status()).payments, 0n);
 
   const failed = await setup();
-  failed.client.onAfterPaymentCreation(async () => { throw new Error('a later hook failed'); });
+  failed.client.onAfterPaymentCreation(async () => {
+    throw new Error('a later hook failed');
+  });
   await assert.rejects(pay(failed.client, 50_000), /a later hook failed/);
   assert.equal((await failed.budget.status()).payments, 0n);
 });
 
-test('an asset the budget cannot price is refused, and a priced one is chosen when offered', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('an asset the budget cannot price is refused, and a priced one is chosen when offered', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client } = await setup();
   const unknown = '0x0000000000000000000000000000000000000bad';
-  await assert.rejects(client.createPaymentPayload(kit.required(1, { asset: unknown })), error => refusedFor('asset')(error) && error.message.includes('decimals: 6'));
+  await assert.rejects(
+    client.createPaymentPayload(kit.required(1, { asset: unknown })),
+    error => refusedFor('asset')(error) && error.message.includes('decimals: 6'),
+  );
   const offer = kit.required(10_000);
   offer.accepts.unshift({ ...offer.accepts[0], asset: unknown });
   const payload = await client.createPaymentPayload(offer);
@@ -96,7 +115,9 @@ test('an asset the budget cannot price is refused, and a priced one is chosen wh
   assert.equal((await budget.status()).inFlight, 10_000n);
 });
 
-test('a stablecoin added with its decimals is counted in dollars, rounded up', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('a stablecoin added with its decimals is counted in dollars, rounded up', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const dai = '0x00000000000000000000000000000000000000da';
   const budget = await openBudget({ wallet: kit.account.address, path: join(DIR, 'decimals.sqlite'), perDay: '$1', create: true });
   const client = guard(kit.client(), budget, { assets: [{ network: NETWORK, asset: dai, decimals: 18 }] });
@@ -129,18 +150,30 @@ test('a client is guarded once, and only an x402 client can be', { skip: kit ===
 
 const DAI = '0x00000000000000000000000000000000000000da';
 
-test('an asset override adds a USD stablecoin, and cannot reprice a built-in one', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('an asset override adds a USD stablecoin, and cannot reprice a built-in one', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget } = await setup();
   // 0.2.x took any decimals up to 36, for any asset: USDC at 18 decimals counted $1 as 0.000001 of a cent.
   assert.throws(() => guard(kit.client(), budget, { assets: [{ network: NETWORK, asset: USDC, decimals: 18 }] }), /already priced with 6 decimals/);
-  assert.throws(() => guard(kit.client(), budget, { assets: [{ network: 'base-sepolia', asset: USDC.toLowerCase(), decimals: 0 }] }), /already priced with 6 decimals/);
+  assert.throws(
+    () => guard(kit.client(), budget, { assets: [{ network: 'base-sepolia', asset: USDC.toLowerCase(), decimals: 0 }] }),
+    /already priced with 6 decimals/,
+  );
   for (const decimals of [19, 36, -1, 1.5, '6', undefined]) {
     assert.throws(() => guard(kit.client(), budget, { assets: [{ network: NETWORK, asset: DAI, decimals }] }), /decimals from 0 to 18/, String(decimals));
   }
-  guard(kit.client(), budget, { assets: [{ network: NETWORK, asset: USDC, decimals: 6 }, { network: NETWORK, asset: DAI, decimals: 18 }] });
+  guard(kit.client(), budget, {
+    assets: [
+      { network: NETWORK, asset: USDC, decimals: 6 },
+      { network: NETWORK, asset: DAI, decimals: 18 },
+    ],
+  });
 });
 
-test('a settlement the guard cannot record throws PaymentNotRecorded, and the payment keeps counting', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('a settlement the guard cannot record throws PaymentNotRecorded, and the payment keeps counting', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client, path } = await setup();
   const payload = await client.createPaymentPayload(kit.required(50_000));
   budget.close();
@@ -151,7 +184,9 @@ test('a settlement the guard cannot record throws PaymentNotRecorded, and the pa
   assert.equal((await (await openBudget({ wallet: kit.account.address, path })).status()).inFlight, 50_000n);
 });
 
-test("a refusal or a lost answer the guard can't record throws PaymentNotRecorded too", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test("a refusal or a lost answer the guard can't record throws PaymentNotRecorded too", {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const refusedAnswer = { settleResponse: { success: false, errorReason: 'insufficient_funds', transaction: '', network: NETWORK } };
   for (const answer of [refusedAnswer, {}]) {
     const { budget, client, path } = await setup();
@@ -160,13 +195,18 @@ test("a refusal or a lost answer the guard can't record throws PaymentNotRecorde
     // 0.3.0 let the ledger's BudgetError through, which code that retries on one would retry.
     await assert.rejects(
       client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, ...answer }),
-      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError) && /what happened to the payment could not be recorded/.test(error.message),
+      error =>
+        error instanceof PaymentNotRecorded &&
+        !(error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError) &&
+        /what happened to the payment could not be recorded/.test(error.message),
     );
     assert.equal((await (await openBudget({ wallet: kit.account.address, path })).status()).inFlight, 50_000n);
   }
 });
 
-test("the guard keeps a refusal's source: a process's own limit says it is the process's", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test("the guard keeps a refusal's source: a process's own limit says it is the process's", {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { path } = await setup({ perDay: '$0.15' });
   const tighter = await openBudget({ wallet: kit.account.address, path, perPayment: '$0.01' });
   const client = guard(kit.client(), tighter);
@@ -176,7 +216,9 @@ test("the guard keeps a refusal's source: a process's own limit says it is the p
   tighter.close();
 });
 
-test("the agent is told why the guard refused, not which holds its owner could release", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('the agent is told why the guard refused, not which holds its owner could release', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client } = await setup({ perDay: '$0.05' });
   await (await budget.hold('$0.05')).note('unknown');
   const owner = await budget.check('$0.01');
@@ -186,12 +228,16 @@ test("the agent is told why the guard refused, not which holds its owner could r
   await assert.rejects(client.createPaymentPayload(kit.required(10_000)), brief);
   // The same when another process takes the room between the check and the reservation.
   const raced = await setup({ perDay: '$0.05' });
-  raced.client.onBeforePaymentCreation(async () => { await (await raced.budget.hold('$0.05')).note('unknown'); });
+  raced.client.onBeforePaymentCreation(async () => {
+    await (await raced.budget.hold('$0.05')).note('unknown');
+  });
   await assert.rejects(raced.client.createPaymentPayload(kit.required(10_000)), error => refusedFor('budget')(error) && !/wc-|release/.test(error.message));
   assert.equal((await raced.budget.status()).inFlight, 50_000n);
 });
 
-test("a payee's word that a payment settled can't free the budget while the authorization is redeemable", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test("a payee's word that a payment settled can't free the budget while the authorization is redeemable", {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client, clock } = await setup({ perDay: '$0.15' });
   // The payee answers "settled" with a made-up hash and keeps the authorization, asking for the
   // longest validity walletcap signs: it could redeem it for an hour yet.
@@ -207,7 +253,9 @@ test("a payee's word that a payment settled can't free the budget while the auth
   assert.equal((await budget.check('$0.15')).ok, true);
 });
 
-test("a Permit2 payment, or one whose expiry walletcap can't read, counts until it can no longer settle", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test("a Permit2 payment, or one whose expiry walletcap can't read, counts until it can no longer settle", {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client, clock } = await setup({ perDay: '$0.15' });
   const fake = { success: true, transaction: `0x${'ee'.repeat(32)}`, network: NETWORK };
   // 0.3.0 read only EIP-3009's validBefore: a payee that asked for Permit2 and answered "settled"
@@ -235,7 +283,9 @@ test("a Permit2 payment, or one whose expiry walletcap can't read, counts until 
   assert.equal((await budget.status()).spent, 0n);
 });
 
-test('terms valid longer than an hour are passed over for shorter ones on offer', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('terms valid longer than an hour are passed over for shorter ones on offer', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client } = await setup();
   // 0.3.0 refused the payment when the first terms asked for two hours, though the payee also
   // offered five minutes.
@@ -250,7 +300,9 @@ test('terms valid longer than an hour are passed over for shorter ones on offer'
   await assert.rejects(client.createPaymentPayload(unpriced), refusedFor('timeout'));
 });
 
-test('an authorization valid longer than an hour is refused before it is signed', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+test('an authorization valid longer than an hour is refused before it is signed', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
   const { budget, client } = await setup();
   // 0.2.x signed whatever validity the payee asked for: here, 30 days to redeem it.
   await assert.rejects(client.createPaymentPayload(kit.required(10_000, { maxTimeoutSeconds: 30 * 86_400 })), refusedFor('timeout'));

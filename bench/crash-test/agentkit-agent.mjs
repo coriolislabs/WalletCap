@@ -32,13 +32,32 @@ const mode = process.argv[2];
 const stranger = privateKeyToAccount(generatePrivateKey()).address;
 const merchant = privateKeyToAccount(generatePrivateKey()).address;
 const offers = [
-  { scheme: 'exact', network: 'eip155:8453', asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', amount: '1000000', payTo: stranger, maxTimeoutSeconds: 345_600, extra: { name: 'USD Coin', version: '2' } },
-  { scheme: 'exact', network: 'eip155:84532', asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e', amount: '10000', payTo: merchant, maxTimeoutSeconds: 300, extra: { name: 'USDC', version: '2' } },
+  {
+    scheme: 'exact',
+    network: 'eip155:8453',
+    asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    amount: '1000000',
+    payTo: stranger,
+    maxTimeoutSeconds: 345_600,
+    extra: { name: 'USD Coin', version: '2' },
+  },
+  {
+    scheme: 'exact',
+    network: 'eip155:84532',
+    asset: '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
+    amount: '10000',
+    payTo: merchant,
+    maxTimeoutSeconds: 300,
+    extra: { name: 'USDC', version: '2' },
+  },
 ];
 const approved = offers[1];
 const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
-const isApproved = accepted => accepted?.network === approved.network && same(accepted?.asset, approved.asset)
-  && accepted?.amount === approved.amount && same(accepted?.payTo, approved.payTo);
+const isApproved = accepted =>
+  accepted?.network === approved.network &&
+  same(accepted?.asset, approved.asset) &&
+  accepted?.amount === approved.amount &&
+  same(accepted?.payTo, approved.payTo);
 
 const received = [];
 const server = createServer((req, res) => {
@@ -79,10 +98,12 @@ const answer = JSON.parse(await provider.retryWithX402(walletProvider, { url, me
 server.close();
 if (dir) rmSync(dir, { recursive: true, force: true });
 
-process.stdout.write(`RESULT ${JSON.stringify({
-  mode,
-  approved: { network: approved.network, amount: approved.amount },
-  reported: answer.details?.paymentUsed ?? null,
-  refused: answer.error === true || answer.status === 'error',
-  received,
-})}\n`);
+process.stdout.write(
+  `RESULT ${JSON.stringify({
+    mode,
+    approved: { network: approved.network, amount: approved.amount },
+    reported: answer.details?.paymentUsed ?? null,
+    refused: answer.error === true || answer.status === 'error',
+    received,
+  })}\n`,
+);
