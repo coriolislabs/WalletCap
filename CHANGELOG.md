@@ -107,6 +107,10 @@ Both languages:
 
 The command line, in both languages:
 
+- `--json` prints the same fields from both command lines: snake_case keys, every amount,
+  count and duration as a string of decimal digits, every time as an ISO 8601 UTC string to the
+  millisecond, and `null` for a field with no value. The npm CLI printed camelCase keys
+  (`inFlight`, `perPayment`); the Python one printed times with its own offset format.
 - `walletcap release <id>` is `walletcap void <id>`, and `release --all-unknown --older-than …`
   is `void --all-unknown --older-than …`. Its messages say "Voided".
 - `void --all-unknown` releases a payment with no settle-by time only if it was held for x402

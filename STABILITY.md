@@ -105,6 +105,11 @@ other message's, may change in any release.
   `--json`. The npm CLI also has `awal <command>`.
 - Exit codes: 0 when the command worked; 1 when walletcap refused or couldn't use the budget;
   2 when the command line is wrong.
+- `--json` prints the same output from both command lines, field for field: object keys in
+  snake_case (`window_ms`, `in_flight`, `counts_until`), every amount, count and duration as a
+  string of decimal digits (micro-dollars for amounts), every time as an ISO 8601 UTC string to
+  the millisecond (`2027-01-15T08:00:00.000Z`), and `null` for a field with no value. A test
+  runs every command through both command lines on copies of one file and compares the output.
 - The fields of `--json` output are public: a release may add fields, and removing or renaming
   one is a breaking change. The plain-text output is for people and may change.
 - `walletcap-mcp`: the flags `--wallet`, `--path`, `--allow-tool` and `--help`, and a server

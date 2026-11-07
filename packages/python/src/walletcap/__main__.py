@@ -12,7 +12,7 @@ import dataclasses
 import json
 import sys
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -105,8 +105,9 @@ def _json(value: Any) -> str:
             return str(int(item))
         if isinstance(item, Path):
             return str(item)
-        if hasattr(item, "isoformat"):
-            return item.isoformat()
+        if isinstance(item, datetime):
+            # As JavaScript's toISOString(): UTC, to the millisecond.
+            return item.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         return item
 
     return json.dumps(plain(value), indent=2, ensure_ascii=False)
