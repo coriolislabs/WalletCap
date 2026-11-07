@@ -319,6 +319,14 @@ applySpendControls(client, {
 });
 ```
 
+In TypeScript with `node16` or `nodenext` module resolution, that call fails to compile with
+`@coinbase/cdp-sdk` 1.60 and 1.61, with or without walletcap: TS2345 at `client`. The SDK ships
+one set of declarations, which TypeScript reads as CommonJS there, so `applySpendControls` takes
+`@x402/core`'s CommonJS `x402Client`, a different type from the ESM one your code imports. At run
+time Node loads the ESM build of both, so the client is the same class. Write
+`client as unknown as Parameters<typeof applySpendControls>[0]`, or compile with
+`"moduleResolution": "bundler"`.
+
 The store holds each payment from the ledger's own time, not the time in CDP's entry, until an
 hour and a minute after CDP records it, and it counts for one window after that: CDP signs the
 payment after recording it, and lets a payee ask for an authorization it can redeem for up to an

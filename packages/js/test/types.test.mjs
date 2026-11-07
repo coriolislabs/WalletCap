@@ -55,6 +55,9 @@ const SNIPPETS = readdirSync(TYPES)
   .filter(name => /^readme-.*\.ts$/.test(name))
   .sort();
 const WITHOUT_AGENTKIT = SNIPPETS.filter(name => name !== 'readme-agentkit.ts').map(name => `test/types/${name}`);
+// The CDP snippet compiles with bundler resolution only: cdp-sdk's types, below.
+const NODE_RESOLUTION = WITHOUT_AGENTKIT.filter(name => name !== 'test/types/readme-cdp.ts');
+const NODE16 = ['--module', 'node16', '--moduleResolution', 'node16'];
 
 test('every JavaScript snippet in the README is a test/types/readme-*.ts file, word for word', () => {
   const blocks = [...read(join(ROOT, 'README.md')).matchAll(/^```js\n([\s\S]*?)^```/gm)].map(match => match[1]);
@@ -69,8 +72,22 @@ test('every JavaScript snippet in the README is a test/types/readme-*.ts file, w
 });
 
 test("the README's snippets compile against the packages they name, with nodenext and with bundler resolution", () => {
-  compiles(tsc(JS, '--skipLibCheck', ...NODENEXT, ...WITHOUT_AGENTKIT), 'nodenext');
+  compiles(tsc(JS, '--skipLibCheck', ...NODENEXT, ...NODE_RESOLUTION), 'nodenext');
   compiles(tsc(JS, '--skipLibCheck', ...BUNDLER, ...WITHOUT_AGENTKIT), 'bundler');
+});
+
+test("the README's CDP snippet, with a real x402Client, meets cdp-sdk's CommonJS types under node16 and nodenext, and the README's cast compiles", () => {
+  for (const [name, resolution] of [
+    ['node16', NODE16],
+    ['nodenext', NODENEXT],
+  ]) {
+    const result = tsc(JS, '--skipLibCheck', ...resolution, 'test/types/readme-cdp.ts');
+    const errors = result.stdout.split('\n').filter(line => /error TS\d+/.test(line));
+    // Once cdp-sdk's types read as ESM there, this compiles: drop the README's note and the cast.
+    assert.equal(errors.length, 1, `${name}: expected cdp-sdk's one TS2345:\n${result.stdout}${result.stderr}`);
+    assert.match(errors[0], /readme-cdp\.ts\(\d+,\d+\): error TS2345: .*\/esm\/x402Client.*\/cjs\/x402Client/);
+    compiles(tsc(JS, '--skipLibCheck', ...resolution, 'test/types/cdp-nodenext.ts'), `${name}, with the README's cast`);
+  }
 });
 
 test("guard() takes @x402/core's own client and returns its type, from packages/js's x402 and the workspace's newer one", () => {

@@ -45,6 +45,11 @@ applySpendControls(client, {
 
 - Set `maxCumulativeSpend`: CDP only records through its store when a cumulative cap is set.
 - Set `allowedAssets`: CDP never consults its store for a token outside the cap.
+- In TypeScript with `node16` or `nodenext` module resolution, `applySpendControls(client, …)`
+  fails to compile with `@coinbase/cdp-sdk` 1.60 and 1.61, with or without walletcap (TS2345):
+  the SDK's declarations, read as CommonJS, take `@x402/core`'s CommonJS `x402Client`. At run
+  time both are the ESM build. Pass `client as unknown as Parameters<typeof applySpendControls>[0]`,
+  or compile with `"moduleResolution": "bundler"`.
 - `append()` holds each payment through the ledger's own admission, inside one write
   transaction, so replicas on one host sharing the file can't both take the last dollar. The
   file serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind
