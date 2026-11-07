@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
-  defaultBudgetPath, formatUsd, formatWindow, normalizeWallet, parseLimits, toMicros, toWindowMs,
+  budgetPathFor, formatUsd, formatWindow, normalizeWallet, parseLimits, toMicros, toWindowMs,
 } from '../dist/core/money.js';
 
 // The cases the Python suite checks too (tests/test_money.py).
@@ -98,10 +98,10 @@ test('one rolling limit at a time, and nothing left out silently', async () => {
 
 test('the default file is per user and the same for every process', async () => {
   const home = '/home/agent';
-  assert.equal(defaultBudgetPath({}, 'linux', home), '/home/agent/.local/state/walletcap/budget.sqlite');
-  assert.equal(defaultBudgetPath({ XDG_STATE_HOME: '/var/state' }, 'linux', home), '/var/state/walletcap/budget.sqlite');
-  assert.equal(defaultBudgetPath({ XDG_STATE_HOME: 'relative' }, 'linux', home), '/home/agent/.local/state/walletcap/budget.sqlite');
-  assert.equal(defaultBudgetPath({}, 'darwin', home), '/home/agent/Library/Application Support/walletcap/budget.sqlite');
-  assert.equal(defaultBudgetPath({ WALLETCAP_PATH: '~/b.sqlite' }, 'linux', home), '/home/agent/b.sqlite');
-  assert.equal(defaultBudgetPath({ WALLETCAP_PATH: '/data/budget.sqlite' }, 'darwin', home), '/data/budget.sqlite');
+  assert.equal(budgetPathFor({}, 'linux', home), '/home/agent/.local/state/walletcap/budget.sqlite');
+  assert.equal(budgetPathFor({ XDG_STATE_HOME: '/var/state' }, 'linux', home), '/var/state/walletcap/budget.sqlite');
+  assert.equal(budgetPathFor({ XDG_STATE_HOME: 'relative' }, 'linux', home), '/home/agent/.local/state/walletcap/budget.sqlite');
+  assert.equal(budgetPathFor({}, 'darwin', home), '/home/agent/Library/Application Support/walletcap/budget.sqlite');
+  assert.equal(budgetPathFor({ WALLETCAP_PATH: '~/b.sqlite' }, 'linux', home), '/home/agent/b.sqlite');
+  assert.equal(budgetPathFor({ WALLETCAP_PATH: '/data/budget.sqlite' }, 'darwin', home), '/data/budget.sqlite');
 });

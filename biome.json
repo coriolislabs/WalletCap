@@ -19,7 +19,8 @@
       "examples/**",
       "!**/dist",
       "!**/node_modules",
-      "!bench/crash-test/contracts/*.json"
+      "!bench/crash-test/contracts/*.json",
+      "!packages/js/test/types/readme-*.ts"
     ]
   },
   "formatter": {

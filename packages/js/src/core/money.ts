@@ -222,7 +222,12 @@ export const expandHome = (path: string, home = homedir()): string => (path === 
  * else the per-user state directory. The Python package computes the same path, so both
  * languages find one budget.
  */
-export function defaultBudgetPath(env: NodeJS.ProcessEnv = process.env, platform: string = process.platform, home: string = homedir()): string {
+export function defaultBudgetPath(): string {
+  return budgetPathFor(process.env, process.platform, homedir());
+}
+
+/** Internal (not exported by the package): defaultBudgetPath() for a given environment, platform and home. */
+export function budgetPathFor(env: Readonly<Record<string, string | undefined>>, platform: string, home: string): string {
   const path = platform === 'win32' ? win32 : posix;
   const set = env.WALLETCAP_PATH;
   if (set) return set === '~' || set.startsWith('~/') ? path.join(home, set.slice(1)) : set;

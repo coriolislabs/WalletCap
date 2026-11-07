@@ -25,13 +25,19 @@ Each entry point, and the names it exports. Exported TypeScript types are public
 | Entry point | Exports |
 |---|---|
 | `walletcap` | `openBudget`, `Budget`, `Hold`, `openOwner`, `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `notSent`, `toMicros`, `formatUsd`, `defaultBudgetPath`, `MAX_AMOUNT`, `SCHEMA_VERSION`, `MIN_SQLITE_VERSION`; types `BudgetOptions`, `HoldOptions`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`, `VoidedPayment`, `OwnerOptions`, `LimitOptions`, `Dollars`, `Micros`, `Window`, `RefusalCode`, `RefusalSource`, `Outcome`, `PaymentState`, `NotSent` |
-| `walletcap/x402` | `guard`, `MAX_PAYMENT_TIMEOUT_SECONDS`, `USD_ASSETS`; types `AssetEntry`, `PaymentRequirements`, `PaymentContext`, `X402HookedClient` |
-| `walletcap/cdp` | `cdpStore`; types `SpendStore`, `SpendLedgerEntry` |
+| `walletcap/x402` | `guard`, `MAX_PAYMENT_TIMEOUT_SECONDS`, `USD_ASSETS`; types `AssetEntry`, `PaymentRequirements`, `PaymentCreationContext`, `PaymentCreatedContext`, `PaymentCreationFailureContext`, `PaymentResponseContext`, `X402HookedClient` |
+| `walletcap/cdp` | `cdpStore`; types `SpendStore`, `SpendLedgerEntry`, `SpendLedgerEntryInput` |
 | `walletcap/agentkit` | `guardAgentKit`; type `AssetEntry` |
-| `walletcap/agentic` | `guardAgenticWallet`, `discoverRequirements`, `usdcAtomic`, `AWAL_CHAINS`; types `WalletRequest`, `RequestData`, `PaymentRequired`, `GuardedWallet` |
+| `walletcap/agentic` | `guardAgenticWallet`, `discoverRequirements`, `usdcAtomic`, `AWAL_CHAINS`; types `WalletRequest`, `RequestData`, `PaymentRequired`, `GuardedWallet`, `FetchLike` |
 
 Every method of the payer and owner handles returns a Promise. The package has no runtime
 dependencies, and adding one is a breaking change.
+
+The `.d.ts` files compile on their own, with `skipLibCheck` off, `lib: ["es2022"]`, no
+`@types/node`, and `nodenext` or `bundler` resolution; a test compiles a project that way against
+the packed package. They add `esnext.disposable` to the project's `lib`, for `await using`.
+`guard()` takes @x402/core's `x402Client`, and `cdpStore()` returns a `SpendStore` that
+`applySpendControls` in @coinbase/cdp-sdk takes. A change that breaks either is a breaking change.
 
 ### PyPI `walletcap` (Python 3.11 or later)
 
@@ -130,10 +136,10 @@ other message's, may change in any release.
 
 ## Not public
 
-- Modules whose names start with `_`: `_clock`, `_keccak` and `adapters/_x402` in the npm
+- Modules whose names start with `_`: `_clock`, `_keccak`, `_ledgers` and `adapters/_x402` in the npm
   package, and `walletcap._clock`, `walletcap._keccak` and `walletcap._ledger` in the PyPI one.
 - Anything in `packages/js/src/core` that the entry points above don't export, such as the
-  ledger client and `ledgerOf`.
+  ledger client and `budgetPathFor`.
 - The test clock: replacing `julianday('now')` on a test's own connections. It exists for
   walletcap's own tests.
 - A hold's token, the `holder` of a `held` entry in the file. No API returns it; only the

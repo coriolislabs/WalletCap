@@ -188,8 +188,8 @@ try {
   const tx = await sendUsdc(payee, '5');
   await hold.settle({ tx });
 } catch (error) {
-  if (neverBroadcast(error)) await hold.void({ evidence: error.message });
-  else await hold.note('unknown', error.message); // it keeps counting
+  if (neverBroadcast(error)) await hold.void({ evidence: String(error) });
+  else await hold.note('unknown', String(error)); // it keeps counting
 }
 ```
 
@@ -369,7 +369,17 @@ another server, put its command after `--`.
 - It binds the payments that go through it. The wallet app takes requests from any process of
   the same user, so keep the real `awal` out of an agent's reach.
 
-The wrapper itself is `guardAgenticWallet(budget, { request })` from `walletcap/agentic`.
+In code, the wrapper is `guardAgenticWallet()` from `walletcap/agentic`. Give it the wallet's own
+request channel (awal's `sendIpcRequest`), and send through the `request` it returns:
+
+```js
+import { openBudget } from 'walletcap';
+import { guardAgenticWallet } from 'walletcap/agentic';
+
+const budget = await openBudget({ wallet: '0xYourAgentWallet' });
+const wallet = guardAgenticWallet(budget, { request: sendIpcRequest });
+await wallet.request('send-transaction', { recipient: payee, amountAtomic: '50000', asset: 'USDC', chain: 'base' });
+```
 
 ### Coinbase AgentKit
 

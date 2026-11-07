@@ -9,7 +9,8 @@
 // which every process on the host opens, for every rail. append() holds the payment through the
 // ledger's admission, inside one write transaction, so two processes that both pass the SDK's
 // own in-memory check cannot both record a payment past the cap.
-import { type Budget, type Hold, ledgerOf } from '../core/budget.js';
+import { ledgerOf } from '../core/_ledgers.js';
+import type { Budget, Hold } from '../core/budget.js';
 import { BudgetRefused, forAgent, UsageError } from '../core/errors.js';
 import { OPEN } from '../core/ledger.js';
 import { checkKeys, MAX_AMOUNT } from '../core/money.js';
@@ -28,13 +29,20 @@ const OPTION_KEYS = new Set(['asset', 'scale']);
 // until one window after.
 const SETTLES_WITHIN_MS = BigInt(MAX_PAYMENT_TIMEOUT_SECONDS) * 1000n + 60_000n;
 
-/** A payment as CDP's SpendStore interface carries it. Structurally the same as @coinbase/cdp-sdk/x402's SpendLedgerEntry. */
+/** A payment as CDP's SpendStore interface carries it: @coinbase/cdp-sdk/x402's SpendLedgerEntry. */
 export interface SpendLedgerEntry {
-  atomicAmount: bigint | string | number;
+  atomicAmount: bigint;
   asset: string;
-  network: string;
+  /** CAIP-2, like 'eip155:8453'. */
+  network: `${string}:${string}`;
   payTo: string;
   at: number;
+}
+
+/** What append() and removeEntry() take: a SpendLedgerEntry, or one whose amount is a decimal string or a number. */
+export interface SpendLedgerEntryInput extends Omit<SpendLedgerEntry, 'atomicAmount' | 'network'> {
+  atomicAmount: bigint | string | number;
+  network: string;
 }
 
 // CDP compares assets after this normalization (EVM addresses lowercased).
@@ -52,7 +60,7 @@ const parseInfo = (text: string | null): Record<string, unknown> | null => {
   }
 };
 
-const fingerprint = (entry: SpendLedgerEntry): string => JSON.stringify({
+const fingerprint = (entry: SpendLedgerEntryInput): string => JSON.stringify({
   atomicAmount: String(entry.atomicAmount),
   asset: entry.asset,
   network: entry.network,
@@ -60,15 +68,17 @@ const fingerprint = (entry: SpendLedgerEntry): string => JSON.stringify({
   at: Number(entry.at),
 });
 
+const CAIP2 = /^[^:]+:.+$/;
+
 const ceilDiv = (numerator: bigint, denominator: bigint): bigint => (numerator + denominator - 1n) / denominator;
 
 /** CDP's SpendStore interface, which @coinbase/cdp-sdk/x402's applySpendControls takes as `store`. */
 export interface SpendStore {
   size(): Promise<number>;
   load(): Promise<SpendLedgerEntry[]>;
-  append(entry: SpendLedgerEntry): Promise<void>;
+  append(entry: SpendLedgerEntryInput): Promise<void>;
   prune(olderThanMs?: number): Promise<void>;
-  removeEntry(entry: SpendLedgerEntry): Promise<void>;
+  removeEntry(entry: SpendLedgerEntryInput): Promise<void>;
   /** Nothing to close: the store counts in the budget's own file, which budget.close() closes. */
   close(): void;
 }
@@ -98,15 +108,16 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
 
     async load() {
       const rows = await ledger.counting(wallet);
-      return rows.map(row => {
+      return rows.map((row): SpendLedgerEntry => {
         // Dated to the moment its window counts from, so CDP's own window check keeps it as long
         // as walletcap does: now, for a payment that counts until evidence ends it.
         const countsFrom = row.counts_from ?? row.now;
         const at = Number(countsFrom === OPEN || countsFrom > row.now ? row.now : countsFrom);
         const own = parseInfo(row.info);
-        if (own?.atomicAmount !== undefined && normalizeAsset(own.asset) === asset) {
+        const network = own?.network;
+        if (own?.atomicAmount !== undefined && normalizeAsset(own.asset) === asset && typeof network === 'string' && CAIP2.test(network)) {
           try {
-            return { atomicAmount: BigInt(own.atomicAmount as string), asset, network: String(own.network), payTo: String(own.payTo), at };
+            return { atomicAmount: BigInt(own.atomicAmount as string), asset, network: network as `${string}:${string}`, payTo: String(own.payTo), at };
           } catch { /* not a CDP entry after all */ }
         }
         // Spend from another rail (or another asset) counts in this asset's units, rounded up.

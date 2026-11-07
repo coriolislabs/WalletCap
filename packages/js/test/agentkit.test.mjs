@@ -3,12 +3,9 @@
 // some 35 packages), so a stand-in builds its x402 client exactly as AgentKit 0.10.4's
 // X402ActionProvider.createX402Client does, with x402's real client and EVM scheme.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import { BudgetRefused, openBudget, UsageError } from 'walletcap';
 import { guardAgentKit } from 'walletcap/agentkit';
@@ -18,10 +15,6 @@ const DIR = mkdtempSync(join(tmpdir(), 'walletcap-agentkit-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
 after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 const kit = await x402();
-const JS = fileURLToPath(new URL('..', import.meta.url));
-const TSC = (() => {
-  try { return createRequire(import.meta.url).resolve('typescript/bin/tsc'); } catch { return null; }
-})();
 const BASE_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const STRANGER = '0x1111111111111111111111111111111111111111';
 const settled = { success: true, transaction: `0x${'cd'.repeat(32)}`, network: NETWORK };
@@ -73,13 +66,4 @@ test('only an AgentKit x402 provider can be guarded, and only once', { skip }, a
   const provider = guardAgentKit(await standIn(), budget, { assets: [{ network: NETWORK, asset: USDC, decimals: 6 }] });
   assert.throws(() => guardAgentKit(provider, budget), /already has a budget guard/);
   budget.close();
-});
-
-test("the README's AgentKit recipe compiles against AgentKit's types; the old subclass doesn't", { skip: TSC === null && 'typescript is not installed' }, async () => {
-  const tsc = (...files) => spawnSync(process.execPath, [TSC, '--noEmit', '--strict', '--skipLibCheck', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', 'test/types/agentkit.d.ts', ...files], { cwd: JS, encoding: 'utf8' });
-  const recipe = tsc('test/types/recipe.ts');
-  assert.equal(recipe.status, 0, recipe.stdout);
-  const subclass = tsc('test/types/subclass.ts');
-  assert.notEqual(subclass.status, 0);
-  assert.match(subclass.stdout, /TS2415/);
 });

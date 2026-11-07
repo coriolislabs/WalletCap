@@ -106,6 +106,16 @@ export interface RequestData {
   [key: string]: unknown;
 }
 
+/**
+ * The part of fetch() discoverRequirements uses. globalThis.fetch is one; the type is spelled out
+ * so the declarations need neither the DOM's types nor Node's.
+ */
+export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; redirect: 'follow'; body?: string }) => Promise<{
+  status: number;
+  headers: { get(name: string): string | null };
+  json(): Promise<unknown>;
+}>;
+
 const requestUrl = (data: RequestData): URL => {
   const url = new URL(data.path ?? '', data.baseURL);
   for (const [key, value] of Object.entries(data.queryParams ?? {})) url.searchParams.set(key, String(value));
@@ -116,15 +126,15 @@ const requestUrl = (data: RequestData): URL => {
  * Ask the endpoint what it charges: its 402 answer, with the payment requirements it accepts
  * (`accepts`) and any `extensions`, or null if it asks for none.
  */
-export async function discoverRequirements(data: RequestData, { fetch: fetchImpl = globalThis.fetch }: { fetch?: typeof fetch } = {}): Promise<PaymentRequired | null> {
+export async function discoverRequirements(data: RequestData, { fetch: fetchImpl = globalThis.fetch }: { fetch?: FetchLike } = {}): Promise<PaymentRequired | null> {
   const method = String(data.method ?? 'GET').toUpperCase();
   const headers: Record<string, string> = { Accept: 'application/json', ...(data.headers ?? {}) };
-  const init: RequestInit = { method, headers, redirect: 'follow' };
+  const init: Parameters<FetchLike>[1] = { method, headers, redirect: 'follow' };
   if (data.body !== undefined && method !== 'GET') {
     init.body = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
     headers['Content-Type'] ??= 'application/json';
   }
-  const response = await fetchImpl(requestUrl(data), init);
+  const response = await fetchImpl(requestUrl(data).href, init);
   if (response.status !== 402) return null;
   const header = response.headers.get('payment-required');
   const required = (header ? decodeHeader(header) : await response.json().catch(() => null)) as PaymentRequired | null;
@@ -148,9 +158,10 @@ export interface GuardedWallet {
  * or null when the endpoint asks for no payment.
  */
 export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch: fetchImpl, discover }: {
-  request?: WalletRequest; assets?: AssetEntry[]; fetch?: typeof fetch; discover?: (data: RequestData) => Promise<unknown>;
-} = {}): GuardedWallet {
-  if (typeof request !== 'function') throw new UsageError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
+  request: WalletRequest; assets?: AssetEntry[]; fetch?: FetchLike; discover?: (data: RequestData) => Promise<unknown>;
+}): GuardedWallet {
+  // The type says request is required; JavaScript callers get the same answer at run time.
+  if (typeof (request as unknown) !== 'function') throw new UsageError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
   const wallet = request;
   const table = assetTable(assets);
   const findRequirements = discover ?? ((data: RequestData) => discoverRequirements(data, fetchImpl === undefined ? {} : { fetch: fetchImpl }));

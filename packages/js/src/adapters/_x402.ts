@@ -17,28 +17,46 @@ export interface PaymentRequirements {
   payTo?: string;
   maxTimeoutSeconds?: unknown;
   extra?: unknown;
-  [key: string]: unknown;
 }
 
-/** What @x402/core hands its hooks: the fields the guard reads. */
-export interface PaymentContext {
+/** What @x402/core hands a hook before it signs: the fields the guard reads. */
+export interface PaymentCreationContext {
   selectedRequirements: PaymentRequirements;
-  paymentPayload?: unknown;
-  paymentRequired?: { resource?: { url?: unknown } } & Record<string, unknown>;
-  settleResponse?: { success?: boolean; transaction?: string } & Record<string, unknown>;
-  [key: string | symbol]: unknown;
+  paymentRequired?: unknown;
 }
 
-/** An x402 client from @x402/core 2.x: the hooks the guard registers. */
-// Method syntax keeps the parameters bivariant, so @x402/core's own client, whose contexts are
-// richer than these, is one.
-export interface X402HookedClient {
-  onBeforePaymentCreation(hook: (context: PaymentContext) => Promise<unknown>): unknown;
-  onAfterPaymentCreation(hook: (context: PaymentContext) => Promise<unknown>): unknown;
-  onPaymentCreationFailure(hook: (context: PaymentContext) => Promise<unknown>): unknown;
-  onPaymentResponse(hook: (context: PaymentContext) => Promise<unknown>): unknown;
-  registerPolicy?(policy: (version: number, requirements: PaymentRequirements[]) => PaymentRequirements[]): unknown;
+/** What @x402/core hands a hook once it has signed. */
+export interface PaymentCreatedContext extends PaymentCreationContext {
+  paymentPayload: unknown;
 }
+
+/** What @x402/core hands a hook when a later hook failed. */
+export interface PaymentCreationFailureContext extends PaymentCreationContext {
+  error?: unknown;
+}
+
+/** What @x402/core hands a hook once the paid request is answered, or failed. */
+export interface PaymentResponseContext {
+  paymentPayload: unknown;
+  requirements?: PaymentRequirements;
+  settleResponse?: { success?: boolean; transaction?: string };
+  paymentRequired?: unknown;
+  error?: unknown;
+}
+
+/**
+ * An x402 client from @x402/core 2.x: the hooks the guard registers. @x402/core's own contexts
+ * carry more than the ones above, so its x402Client is one as it is, and guard() returns its
+ * type. The guard also uses the client's registerPolicy() when it has one.
+ */
+export interface X402HookedClient {
+  onBeforePaymentCreation(hook: (context: PaymentCreationContext) => Promise<void>): unknown;
+  onAfterPaymentCreation(hook: (context: PaymentCreatedContext) => Promise<void>): unknown;
+  onPaymentCreationFailure(hook: (context: PaymentCreationFailureContext) => Promise<void>): unknown;
+  onPaymentResponse(hook: (context: PaymentResponseContext) => Promise<void>): unknown;
+}
+
+type PaymentPolicy = (x402Version: number, paymentRequirements: PaymentRequirements[]) => PaymentRequirements[];
 
 /**
  * A USD-pegged stablecoin the budget counts at $1 a token. List only USD-pegged stablecoins:
@@ -61,7 +79,9 @@ const hasCdpControls = (client: object): boolean => Object.getOwnPropertySymbols
 const oneCounter = (): UsageError => new UsageError(
   'this x402 client already has Coinbase CDP spend controls; the CDP store and the budget guard both count the payment. Use one: guard(client, budget), or applySpendControls with cdpStore(budget), not both.',
 );
+// The guard's state for one payment, on the context @x402/core passes from hook to hook.
 const SLOT = Symbol('walletcap/x402-payment');
+type Slotted = { [SLOT]?: Slot };
 const FINGERPRINTS_KEPT = 10_000;
 
 /**
@@ -297,8 +317,9 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
 
   // Pay only in assets the budget can count, on terms valid an hour or less, when the server
   // offers a choice: a payee that also offers longer terms is paid on the shorter ones.
-  if (typeof client.registerPolicy === 'function') {
-    client.registerPolicy((_version: number, requirements: PaymentRequirements[]) => {
+  const registerPolicy = (client as { registerPolicy?: unknown }).registerPolicy;
+  if (typeof registerPolicy === 'function') {
+    (registerPolicy as (policy: PaymentPolicy) => unknown).call(client, (_version: number, requirements: PaymentRequirements[]) => {
       const kept = requirements.filter(requirement => priced(requirement) && timeoutRefusal(requirement) === null);
       if (kept.length === 0 && requirements.length > 0) {
         const countable = requirements.find(priced);
@@ -309,11 +330,11 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     });
   }
 
-  client.onBeforePaymentCreation(async (context: PaymentContext) => {
+  client.onBeforePaymentCreation(async (context: PaymentCreationContext) => {
     if (hasCdpControls(client)) throw oneCounter();
     const amount = price(context.selectedRequirements);
     const slot: Slot = { amount, hold: null, payload: null };
-    context[SLOT] = slot;
+    (context as Slotted)[SLOT] = slot;
     if (amount === 0n) return undefined;
     // An early refusal, before anything is signed. The hold that binds comes after. The
     // agent is told why, not which holds its owner could void: that is for the owner's CLI.
@@ -325,14 +346,14 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     return undefined;
   });
 
-  client.onAfterPaymentCreation(async (context: PaymentContext) => {
+  client.onAfterPaymentCreation(async (context: PaymentCreatedContext) => {
     if (hasCdpControls(client)) throw oneCounter();
-    const slot = context[SLOT] as Slot | undefined;
+    const slot = (context as Slotted)[SLOT];
     if (slot === undefined || slot.amount === 0n) return;
     const requirements = context.selectedRequirements;
     // If another process spent the budget since the check, this throws; the client then
     // discards the signed payload and nothing is sent.
-    const url = context.paymentRequired?.resource?.url;
+    const url = (context.paymentRequired as { resource?: { url?: unknown } } | undefined)?.resource?.url;
     const payload = context.paymentPayload as SignedPayload | undefined;
     try {
       const id = identityOf(payload);
@@ -351,10 +372,10 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     remember(context.paymentPayload, slot.hold);
   });
 
-  client.onPaymentCreationFailure(async (context: PaymentContext) => {
+  client.onPaymentCreationFailure(async (context: PaymentCreationFailureContext) => {
     // A later hook threw after this guard held the payment: the payload is never returned, so
     // never sent. A hold this guard found already in the ledger is left as it was.
-    const slot = context[SLOT] as Slot | undefined;
+    const slot = (context as Slotted)[SLOT];
     if (slot?.hold?.state === 'held' && slot.hold.created) {
       forget(slot.payload);
       await slot.hold.void({ evidence: 'not sent: a later x402 hook failed' });
@@ -362,7 +383,7 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     return undefined;
   });
 
-  client.onPaymentResponse(async (context: PaymentContext) => {
+  client.onPaymentResponse(async (context: PaymentResponseContext) => {
     const hold = recall(context.paymentPayload);
     if (hold === undefined) return undefined;
     forget(context.paymentPayload);

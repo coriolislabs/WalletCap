@@ -210,3 +210,19 @@ jobs:
         run: npx -y -p "$RUNNER_TEMP"/walletcap-crash-test-*.tgz -p "$RUNNER_TEMP"/walletcap-[0-9]*.tgz -p @coinbase/agentkit@0.10.4 walletcap-crash-test --agentkit --json > "$RUNNER_TEMP/agentkit.json"
       - name: Check the AgentKit row
         run: node bench/crash-test/ci/check-agentkit.mjs "$RUNNER_TEMP/agentkit.json"
+
+  agentkit-types:
+    name: AgentKit types
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Install the workspace from the lockfile and build walletcap
+        run: npm ci --no-audit --no-fund && npm run build -w walletcap
+      # AgentKit 0.10.4 brings about 36 packages, so it is no devDependency. It is installed here,
+      # beside the workspace, and the type tests compile the README's recipe against its own types.
+      - name: Install Coinbase AgentKit 0.10.4 beside the workspace
+        run: npm install --prefix "$RUNNER_TEMP/agentkit" --no-audit --no-fund @coinbase/agentkit@0.10.4
+      - name: Compile the README's snippets, AgentKit's recipe included
+        working-directory: packages/js
+        run: WALLETCAP_AGENTKIT_DIR="$RUNNER_TEMP/agentkit" WALLETCAP_REQUIRE_AGENTKIT=1 node --test test/types.test.mjs

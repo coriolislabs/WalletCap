@@ -675,9 +675,9 @@ def test_both_languages_find_the_same_default_file(env: dict[str, str], platform
     assert NODE is not None
     home = "/home/agent"
     script = (
-        "const { defaultBudgetPath } = await import(process.argv[1]);"
+        "const { budgetPathFor } = await import(process.argv[1]);"
         "const [, , env, platform, home] = process.argv;"
-        "console.log(defaultBudgetPath(JSON.parse(env), platform, home));"
+        "console.log(budgetPathFor(JSON.parse(env), platform, home));"
     )
     result = subprocess.run(
         [

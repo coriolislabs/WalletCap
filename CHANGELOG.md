@@ -37,13 +37,20 @@ The ledger and the budget file:
 JavaScript:
 
 - The package is written in TypeScript, and its `.d.ts` files come from `tsc`. The hand-written
-  `index.d.ts` is gone.
+  `index.d.ts` is gone. The `.d.ts` files compile on their own: with `skipLibCheck` off,
+  `lib: ["es2022"]`, no `@types/node`, and `nodenext` or `bundler` resolution.
+- `X402HookedClient` gives each hook its context type, `PaymentCreationContext`,
+  `PaymentCreatedContext`, `PaymentCreationFailureContext` or `PaymentResponseContext`, where 0.3
+  typed them `any`, and no longer lists `registerPolicy`: `guard()` still registers its policy on
+  a client that has one. @x402/core's `x402Client` fits it, and `guard()` returns the type it was
+  given.
 - The API is async. `openBudget()` returns a Promise, and so does every method of the payer and
   owner handles and of a hold. A wait for another process's write lock happens on the event
   loop, for up to `busyTimeoutMs` (30,000 by default).
 - `budget.reserve()` is `budget.hold()`, and returns a `Hold`; `Reservation` is gone. A hold's
   `commit({ tx })` is `settle({ tx })`, `release()` is `void({ evidence })`, and `annotate()` is
   `note(outcome, detail)`. `hold()` and `pay()` take `id` and `settlesWithin` (milliseconds).
+  `Hold` has no public constructor: `budget.hold()` makes one.
 - `status()` names the window `windowMs`, as `BudgetLimits` does.
 - `check()` always has `code`, `source`, `message` and `brief`, `null` when the payment would be
   paid; `source` is new. A `Payment`'s `to`, `note` and `tx`, and a `HeldPayment`'s `to`, `note`
@@ -57,6 +64,8 @@ JavaScript:
   `walletcap/agentkit`. `MAX_PAYMENT_TIMEOUT_SECONDS` and `USD_ASSETS` moved to `walletcap/x402`.
   `walletcap/agentic` keeps `guardAgenticWallet(budget, { request })`.
 - `SharedBudgetStore` is gone, with its `declare()`, `revoke()` and `status()`; use `cdpStore()`.
+  What it returns is a `SpendStore` that cdp-sdk 1.60.0's `applySpendControls` takes, and its
+  `load()` gives `atomicAmount` as a bigint, as 0.3's did.
 - `budget.setLimits()`, `budget.freeze()` and `budget.unfreeze()` moved to the owner's handle,
   `openOwner()`.
 - `budget.holds()` returns `HeldPayment`s: `until` is now `countsUntil`, and `settlesBy` is new.
@@ -151,6 +160,9 @@ Behaviour:
   budget.pay()` waits, the hold the thread takes is voided, with the evidence "cancelled before
   paying", before the cancellation goes on.
 - `walletcap-mcp`, the npm package for the MCP proxy.
+- Types for `walletcap/agentic`, which 0.3 shipped without. `guardAgenticWallet(budget, { request })`
+  needs `request`, as it did at run time, and `fetch`, there and in `discoverRequirements()`, is a
+  `FetchLike`: the part of `fetch` they call.
 - [STABILITY.md](STABILITY.md), and design records in [docs/adr/](docs/adr/).
 
 ### Changed

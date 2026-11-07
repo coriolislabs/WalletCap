@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+/// <reference lib="esnext.disposable" preserve="true" />
 // The payer's handle: one wallet's budget, counted across every process, replica, key,
 // permission and payment rail on one host that pays from it. A payer checks, holds and pays,
 // and reads what counts; changing limits, freezing and voiding or settling by id are the
@@ -11,6 +12,7 @@
 // tighten things for its own process, and if the count cannot be read, nothing is paid.
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { registerLedger } from './_ledgers.js';
 import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, UsageError } from './errors.js';
 import {
   type BudgetRow, Ledger, mergedNoteOf, OPEN, type Outcome, type PaymentRow, type PaymentState, type ProcessLimits, type StatusRow,
@@ -21,15 +23,6 @@ import {
   type Micros, normalizeWallet, parseLimits, shortWallet, toMicros,
 } from './money.js';
 
-// Each budget's ledger, for the adapters: they read what the public API doesn't give.
-const ledgers = new WeakMap<Budget, Ledger>();
-
-/** Internal, for the adapters (not exported by the package): the ledger a budget counts in. */
-export function ledgerOf(budget: Budget): Ledger {
-  const ledger = ledgers.get(budget);
-  if (ledger === undefined) throw new UsageError('that is not a budget walletcap opened');
-  return ledger;
-}
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
 const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
@@ -348,6 +341,8 @@ function processLimits(row: BudgetRow, asked: Limits): { limits: ProcessLimits; 
  * for an id already in the ledger (`created` false) can't settle, void, bound or note it; only
  * the process that held it, or the budget's owner, can.
  */
+let makeHold: (ledger: Ledger, id: string, amount: Micros, state: PaymentState, created: boolean, holder: string | null) => Hold;
+
 export class Hold {
   readonly #ledger: Ledger;
   readonly #id: string;
@@ -356,8 +351,13 @@ export class Hold {
   readonly #holder: string | null;
   #state: PaymentState;
 
-  /** Internal: Budget.hold() makes these. */
-  constructor(ledger: Ledger, id: string, amount: Micros, state: PaymentState, created: boolean, holder: string | null = null) {
+  // Budget.hold() makes these, through makeHold: the constructor is private, so the public
+  // declarations never name the ledger.
+  static {
+    makeHold = (ledger, id, amount, state, created, holder) => new Hold(ledger, id, amount, state, created, holder);
+  }
+
+  private constructor(ledger: Ledger, id: string, amount: Micros, state: PaymentState, created: boolean, holder: string | null) {
     this.#ledger = ledger;
     this.#id = id;
     this.#amount = amount;
@@ -469,7 +469,7 @@ export class Budget {
       const { limits, looser } = processLimits(row, asked);
       if (looser) warnLooser(options.onWarning, row, asked, path);
       const budget = new Budget(ledger, wallet, path, limits);
-      ledgers.set(budget, ledger);
+      registerLedger(budget, ledger);
       return budget;
     } catch (error) {
       ledger.close();
@@ -510,7 +510,7 @@ export class Budget {
       withinMs: settlesWithin === undefined || settlesWithin === null ? null : durationMs(settlesWithin, 'settlesWithin'),
       limits: this.#limits,
     });
-    return new Hold(this.#ledger, held.payment, micros, held.state, held.created, held.holder);
+    return makeHold(this.#ledger, held.payment, micros, held.state, held.created, held.holder);
   }
 
   /**
