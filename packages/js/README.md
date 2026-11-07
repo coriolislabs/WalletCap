@@ -6,8 +6,8 @@ budget that holds across restarts, replicas on one host and payment rails.**
 
 One budget per wallet, counted in one SQLite file that every process on the host opens. A
 restart, a second replica, one more key or the next calendar period can't hand the agent a fresh
-budget. The rule is SQL that ships inside the package (`dist/spec/schema.sql`), the same file the
-PyPI package runs.
+budget. The rule is SQL, `spec/schema.sql`, built into the package as written (`dist/spec/` has a
+copy to read), the same file the PyPI package runs.
 
 `npx walletcap-crash-test` puts Coinbase's agent spend controls through a restart, 10 replicas,
 a shared store and a payee who asks for EURC, then puts walletcap through the same events,

@@ -36,6 +36,8 @@ dependencies, and adding one is a breaking change.
 The `.d.ts` files compile on their own, with `skipLibCheck` off, `lib: ["es2022"]`, no
 `@types/node`, and `nodenext` or `bundler` resolution; a test compiles a project that way against
 the packed package. They add `esnext.disposable` to the project's `lib`, for `await using`.
+The package reads no file of its own at run time, so a bundler can bundle it; a test bundles an
+app with esbuild and runs it from another folder.
 `guard()` takes @x402/core's `x402Client`, and `cdpStore()` returns a `SpendStore` that
 `applySpendControls` in @coinbase/cdp-sdk takes. A change that breaks either is a breaking change.
 
@@ -136,8 +138,9 @@ other message's, may change in any release.
 
 ## Not public
 
-- Modules whose names start with `_`: `_clock`, `_keccak`, `_ledgers` and `adapters/_x402` in the npm
-  package, and `walletcap._clock`, `walletcap._keccak` and `walletcap._ledger` in the PyPI one.
+- Modules whose names start with `_`: `_clock`, `_keccak`, `_ledgers`, `_spec.generated` and
+  `adapters/_x402` in the npm package, and `walletcap._clock`, `walletcap._keccak` and
+  `walletcap._ledger` in the PyPI one.
 - Anything in `packages/js/src/core` that the entry points above don't export, such as the
   ledger client and `budgetPathFor`.
 - The test clock: replacing `julianday('now')` on a test's own connections. It exists for

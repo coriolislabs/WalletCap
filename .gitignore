@@ -22,3 +22,6 @@ packages/python/src/walletcap/spec/
 
 # Caches of the Python tools CI runs.
 .hypothesis/
+
+# Built from spec/*.sql by packages/js/scripts/gen-spec.mjs.
+packages/js/src/core/_spec.generated.ts

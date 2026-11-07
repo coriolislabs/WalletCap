@@ -5,11 +5,12 @@
 // another process's write lock without blocking the event loop, and wording refusals. The file
 // serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts.
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname } from 'node:path';
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { SCHEMA_SQL, UPGRADE_SQL } from './_spec.generated.js';
 import { attachClock, clockTick, detachClock } from './_clock.js';
 import { BudgetRefused, BudgetUnavailable, isWalletcapError, type RefusalSource, UsageError } from './errors.js';
 import { formatAmount, formatWindow, MAX_AMOUNT, type Micros, normalizeWallet, shortWallet } from './money.js';
@@ -245,17 +246,12 @@ export function parseSpec(text: string): Spec {
 }
 
 let spec: { schema: Spec; upgrade: Spec } | undefined;
-/** The package's copy of spec/schema.sql and spec/upgrade.sql, read once. */
+/**
+ * spec/schema.sql and spec/upgrade.sql, parsed once. The build compiles their text into the
+ * package (_spec.generated.ts), so nothing is read from disk and a bundler carries it along.
+ */
 export function loadSpec(): { schema: Spec; upgrade: Spec } {
-  if (spec !== undefined) return spec;
-  const read = (name: string): string => {
-    try {
-      return readFileSync(new URL(`../spec/${name}`, import.meta.url), 'utf8');
-    } catch (error) {
-      throw new BudgetUnavailable(`walletcap's package is missing spec/${name}; reinstall it`, { cause: error });
-    }
-  };
-  spec = { schema: parseSpec(read('schema.sql')), upgrade: parseSpec(read('upgrade.sql')) };
+  spec ??= { schema: parseSpec(SCHEMA_SQL), upgrade: parseSpec(UPGRADE_SQL) };
   return spec;
 }
 

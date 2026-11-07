@@ -57,7 +57,7 @@
     "NOTICE"
   ],
   "scripts": {
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json && node scripts/copy-spec.mjs",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && node scripts/gen-spec.mjs && tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=2 \"test/*.test.mjs\"",
     "prepack": "npm run build"
   },
@@ -72,6 +72,7 @@
     "@x402/extensions": "2.28.0",
     "@x402/fetch": "2.28.0",
     "@x402/svm": "2.28.0",
+    "esbuild": "0.28.2",
     "fast-check": "4.10.2",
     "typescript": "5.9.3",
     "viem": "2.37.13"

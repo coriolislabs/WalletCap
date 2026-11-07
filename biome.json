@@ -20,6 +20,7 @@
       "!**/dist",
       "!**/node_modules",
       "!bench/crash-test/contracts/*.json",
+      "!**/_spec.generated.ts",
       "!packages/js/test/types/readme-*.ts"
     ]
   },
