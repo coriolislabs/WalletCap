@@ -87,6 +87,7 @@ class Model {
       rail,
       state: 'held',
       heldAt: this.now,
+      lastAt: this.now,
       until: until ?? (within === null ? null : this.now + within),
       settledAt: null,
       outcome: null,
@@ -121,7 +122,8 @@ class Model {
   note(id, outcome) {
     const p = this.payments.get(id);
     if (p === undefined) return { usage: true };
-    if (p.state === 'held') p.outcome = outcome;
+    // A note on a held payment is an entry: the bulk release's hour and a minute counts from it.
+    if (p.state === 'held') Object.assign(p, { outcome, lastAt: this.now });
     return { ok: true };
   }
 
@@ -139,7 +141,7 @@ class Model {
           (p.outcome === 'unknown' || p.outcome === 'refused') &&
           p.heldAt <= this.now - olderThan &&
           // With no until, only an x402 hold has a bound: its authorization lasts an hour at most.
-          (p.until !== null ? p.until <= this.now : p.rail === 'x402' && p.heldAt <= this.now - UNBOUNDED_HOLD_MS),
+          (p.until !== null ? p.until <= this.now : p.rail === 'x402' && p.lastAt <= this.now - UNBOUNDED_HOLD_MS),
       )
       .sort(([, a], [, b]) => a.order - b.order);
     for (const [, p] of voided) p.state = 'void';

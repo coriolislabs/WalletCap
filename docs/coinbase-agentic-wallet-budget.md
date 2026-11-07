@@ -64,7 +64,7 @@ Then start the server behind walletcap from the MCP client, Claude Desktop for e
   you check the chain and void it: walletcap doesn't read an error's text to decide that nothing
   was signed. `npx walletcap holds` lists them, and `npx walletcap void --all-unknown --older-than 24h`
   voids the ones you've checked, except one the payee could still settle, an x402 payment with
-  no settle-by time that is under an hour and a minute old, and a send: a transaction can still
+  no settle-by time whose failure is under an hour and a minute old, and a send: a transaction can still
   be mined however old it is, so void a send by id once the chain shows it never moved, with
   `npx walletcap void <id> --evidence <what shows it>`.
 - The agent is told why a payment was refused, not which holds you could void.

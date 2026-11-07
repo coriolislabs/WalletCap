@@ -9,8 +9,8 @@ messages change between releases.
 ## Decision
 
 The wrapper reads no error text. Any failure the wallet reports keeps the payment held, noted
-unknown, until its owner voids it, or the bulk release voids it once it is an hour and a minute
-old. A free endpoint's one-unit hold is still given back, because nothing was signed for value.
+unknown, until its owner voids it, or the bulk release voids it an hour and a minute after the
+failure. A free endpoint's one-unit hold is still given back, because nothing was signed for value.
 
 ## Consequences
 

@@ -307,10 +307,10 @@ def test_a_bulk_release_keeps_what_the_payee_could_still_settle(
     live = budget.hold("$100", rail="x402", settles_by=datetime.fromtimestamp(now + 3_600, UTC))
     lapsed = budget.hold("$20", rail="x402", settles_by=datetime.fromtimestamp(now - 3_600, UTC))
     refused = budget.hold("$10", rail="x402")  # as the CDP store reopens a rolled-back one
+    refused.note("refused")  # the payee refused it then: its hour and a minute counts from here
     monkeypatch.undo()
     live.note("unknown")
     lapsed.note("unknown")
-    refused.note("refused")
     # 0.3.0 gave back the first too, with its authorization redeemable for another hour, and
     # kept the refused one counting until released one by one.
     released = _cli(path, "void", "--all-unknown", "--older-than", "1h")
@@ -331,10 +331,10 @@ def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
     now = time.time()
     monkeypatch.setattr(_clock, "source", lambda: now - 62 * 60)  # taken 62 minutes ago
     old = budget.hold("$1", rail="x402")
+    old.note("unknown")  # the payment may have been signed as it failed, 62 minutes ago
     monkeypatch.undo()
     fresh = budget.hold("$2", rail="x402")
-    for hold in (old, fresh):
-        hold.note("unknown")  # the payment may have been signed as it failed
+    fresh.note("unknown")
     time.sleep(0.02)
     # 0.3.0 gave back both 20 ms later, though the fresh one may still be settled.
     released = _cli(path, "void", "--all-unknown", "--older-than", "10ms")
@@ -347,7 +347,7 @@ def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
     nothing = _cli(path, "void", "--all-unknown", "--older-than", "10ms")
     assert "can be voided yet" in nothing.stdout
     assert (
-        "an x402 payment with no settle-by time, once it is also an hour and a minute old"
+        "an x402 payment with no settle-by time, once its failure is also an hour and a minute old"
         in nothing.stdout
     )
 

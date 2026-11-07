@@ -51,10 +51,11 @@ MIN_SQLITE_VERSION: Final = "3.37.0"
 """The oldest SQLite the ledger runs on: STRICT tables arrived in 3.37.0."""
 
 UNBOUNDED_HOLD_MS: Final = 3_660_000
-"""How old an x402 hold with no settle-by time must be before a bulk release voids it.
+"""How long after its failure an x402 hold with no settle-by time waits for a bulk release.
 
 An hour, the longest an x402 authorization walletcap signs can be redeemed, and a minute. The
-rule is in spec/schema.sql (void_unknown); this is its value, for messages.
+wallet signs, if at all, before it answers, so the hour counts from the failure. The rule is in
+spec/schema.sql (void_unknown); this is its value, for messages.
 """
 
 MAX_TIME: Final = 10**15
@@ -932,7 +933,7 @@ class Ledger:
         """The owner's bulk release: void every held payment of unknown or refused outcome.
 
         Only those held at least ``older_than_ms`` ago that can no longer settle: their until
-        has passed, or, with none, they are ``UNBOUNDED_HOLD_MS`` old.
+        has passed, or, with none, their failure was noted ``UNBOUNDED_HOLD_MS`` ago or more.
         """
 
         wallet = normalize_wallet(name)

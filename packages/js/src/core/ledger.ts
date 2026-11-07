@@ -21,8 +21,9 @@ export const SCHEMA_VERSION = '3';
 /** The oldest SQLite the ledger runs on: STRICT tables arrived in 3.37.0. */
 export const MIN_SQLITE_VERSION = '3.37.0';
 /**
- * How old an x402 hold with no settle-by time must be before the owner's bulk release voids
- * it: an hour, the longest an x402 authorization walletcap signs can be redeemed, and a minute.
+ * How long after its failure was noted an x402 hold with no settle-by time waits for the owner's
+ * bulk release: an hour, the longest an x402 authorization walletcap signs can be redeemed, and a
+ * minute. The wallet signs, if at all, before it answers, so the hour counts from the failure.
  * The rule is in spec/schema.sql (void_unknown); this is its value, for messages.
  */
 export const UNBOUNDED_HOLD_MS = 3_660_000n;

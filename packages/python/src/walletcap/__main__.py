@@ -78,8 +78,8 @@ def _parser() -> argparse.ArgumentParser:
         "--all-unknown",
         action="store_true",
         help="with void: every payment of unknown or refused outcome older than --older-than "
-        "that its payee can no longer settle; an x402 payment with no settle-by time, once an "
-        "hour and a minute old; any other with none, a transfer say, only by id",
+        "that its payee can no longer settle; an x402 payment with no settle-by time, an hour "
+        "and a minute after its failure; any other with none, a transfer say, only by id",
     )
     parser.add_argument("--older-than", help="with void --all-unknown: 24h, 7d, 30m")
     parser.add_argument("--tx", help="with settle: the transaction that shows it paid")
@@ -314,7 +314,7 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
 def _void_unknown(args: argparse.Namespace, path: Path) -> str:
     """Every payment of unknown or refused outcome older than --older-than that can't settle.
 
-    An x402 payment with no settle-by time, once it is an hour and a minute old. For an owner
+    An x402 payment with no settle-by time, an hour and a minute after its failure. For an owner
     who has checked the chain.
     """
 
@@ -332,9 +332,10 @@ def _void_unknown(args: argparse.Namespace, path: Path) -> str:
         return (
             f"No payment of unknown or refused outcome from {short_wallet(wallet)} can be voided "
             f"yet. One goes once it is older than {window} and its payee can no longer settle it; "
-            "an x402 payment with no settle-by time, once it is also an hour and a minute old. "
-            "Any other payment with no settle-by time, a transfer say, goes only by id, once the "
-            "chain shows it never moved: walletcap void <id> --evidence <what shows it>."
+            "an x402 payment with no settle-by time, once its failure is also an hour and a "
+            "minute old. Any other payment with no settle-by time, a transfer say, goes only by "
+            "id, once the chain shows it never moved: walletcap void <id> --evidence <what shows "
+            "it>."
         )
     plural = "" if len(voided) == 1 else "s"
     total = sum(payment.amount for payment in voided)

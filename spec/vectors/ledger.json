@@ -308,6 +308,23 @@
         { "op": "void", "id": "send", "as": "owner", "evidence": "the chain shows it was never mined", "expect": { "state": "void" } },
         { "op": "holds", "expect": { "ids": ["pay"] } }
       ]
+    },
+    {
+      "name": "an x402 hold's hour and a minute counts from its failure, when the wallet may last have signed",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "late", "rail": "awal-x402", "expect": { "held": "late" } },
+        { "op": "advance", "ms": 1800000 },
+        { "op": "note", "id": "late", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "advance", "ms": 1860000 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "advance", "ms": 1799999 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "status", "expect": { "in_flight": 10000000, "payments": 1 } },
+        { "op": "advance", "ms": 1 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["late"] } },
+        { "op": "status", "expect": { "in_flight": 0, "payments": 0 } }
+      ]
     }
   ]
 }

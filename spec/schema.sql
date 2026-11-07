@@ -364,16 +364,17 @@ RETURNING seq
 -- @statement void_unknown
 -- The owner's bulk release: every held payment of unknown or refused outcome taken at least
 -- :older_than_ms ago that can no longer settle: its until has passed, or, with no until, it was
--- held for an x402 payment and is an hour and a minute old (an x402 authorization lasts at most
--- an hour once signed). Any other payment with no until, a transfer say, has no such bound: the
--- owner voids it by id, with evidence.
+-- held for an x402 payment and its latest entry, the failure noted, is an hour and a minute old
+-- (an x402 authorization lasts at most an hour once signed, and a wallet that answered with an
+-- error signed, if at all, before it answered). Any other payment with no until, a transfer say,
+-- has no such bound: the owner voids it by id, with evidence.
 INSERT INTO wc_entry (payment, kind, at, wallet, amount, evidence)
 SELECT c.payment, 'void', k.now, c.wallet, c.amount, :evidence
-FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_clock k
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq JOIN wc_entry l ON l.seq = c.seq, wc_clock k
 WHERE c.wallet = :wallet AND c.state = 'held' AND c.outcome IN ('unknown', 'refused')
   AND c.held_at <= k.now - :older_than_ms
   AND (c.until <= k.now
-       OR (c.until IS NULL AND h.rail IN ('x402', 'awal-x402') AND c.held_at <= k.now - 3660000))
+       OR (c.until IS NULL AND h.rail IN ('x402', 'awal-x402') AND l.at <= k.now - 3660000))
 ORDER BY c.held_seq
 RETURNING payment, amount
 

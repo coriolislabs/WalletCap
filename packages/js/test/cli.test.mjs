@@ -190,10 +190,10 @@ test('a bulk release keeps a payment its payee could still settle, and clears re
   const live = await budget.hold('$100', { rail: 'x402', settlesBy: now + 3_600_000 });
   const lapsed = await budget.hold('$20', { rail: 'x402', settlesBy: now - 3_600_000 });
   const refused = await budget.hold('$10', { rail: 'x402' }); // as the CDP store reopens one CDP rolled back
+  await refused.note('refused'); // the payee refused it then: its hour and a minute counts from here
   resetClock();
   await live.note('unknown');
   await lapsed.note('unknown');
-  await refused.note('refused');
   // 0.3.0 gave back the first too, with its authorization redeemable for another hour, and kept
   // the refused one counting until released one by one.
   const released = cli(path, 'void', '--all-unknown', '--older-than', '1h');
@@ -259,7 +259,7 @@ test('a bulk release keeps a hold with no settle-by time for an hour and a minut
   assert.equal((await budget.status()).inFlight, 100_000n);
   assert.match(
     cli(path, 'void', '--all-unknown', '--older-than', '10ms').out,
-    /can be voided yet\. One goes once it is older than 10ms and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old\./,
+    /can be voided yet\. One goes once it is older than 10ms and its payee can no longer settle it; an x402 payment with no settle-by time, once its failure is also an hour and a minute old\./,
   );
   budget.close();
 });

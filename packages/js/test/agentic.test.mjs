@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, afterEach, before, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
-import { BudgetRefused, BudgetUnavailable, openBudget, PaymentNotRecorded, UsageError } from 'walletcap';
+import { BudgetRefused, BudgetUnavailable, openBudget, openOwner, PaymentNotRecorded, UsageError } from 'walletcap';
 import { guardAgenticWallet, usdcAtomic } from 'walletcap/agentic';
 
 const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
@@ -243,6 +243,32 @@ test('an unconfirmed x402 payment on terms handed to the wallet counts until the
     (await budget.history()).map(row => row.status),
     ['unknown', 'expired'],
   );
+});
+
+test("the bulk release counts a failed x402 payment's hour and a minute from the failure, when the wallet may last have signed", async () => {
+  const clock = { now: Date.now() };
+  const { budget, path } = await newBudget(clock);
+  // The wallet works on the request for 30 minutes, may sign at the end, then fails.
+  const slow = guardAgenticWallet(budget, {
+    request: wallet(() => {
+      clock.now += 30 * 60_000;
+      throw new Error('IPC request timed out');
+    }).request,
+  });
+  await assert.rejects(slow.request('make-x402-request', x402()), /timed out/);
+  const owner = await openOwner({ path });
+  const release = async () => (await owner.voidUnknown(WALLET, { olderThan: '1ms' })).map(voided => voided.amount);
+  // An hour and a minute after the hold, the wallet answered only 31 minutes ago: what it signed
+  // may still settle. Counted from the hold, it was released here.
+  clock.now += 31 * 60_000;
+  assert.deepEqual(await release(), []);
+  clock.now += 30 * 60_000 - 1;
+  assert.deepEqual(await release(), []);
+  assert.equal((await budget.status()).inFlight, 50_000n);
+  clock.now += 1;
+  assert.deepEqual(await release(), [50_000n]);
+  assert.equal((await budget.status()).inFlight, 0n);
+  owner.close();
 });
 
 test("the payee's word that a payment on handed-in terms settled doesn't end its hold early", async () => {

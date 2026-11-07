@@ -447,8 +447,8 @@ in the file); 1 for anything walletcap refused or couldn't do.
 
 `void --all-unknown` leaves a payment the payee could still settle: it counts until one window
 past the time it can't. An x402 payment with no such time, one the wallet may have signed as it
-failed, stays until it is an hour and a minute old: an authorization walletcap lets be signed is
-valid for an hour at most. Any other payment with no such time, a transfer say, can still be
+failed, stays until an hour and a minute after its failure: an authorization walletcap lets be
+signed is valid for an hour at most. Any other payment with no such time, a transfer say, can still be
 mined however old it is, so the bulk release leaves it: void it by id once the chain shows it
 never moved.
 

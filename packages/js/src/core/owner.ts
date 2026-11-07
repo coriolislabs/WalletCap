@@ -182,7 +182,8 @@ export class Owner {
   /**
    * The bulk release: void every held payment of `wallet` whose outcome is unknown or refused,
    * held at least `olderThan` ago, that can no longer settle: its settle-by time has passed, or,
-   * with none, it was held for an x402 payment and is an hour and a minute old. Any other payment
+   * with none, it was held for an x402 payment and its failure was noted an hour and a minute ago
+   * or more (the wallet may sign until it answers). Any other payment
    * with no settle-by time, a transfer say, has no such bound: void it by id, with evidence. Only
    * for payments its owner knows never left.
    */

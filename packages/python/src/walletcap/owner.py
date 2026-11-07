@@ -197,7 +197,8 @@ class Owner:
 
         Only those held at least ``older_than`` ago (``"24h"``, or milliseconds) that can no
         longer settle: their settle-by time has passed, or, with none, they were held for an
-        x402 payment and are an hour and a minute old. Any other payment with no settle-by time,
+        x402 payment and their failure was noted an hour and a minute ago or more (the wallet may
+        sign until it answers). Any other payment with no settle-by time,
         a transfer say, has no such bound: void it by id, with evidence. Only for payments its
         owner knows never left the wallet.
         """

@@ -13,11 +13,26 @@ inside `pay()` whose receipt wait timed out, is a transaction that can still be 
 was sent, however long ago, for example one that waited in the mempool. Voiding it after 61
 minutes freed its room while the money could still leave.
 
+The hour and a minute also started at the wrong moment. A wallet asked to pay an x402 request
+signs, if at all, before it answers, and it can take a while: an Agentic Wallet request that
+failed 30 minutes after its hold was released 31 minutes after the failure, while an
+authorization signed just before it could still be redeemed for 29 more minutes.
+
+The review suggested bounding such a hold when the request fails: a settle-by time of the
+longest terms' timeout from the failure. walletcap doesn't, because a wallet that didn't answer
+(an IPC time-out, say) may still sign after walletcap stops waiting. A bound would end the hold's
+count by itself, one window after that time, with no one checking the chain. Kept open, the hold
+counts until its owner voids it.
+
 ## Decision
 
 - `void_unknown` in spec/schema.sql joins each payment's `held` entry, and releases a payment
   with no settle-by time only when its rail is `x402` or `awal-x402`, the rails on which
-  walletcap has an x402 authorization signed, and only once it is an hour and a minute old.
+  walletcap has an x402 authorization signed, and only an hour and a minute after its latest
+  entry. A payment the bulk release can void has an outcome noted, so that entry is the note of
+  its failure: the last moment walletcap knows the wallet was still working on it.
+- A failed x402 request's hold stays open (no settle-by time): it counts until its owner voids
+  it, by id or with the bulk release.
 - Any other payment with no settle-by time is voided by id, with evidence that it never moved:
   `walletcap void <id> --evidence <what shows it>`, or the owner's `void(id, { evidence })`.
   `walletcap settle` takes `--evidence` too.
@@ -32,3 +47,6 @@ minutes freed its room while the money could still leave.
   rule for it.
 - A payment with a settle-by time is released once that time has passed, on any rail, as
   before.
+- The bulk release is still the owner's word that a payment never left. A wallet that timed out
+  and signed later than the failure noted can have a live authorization when the bulk release
+  voids its hold; the owner who runs it has checked the chain, as the command's help says.

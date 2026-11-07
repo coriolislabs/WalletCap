@@ -43,6 +43,7 @@ class Payment:
     outcome: str | None = None
     rail: str = "property"
     holder: str | None = None
+    last_at: int | None = None  # the latest entry's time, when a note came after the hold
 
     def counts_from(self) -> float | None:
         if self.state == "void":
@@ -254,6 +255,7 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
         elif op == "note":
             if p.state == "held":
                 p.outcome = step["outcome"]
+                p.last_at = model.now  # a note is an entry: the hour and a minute counts from it
             expected = ("ok", None)
         elif p.state == "held" and p.until is None and bound_until is not None:
             if bound_until <= model.now:
@@ -308,7 +310,7 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
                 p.until <= model.now
                 if p.until is not None
                 # With no until, only an x402 hold has a bound: an hour at most once signed.
-                else p.rail == "x402" and p.held_at <= model.now - UNBOUNDED_HOLD_MS
+                else p.rail == "x402" and (p.last_at or p.held_at) <= model.now - UNBOUNDED_HOLD_MS
             )
         ),
         key=lambda item: item[1].order,

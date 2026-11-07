@@ -125,8 +125,9 @@ The command line, in both languages:
 - `walletcap release <id>` is `walletcap void <id>`, and `release --all-unknown --older-than …`
   is `void --all-unknown --older-than …`. Its messages say "Voided".
 - `void --all-unknown` releases a payment with no settle-by time only if it was held for x402
-  (the rails `x402` and `awal-x402`), once it is an hour and a minute old. 0.3.0 released any
-  such payment then, a transfer included, though a transfer can still be mined later. The owner
+  (the rails `x402` and `awal-x402`), an hour and a minute after its failure was noted: the
+  wallet signs, if at all, before it answers. 0.3.0 released any such payment once it was an
+  hour and a minute old, a transfer included, though a transfer can still be mined later. The owner
   voids those by id: `walletcap void <id> --evidence <what shows it>`. The same rule holds for
   the owner's `voidUnknown()` (`void_unknown()`).
 - A payment id that isn't in the file exits 2.

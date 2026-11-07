@@ -41,8 +41,8 @@ Commands
   void --all-unknown --older-than <24h|7d|30m>
                        Every payment of unknown or refused outcome older than that, once you know
                        none of them left the wallet. One the payee could still settle stays; an
-                       x402 payment with no settle-by time stays until it is an hour and a minute
-                       old; any other with none, a transfer say, only goes by id
+                       x402 payment with no settle-by time stays until an hour and a minute after
+                       its failure; any other with none, a transfer say, only goes by id
   settle <id> [--tx <hash>] [--evidence <what shows it>]
                        A payment you know paid: it counts through one window from now
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget.
@@ -170,7 +170,7 @@ const detail = (status: Status): string =>
   ].join('\n');
 
 // Every payment of unknown or refused outcome older than --older-than that the payee can no longer
-// settle (an x402 payment with no settle-by time, once an hour and a minute old), for an owner
+// settle (an x402 payment with no settle-by time, an hour and a minute after its failure), for an owner
 // who has checked the chain.
 async function voidUnknown(values: Values, path: string, id: string | undefined): Promise<string> {
   if (id !== undefined) throw new Usage('void takes an id or --all-unknown, not both');
@@ -182,7 +182,7 @@ async function voidUnknown(values: Values, path: string, id: string | undefined)
     if (voided.length === 0) {
       return (
         `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be voided yet. One goes once it is older than ` +
-        `${formatWindow(olderThan)} and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old. ` +
+        `${formatWindow(olderThan)} and its payee can no longer settle it; an x402 payment with no settle-by time, once its failure is also an hour and a minute old. ` +
         'Any other payment with no settle-by time, a transfer say, goes only by id, once the chain shows it never moved: walletcap void <id> --evidence <what shows it>.'
       );
     }

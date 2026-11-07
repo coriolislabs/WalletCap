@@ -59,8 +59,9 @@ payment, whoever held it, from evidence such as the chain's record.
 
 The owner's bulk release, `void_unknown`, voids every `HELD` payment of `unknown` or `refused`
 outcome, held at least a given time ago, that can no longer settle: its `until` has passed, or
-it has none, was held on an x402 rail (`x402`, `awal-x402`) and is an hour and a minute old. An
-x402 authorization walletcap lets be signed lasts an hour at most. Any other payment with no
+it has none, was held on an x402 rail (`x402`, `awal-x402`) and its latest entry, the note of
+its failure, is an hour and a minute old. An x402 authorization walletcap lets be signed lasts
+an hour at most, and the wallet signs it, if at all, before it answers. Any other payment with no
 `until`, a transfer say, can still be mined however old it is: the owner voids it by id, with
 evidence ([ADR 0014](../docs/adr/0014-the-61-minute-release-is-for-x402-holds.md)).
 
