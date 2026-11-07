@@ -23,6 +23,8 @@ jobs:
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
       - name: Install the workspace from the lockfile
         run: npm ci --no-audit --no-fund
+      - name: The workflows' rules (pinned actions; least-privilege, tag-checked publishing)
+        run: node scripts/check-workflows.mjs
       - name: Biome
         run: npx biome check --error-on-warnings
       - name: TypeScript, strict

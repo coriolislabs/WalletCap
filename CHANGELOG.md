@@ -176,9 +176,14 @@ Behaviour:
   files still ship in `dist/spec/`, to read.
 - `walletcap-crash-test` 0.4.0 runs on walletcap `^0.4.0`. Its `--json` refusal codes are
   `budget`, not `budget_budget`.
-- A brand-new npm package can't use trusted publishing for its first release, so
-  `walletcap-mcp` 0.4.0 is published by hand; later releases publish from `publish.yml`, on tags
-  `mcp-v<version>`.
+- `publish.yml` builds, tests and packs in jobs without an OIDC token; four short jobs, the only
+  ones with `id-token: write`, publish what was packed. npm installs skip install scripts, every
+  job checks out the release tag, the tag must be on `main` and match the package's version, and
+  a run by hand must name the tag. The PyPI build runs the suite on the locked dev group, as CI
+  does.
+- A brand-new npm package can't use trusted publishing for its first release. RELEASING.md has
+  the steps for `walletcap-mcp`: a `0.0.0` placeholder published by hand claims the name, its
+  trusted publisher is added, and `mcp-v0.4.0` is tagged once walletcap 0.4.0 is on npm.
 
 ### Kept from 0.3.0
 

@@ -11,7 +11,8 @@ step() { printf '\n== %s ==\n' "$1"; }
 step "Install the workspace from the lockfile"
 npm ci --no-audit --no-fund
 
-step "Lint and types: Biome, strict TypeScript, ruff, mypy --strict"
+step "Lint and types: the workflows' rules, Biome, strict TypeScript, ruff, mypy --strict"
+node scripts/check-workflows.mjs
 npx biome check --error-on-warnings
 npm run build
 (cd packages/python && uv run --locked ruff check && uv run --locked ruff format --check && uv run --locked mypy)
