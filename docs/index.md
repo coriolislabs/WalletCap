@@ -51,18 +51,19 @@ Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls, $300 with Spend Pe
 with walletcap's guard, its cdpStore and AccountCapSpender. The shared-store row varies from
 run to run: in eight runs on 6 November 2026 it was $100 over five times and $200 over three
 times. Those runs used `@coinbase/cdp-sdk` 1.61.0, `@x402/core` 2.30.0, SpendPermissionManager
-1.0.0 and walletcap 0.2.3.
+1.0.0 and walletcap 0.2.3. The crash test in the repository now runs walletcap 0.4.0, and its
+suite fails if the guard or the cdpStore lets anything past the cap.
 
 Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and AgentKit signs
 the merchant's first-listed $1.00 on Base mainnet. walletcap, at 2¢ a payment, limits the amount,
 not which offer is paid: it passes over the $1.00, valid 4 days, and the offer left is the 1¢ the
-agent approved. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/crash-test)
+agent approved. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/bench/crash-test)
 says exactly what runs.
 
 ## Install
 
 ```console
-$ npm install walletcap     # Node 22.13+, no dependencies
+$ npm install walletcap     # Node 22.13+, no runtime dependencies
 $ pip install walletcap     # Python 3.11+, no dependencies
 ```
 
@@ -75,19 +76,24 @@ $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
 ```js
 import { openBudget } from 'walletcap';
 
-const budget = openBudget({ wallet: account.address, perPayment: '$50', perDay: '$150' });
+const budget = await openBudget({ wallet: account.address });
 
 await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150 in any 24h, restarts included
 ```
 
-The count lives in a SQLite file that every process on the machine opens, and each payment is
-reserved inside one write transaction, so replicas racing for the last dollar can't both win.
-JavaScript and Python read and write the same file.
+The count lives in a SQLite file that every process on the machine opens. Each payment is held
+by one conditional insert inside a write transaction, so replicas racing for the last dollar
+can't both win. JavaScript and Python run the same SQL, from
+[spec/schema.sql](https://github.com/coriolislabs/WalletCap/blob/main/spec/schema.sql), on the
+same file; [spec/ledger.md](https://github.com/coriolislabs/WalletCap/blob/main/spec/ledger.md)
+explains the rule.
 
 ## Links
 
 - Source, issues and the full README: [github.com/coriolislabs/WalletCap](https://github.com/coriolislabs/WalletCap)
 - npm: [walletcap](https://www.npmjs.com/package/walletcap) and [walletcap-crash-test](https://www.npmjs.com/package/walletcap-crash-test)
 - PyPI: [walletcap](https://pypi.org/project/walletcap/)
-- [Threat model](threat-model.md): what the guard stops, what it doesn't, and the deployment patterns that hold
+- [Threat model](threat-model.md): what the library stops, what it doesn't, and the deployment patterns that hold
+- [Design records](adr/): why the ledger is built the way it is
+- [What is public API](https://github.com/coriolislabs/WalletCap/blob/main/STABILITY.md), and how versions change it
 - [Security policy](https://github.com/coriolislabs/WalletCap/blob/main/SECURITY.md) and [vendor benchmark disclosure](vendor-disclosure.md)

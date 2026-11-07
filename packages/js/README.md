@@ -1,11 +1,13 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # walletcap
 
 **Spend limits for AI agent wallets that pay in USDC: a per-payment cap and a rolling 24-hour
 budget that holds across restarts, replicas on one host and payment rails.**
 
-One spend budget per wallet for AI agents: counted across every process, replica,
-key, permission and payment rail on one host that pays from it. A restart, a second replica,
-one more key or the next calendar period cannot hand the agent a fresh budget.
+One budget per wallet, counted in one SQLite file that every process on the host opens. A
+restart, a second replica, one more key or the next calendar period can't hand the agent a fresh
+budget. The rule is SQL that ships inside the package (`dist/spec/schema.sql`), the same file the
+PyPI package runs.
 
 `npx walletcap-crash-test` puts Coinbase's agent spend controls through a restart, 10 replicas,
 a shared store and a payee who asks for EURC, then puts walletcap through the same events,
@@ -15,44 +17,39 @@ walletcap let $0.
 The owner creates the budget once; opening it never creates one:
 
 ```console
+$ npm install walletcap     # Node 22.13+, no runtime dependencies
 $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
 ```
 
 ```js
 import { openBudget } from 'walletcap';
 
-const budget = openBudget({ wallet: account.address, perPayment: '$50', perDay: '$150' });
+const budget = await openBudget({ wallet: account.address });
 
-await budget.pay('$12.50', () => sendUsdc(payee, '12.50'));
-// refused past $150 in any 24h, restarts included
+await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150 in any 24h
 ```
 
-- **Per wallet, not per process.** Every payment from the wallet reserves against one number.
-- **Rolling window.** "$150 a day" means any 24 hours; there is no boundary to straddle.
-- **Edits never reset the count.** Raising $150 to $200 after spending $150 leaves $50.
-- **Fail closed.** If the count can't be read, nothing pays; a missing file is not a new budget. Unknown outcomes keep counting.
-- **One SQLite file on one host, shared by every process there and by Python.** Each payment
-  reserves inside one write transaction, so replicas racing for the last dollar cannot both
-  win. Not over NFS, SMB or Docker Desktop bind mounts, where SQLite's locks aren't reliable.
-- **x402 guard, Coinbase CDP spend store, Agentic Wallet wrapper, AgentKit recipe,
-  and an on-chain cap for Spend Permissions.**
-- Node 22.13+, zero runtime dependencies, Apache-2.0.
+- If the payment function throws, the payment may still have left, so it stays held, noted
+  unknown, until its owner voids it: an error never settles a payment. `throw notSent(error)`
+  says it never left.
+- `budget.hold(amount, { id, settlesWithinMs })` returns a `Hold` to `settle({ tx })`,
+  `void()` or `note()` yourself. One id is one payment.
+- Errors: `BudgetRefused` (`code`, `brief`), `BudgetUnavailable`, `UsageError`, and
+  `PaymentNotRecorded`, which shares no base with the others: don't pay again.
+- Every method is async, and a wait for another process's lock never blocks the event loop.
 
-```console
-$ npx walletcap status
-$ npx walletcap set --wallet 0xYourAgentWallet --per-payment 0.05 --per-day 0.15
-$ npx walletcap freeze
-```
+| Integration | Import | Use |
+|---|---|---|
+| Any x402 client (`@x402/core`, `@x402/fetch`) | `walletcap/x402` | `guard(client, budget)` |
+| Coinbase CDP x402 spend controls | `walletcap/cdp` | `store: cdpStore(budget, { asset: USDC })` in `applySpendControls` |
+| Coinbase AgentKit | `walletcap/agentkit` | `guardAgentKit(new X402ActionProvider(), budget)` |
+| Coinbase Agentic Wallet CLI | `walletcap/agentic`, or the CLI | `npx walletcap awal x402 pay <url>` |
+| Coinbase payments MCP server | the `walletcap-mcp` package | `npx walletcap-mcp --wallet 0x…` |
 
-Security: [policy](https://github.com/coriolislabs/WalletCap/blob/main/SECURITY.md) ·
-[threat model](https://github.com/coriolislabs/WalletCap/blob/main/docs/threat-model.md).
-`AccountCapSpender` is unaudited; testnet only until an independent audit.
+The owner's handle is `openOwner()`, and the `walletcap` command: `status`, `set`, `freeze`,
+`unfreeze`, `history`, `holds`, `void <id>`, `void --all-unknown --older-than 24h` and
+`settle <id> --tx <hash>`.
 
-[Source, Python package and full documentation](https://github.com/coriolislabs/WalletCap)
-· docs for [x402](https://github.com/coriolislabs/WalletCap/blob/main/docs/x402-spending-limit.md),
-[Coinbase CDP spend controls](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-cdp-spend-controls.md),
-[AgentKit](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-agentkit-spending-limit.md),
-[the Agentic Wallet and payments MCP](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-agentic-wallet-budget.md)
-and [Spend Permissions](https://github.com/coriolislabs/WalletCap/blob/main/docs/coinbase-spend-permissions-cap.md)
+Docs, the threat model and the full README: https://github.com/coriolislabs/WalletCap
 
 Apache-2.0. Copyright 2026 Coriolis Labs Inc.

@@ -42,8 +42,8 @@ Every agent is a separate Node process with its own throwaway key. It builds an 
 
 The three controls:
 - **CDP's controls:** `applySpendControls` from `@coinbase/cdp-sdk/x402`, the same guardrails `CdpX402Client` uses. The settings follow Coinbase's README example: per-payment and cumulative caps in USDC, Base only, and no asset allowlist. Like `CdpX402Client`, the agent turns off x402's own default cap.
-- **walletcap guard:** `budget.guard()` on the same client. The owner sets the budget once, and every agent opens the same file.
-- **walletcap cdpStore:** CDP's own `applySpendControls` again, set exactly as [walletcap's README](https://github.com/coriolislabs/WalletCap#coinbase-cdp-spend-controls) shows: the same caps, `allowedAssets: [USDC]`, and `store: budget.cdpStore({ asset: USDC })`. The owner sets the budget once, and every agent, replica or restart opens the same file, so CDP's ledger is that file.
+- **walletcap guard:** `guard(client, budget)` from `walletcap/x402` on the same client. The owner sets the budget once, and every agent opens the same file.
+- **walletcap cdpStore:** CDP's own `applySpendControls` again, set exactly as [walletcap's README](https://github.com/coriolislabs/WalletCap#coinbase-cdp-spend-controls) shows: the same caps, `allowedAssets: [USDC]`, and `store: cdpStore(budget, { asset: USDC })` from `walletcap/cdp`. The owner sets the budget once, and every agent, replica or restart opens the same file, so CDP's ledger is that file.
 
 The events, each from a fresh start, once per control:
 
@@ -58,7 +58,7 @@ The shared store is what Coinbase's docs advise for replicas: "implement this in
 
 The interface has no single step that both checks the cap and records the payment. CDP reads the total, decides, then appends, and its lock covers one process. Replicas can read the same total before any of them appends. How many overlap varies from run to run.
 
-walletcap's cdpStore sits behind the same interface, so CDP still reads, decides, then appends. Its `append` re-checks the cap inside one SQLite write transaction and throws if the payment would go past it. CDP appends before it signs, so a payment the store refuses is never signed. In the replica rows, the re-check usually refuses a few payments that CDP's own check had passed (`budget_budget` in `--json`); how many varies from run to run. In the EURC row, CDP's `allowedAssets`, which walletcap's README sets, refuses before the store is asked.
+walletcap's cdpStore sits behind the same interface, so CDP still reads, decides, then appends. Its `append` re-checks the cap inside one SQLite write transaction and throws if the payment would go past it. CDP appends before it signs, so a payment the store refuses is never signed. In the replica rows, the re-check usually refuses a few payments that CDP's own check had passed (`budget` in `--json`); how many varies from run to run. In the EURC row, CDP's `allowedAssets`, which walletcap's README sets, refuses before the store is asked.
 
 ## Coinbase Spend Permissions
 
@@ -75,7 +75,7 @@ The manager counts each permission, and each period, on its own, so both events 
 
 walletcap's side: the wallet grants the same permissions to `AccountCapSpender`, walletcap's on-chain spender. It counts every permission against one rolling $150 cap and refuses the second $150 with `OverBudget`. `AccountCapSpender` is unaudited.
 
-`node contracts/build.mjs --check` checks two things: that each piece of Coinbase code still matches its recorded hash, and that the shipped `AccountCapSpender` still compiles from `solidity/`. `--fetch` re-reads Coinbase's code from Base mainnet.
+`node contracts/build.mjs --check` checks two things: that each piece of Coinbase code still matches its recorded hash, and that the shipped `AccountCapSpender` still compiles from its Solidity source in the repository's `contracts/src`. `--fetch` re-reads Coinbase's code from Base mainnet.
 
 ## Coinbase AgentKit (`--agentkit`)
 
@@ -96,7 +96,7 @@ What AgentKit does with it:
 - It then builds a fresh x402 client, which pays whatever the merchant listed first.
 - Its answer reports the approved offer, not the one it signed.
 
-walletcap's `budget.guardAgentKit()`, at 2¢ a payment, limits how much AgentKit pays, not which offer it pays. Here it passes over the $1.00, which the merchant asks to be valid 4 days (walletcap signs only terms valid an hour or less, and at most 2¢), and the offer left is the 1¢ one the agent approved. Had the merchant listed the approved offer valid two hours, and a 2¢ one valid five minutes, walletcap would have let AgentKit sign the 2¢ one. The row passes only if walletcap signs the approved offer or nothing.
+walletcap's `guardAgentKit(provider, budget)`, at 2¢ a payment, limits how much AgentKit pays, not which offer it pays. Here it passes over the $1.00, which the merchant asks to be valid 4 days (walletcap signs only terms valid an hour or less, and at most 2¢), and the offer left is the 1¢ one the agent approved. Had the merchant listed the approved offer valid two hours, and a 2¢ one valid five minutes, walletcap would have let AgentKit sign the 2¢ one. The row passes only if walletcap signs the approved offer or nothing.
 
 AgentKit is opt-in because it installs about 1.3 GB. Its wallet providers also send an analytics event with the wallet's address when they start. The crash test turns that off and blocks every request except the one to the local merchant.
 

@@ -25,6 +25,11 @@ In the MCP client's config:
   `--allow-tool <name>` lets one through, uncounted. JSON-RPC batches are refused.
 - A refusal tells the agent why, not which open payments its owner could void.
 - It runs `~/.payments-mcp/bundle.js`, the server Coinbase's installer puts there. To run another
-  server, put its command after `--`.
+  server, put its command after `--`. `--path <file>` names the budget file when it isn't the
+  default per-user one.
+- Any failure the wallet reports keeps the payment held, noted unknown, until its owner voids it
+  with `npx walletcap void <id>`.
+
+Docs: https://coriolislabs.github.io/WalletCap/coinbase-agentic-wallet-budget/
 
 Node 22.13 or later. Apache-2.0. Copyright 2026 Coriolis Labs Inc.

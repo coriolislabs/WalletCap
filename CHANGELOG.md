@@ -1,6 +1,204 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## 0.4.0 (unreleased)
+
+This release gives the spend rule one owner: SQL in `spec/schema.sql`, which the JavaScript and
+Python packages ship and run as written, so neither language implements admission or counting.
+It changes the API in both languages, the budget file's format and the repository's layout, so
+it is a breaking release. [STABILITY.md](STABILITY.md) says what is public API from now on.
+
+### Breaking
+
+The ledger and the budget file:
+
+- The budget file is schema 3. 0.4 upgrades a file that 0.2 (schema 1) or 0.3 (schema 2) wrote
+  the first time it opens it, in one transaction: every payment that counted keeps counting at
+  least as long, and a crash during the upgrade leaves the file as it was. 0.2 and 0.3 refuse a
+  schema 3 file, so stop older processes before upgrading.
+- Payments are entries appended to a ledger and never deleted. A payment that never left is
+  void, and stays in the history with the status `void`; 0.3 deleted it.
+- A payment's id is its rail's own identity where walletcap reads one (`eip3009:<from>:<nonce>`,
+  `permit2:<owner>:<nonce>`), a key the caller passes as `id`, or one the ledger makes: `wc-`
+  and 32 hex digits. 0.3's ids were `spend-…` and `cdp-…`. Holding an id that is already in the
+  ledger returns that payment.
+- The file is created `0600` in a `0700` folder, and opened in WAL mode with
+  `synchronous = FULL`. SQLite older than 3.37.0 is refused (`MIN_SQLITE_VERSION`).
+- The window of a budget can change only while no payment counts; 0.3 refused any change once
+  the budget had held a payment.
+
+JavaScript:
+
+- The package is written in TypeScript, and its `.d.ts` files come from `tsc`. The hand-written
+  `index.d.ts` is gone.
+- The API is async. `openBudget()` returns a Promise, and so does every method of the payer and
+  owner handles and of a hold. A wait for another process's write lock happens on the event
+  loop, for up to `busyTimeoutMs` (30,000 by default).
+- `budget.reserve()` is `budget.hold()`, and returns a `Hold`; `Reservation` is gone. A hold's
+  `commit({ tx })` is `settle({ tx })`, `release()` is `void({ reason })`, and `annotate()` is
+  `note(outcome, detail)`. `hold()` and `pay()` take `id` and `settlesWithinMs`.
+- The vendor adapters are subpath exports, and the core imports none of them:
+  `budget.guard(client)` is `guard(client, budget)` from `walletcap/x402`;
+  `budget.cdpStore({ asset })` is `cdpStore(budget, { asset })` from `walletcap/cdp`;
+  `budget.guardAgentKit(provider)` is `guardAgentKit(provider, budget)` from
+  `walletcap/agentkit`. `MAX_PAYMENT_TIMEOUT_SECONDS` and `USD_ASSETS` moved to `walletcap/x402`.
+  `walletcap/agentic` keeps `guardAgenticWallet(budget, { request })`.
+- `SharedBudgetStore` is gone, with its `declare()`, `revoke()` and `status()`; use `cdpStore()`.
+- `budget.setLimits()`, `budget.freeze()` and `budget.unfreeze()` moved to the owner's handle,
+  `openOwner()`.
+- `budget.holds()` returns `HeldPayment`s: `until` is now `countsUntil`, and `settlesBy` is new.
+- `walletcap awal-mcp` is now its own npm package: `npx walletcap-mcp --wallet …`.
+  `packages/mcp/server.json` lists it under the MCP Registry name `io.github.coriolislabs/walletcap`.
+
+Python:
+
+- `Budget.reserve()` is `Budget.hold()`, and returns a `Hold`; `Reservation` is gone. A hold has
+  `settle(tx=…)`, `void(reason=…)`, `settles_by(datetime)`, `settles_within(timedelta)` and
+  `note(outcome, detail)`. `with budget.pay(...) as payment` yields the hold; `payment.tx` is
+  kept as the evidence.
+- 0.3's `Hold`, what `budget.holds()` returns, is now `HeldPayment`: `until` is now
+  `counts_until`, and `settles_by` is new.
+- `Budget.set_limits()`, `freeze()` and `unfreeze()` moved to the owner's handle,
+  `open_owner()`.
+- `Ledger` is private (`walletcap._ledger`). `UNSET`, `BudgetStatus` and `Spend` are gone, and
+  `BudgetLimits` is now the owner's view of a budget.
+- `OverBudget`, `OverPerPayment`, `OverUses` and `BudgetRevoked` are gone: `BudgetRefused.code`
+  says which limit refused.
+- Amounts the API returns are `Micros`, an `int` in micro-dollars. `to_micros` reads a `Micros` as
+  micro-dollars and a plain `int` as whole dollars, as before.
+
+Both languages:
+
+- Four errors, with no common base: `BudgetUnavailable` (the file or its lock),
+  `BudgetRefused`, `PaymentNotRecorded` and `UsageError` (a malformed call, or one that doesn't
+  fit the payment's state). `BudgetError` is gone, and Python's errors no longer subclass
+  `ValueError`.
+- `BudgetRefused.reason` is now `code`, and the `budget_…` code strings are gone. `frozen` and
+  `max_payments` replace `revoked` and `uses`. `terms`, for payment terms walletcap can't read, is
+  new. `source` says whether the budget's limits refused (`budget`) or the paying process's own
+  (`process`). `Check` has `code` and `brief` in place of `reason`.
+- `PaymentNotRecorded.reservationId` (Python `reservation_id`) is now `paymentId`
+  (`payment_id`).
+- The limits a payer passes to `openBudget()` or `open_budget()` bind that process only, and only
+  tighten the stored ones. 0.3 wrote a tighter limit into the file, for every process. Only the
+  owner's handle, and `walletcap set`, change the stored limits.
+- `pay()` with an `id` already in the ledger refuses with `UsageError` before the payment runs.
+
+The command line, in both languages:
+
+- `walletcap release <id>` is `walletcap void <id>`, and `release --all-unknown --older-than …`
+  is `void --all-unknown --older-than …`. Its messages say "Voided".
+- A payment id that isn't in the file exits 2.
+
+Behaviour:
+
+- The CDP store holds each payment until an hour and a minute after CDP records it, and it counts
+  for one window after that: the same time as in 0.3. It shows as in flight, where 0.3 showed it
+  as spent, because CDP's record isn't evidence that the payment settled.
+- The Agentic Wallet wrapper no longer reads the wallet's error text to decide that nothing was
+  signed. Any failure the wallet reports keeps the payment held, noted unknown, until its owner
+  voids it. A free endpoint's one-unit hold is still given back.
+- An open hold can learn its settle-by time as a time from the ledger's now: `settlesWithin(ms)`
+  and `settlesWithinMs`, `settles_within(timedelta)`. The x402 guard and the Agentic Wallet
+  wrapper use it, so neither reads the process's clock to date a payment.
+
+### Added
+
+- `spec/`: [ledger.md](spec/ledger.md), the state machine and its invariant; `schema.sql`, the
+  rule; `upgrade.sql`; `vectors/ledger.json`, admission sequences both test suites run; and
+  `fixtures/`, budget files 0.2.4 and 0.3.0 wrote, with what 0.3.0 counted in them.
+- The owner's handle in both languages, `openOwner()` and `open_owner()`: `budgets`, `status`,
+  `history`, `holds`, `payment(id)`, `setLimits`, `freeze`, `unfreeze`, `void(id, evidence)`,
+  `settle(id, evidence)` and `voidUnknown` (`void_unknown`), the bulk release.
+- `walletcap settle <id> [--tx <hash>]`.
+- Python's async forms: `acheck`, `ahold`, `astatus`, `aholds` and `ahistory`, and a hold's
+  `asettle`, `avoid` and `anote`. `async with budget.pay()` now waits for a lock in a worker
+  thread; 0.3 waited on the event loop.
+- `walletcap-mcp`, the npm package for the MCP proxy.
+- [STABILITY.md](STABILITY.md), and design records in [docs/adr/](docs/adr/).
+
+### Changed
+
+- The repository is laid out by what ships: `packages/js` (npm `walletcap`), `packages/python`
+  (PyPI `walletcap`), `packages/mcp` (npm `walletcap-mcp`), `contracts/` (was `solidity/`),
+  `bench/crash-test/` (was `crash-test/`) and `spec/`. One npm workspace, with one lockfile.
+- The PyPI source distribution ships only the Python package and the SQL it runs.
+- `walletcap-crash-test` 0.4.0 runs on walletcap `^0.4.0`. Its `--json` refusal codes are
+  `budget`, not `budget_budget`.
+- A brand-new npm package can't use trusted publishing for its first release, so
+  `walletcap-mcp` 0.4.0 is published by hand; later releases publish from `publish.yml`, on tags
+  `mcp-v<version>`.
+
+### Kept from 0.3.0
+
+Every fix in 0.3.0 still holds. The tests that show it, in `packages/js/test`, `packages/mcp/test`
+and `packages/python/tests`:
+
+- **An error never settles a payment.** JavaScript: "an error never settles a payment: an unknown
+  outcome counts until its owner releases it", "an unknown outcome with a settle-by time counts
+  until one window past it", and in the Agentic Wallet tests "a send whose outcome is unknown
+  keeps counting until its owner releases it". Python: `test_an_error_never_settles_a_payment`,
+  `test_an_unknown_outcome_with_a_settle_by_time_counts_one_window_past_it`. Vector: "an open
+  hold counts until evidence settles or voids it, however long".
+- **A commit never shortens a hold.** JavaScript: "a settlement never shortens a hold: it counts
+  until one window past the hold's settle-by time", "a payee's word that a payment settled can't
+  free the budget while the authorization is redeemable" and "the payee's word that a payment on
+  handed-in terms settled doesn't end its hold early". Python:
+  `test_a_settlement_never_shortens_a_hold`. Vector: "a settlement never shortens a hold".
+- **x402 terms over 3600 s are filtered** (`MAX_PAYMENT_TIMEOUT_SECONDS`). JavaScript: "terms
+  valid longer than an hour are passed over for shorter ones on offer", "an authorization valid
+  longer than an hour is refused before it is signed", and "the wallet is handed only the terms
+  walletcap can price and bound; the rest are left out, not refused".
+- **Discovered terms are handed to the Agentic Wallet.** JavaScript: "the wallet is handed the
+  terms walletcap discovered, so the payee's word can't end the hold early", and "npx walletcap
+  awal: payments are counted, everything else is awal".
+- **Permit2 deadlines are read.** JavaScript: "a Permit2 payment, or one whose expiry walletcap
+  can't read, counts until it can no longer settle".
+- **CDP rows count for an hour and a minute.** JavaScript: "a CDP payment counts until an hour
+  after it is recorded, plus one window: its authorization can be redeemed that long", and "an
+  entry CDP backdates still counts from the ledger's own time".
+- **Names are canonical.** JavaScript: "checksummed, lowercase and CAIP-10 addresses spend from
+  one budget", and "a checksummed or CAIP-10 wallet spends from the one lowercase budget". Python:
+  `test_a_checksummed_address_names_the_one_lowercase_budget`.
+- **`PaymentNotRecorded`.** JavaScript: "a payment that went through but cannot be recorded
+  throws PaymentNotRecorded, which is none of the other errors", "a settlement the guard cannot
+  record throws PaymentNotRecorded, and the payment keeps counting", "a refusal or a lost answer
+  the guard can't record throws PaymentNotRecorded too", and "a budget that can't be written after
+  the wallet answered raises PaymentNotRecorded, not one of the errors code retries on". Python:
+  `test_a_payment_that_went_through_but_was_not_recorded`,
+  `test_the_four_errors_share_no_base_and_none_is_a_value_error`.
+- **`BudgetRefused.brief` is what agents see.** JavaScript: "the agent is told why the guard
+  refused, not which holds its owner could release", "a refusal CDP passes on to the agent names
+  no holds and no release instructions", and "the agent is told why a payment was refused, not
+  which holds its owner could release". walletcap-mcp: "the agent is told why a payment was
+  refused, not which holds its owner could void".
+- **The bulk release follows the settle-by and 61-minute rules.** JavaScript: "a bulk release
+  keeps a payment its payee could still settle, and clears refused ones", and "a bulk release
+  keeps a hold with no settle-by time for an hour and a minute, and a CDP roll-back until it can
+  no longer settle". Python: `test_a_bulk_release_keeps_what_the_payee_could_still_settle`,
+  `test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes`. Vector: "the
+  owner's bulk release voids only what can no longer settle".
+- **The schema-2 upgrade.** JavaScript: "a 0.2.x file is upgraded on open: every spelling of a
+  wallet becomes one budget, and every payment still counts", "the upgrade says what it did: a
+  warning names the merged limits, and a wallet in two units is frozen, not the file", and in
+  `upgrade.test.mjs` "every payment in a schema 1 file counts as 0.3.0 counted it" (and schema 2)
+  and "a crash in the middle of the upgrade leaves the file as it was". Python:
+  `test_a_0_2_file_is_upgraded_on_open`, `test_the_upgrade_says_what_it_did`,
+  `test_every_payment_counts_as_0_3_0_counted_it`,
+  `test_a_crash_mid_upgrade_leaves_the_file_as_it_was` and
+  `test_javascript_and_python_open_one_old_file_at_once`.
+- **The rest of 0.3.0:** the clock is not an option ("the clock is not an option: no process can
+  move its own time to empty the budget", `test_the_clock_is_not_an_option`); a settle-by time
+  that isn't after now is refused ("a settle-by time that isn't after now is refused: a payment
+  can't settle before it is made", `test_a_settle_by_time_that_isnt_after_now_is_refused`); no
+  hold lapses while its payment can still settle (`test_a_hold_never_lapses_while_its_payment_can_still_settle`);
+  a naive datetime is refused (`test_a_naive_settle_by_time_is_refused`); amounts stop at
+  `MAX_AMOUNT` and never overflow ("amounts and limits stop at a billion dollars, so no sum of
+  payments can overflow"); the time is read once the write lock is held ("the ledger reads the
+  time once it holds the write lock, so waiting for another process can't make it stale",
+  `test_the_time_is_read_once_the_write_lock_is_held`); and amounts read only ASCII digits, the
+  same way in both languages (`spec/vectors/money.json`).
+
 ## 0.3.0 — 2026-11-06
 
 This release fixes ways past walletcap's own cap that reviewers reproduced, and ways its
