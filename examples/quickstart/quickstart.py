@@ -36,7 +36,7 @@ def attempt(target: object, label: str, amount: str) -> None:
             payment.tx = TX
         print(f"paid     {label:<28} {amount}")
     except BudgetRefused as error:
-        print(f"REFUSED  {label:<28} {amount}  ({error.reason})")
+        print(f"REFUSED  {label:<28} {amount}  ({error.code})")
 
 
 print(f"Budget: {budget.status().summary}\n")

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
-import { BudgetError, BudgetRefused, openBudget, PaymentNotRecorded } from 'walletcap';
+import { BudgetRefused, BudgetUnavailable, openBudget, PaymentNotRecorded, UsageError } from 'walletcap';
 import { guard, MAX_PAYMENT_TIMEOUT_SECONDS } from 'walletcap/x402';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
@@ -33,7 +33,7 @@ const pay = async (client, atomic, answer = { settleResponse: settled }) => {
   await client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, ...answer });
   return payload;
 };
-const refusedFor = reason => error => error instanceof BudgetRefused && error.reason === reason;
+const refusedFor = code => error => error instanceof BudgetRefused && error.code === code;
 
 test('settled x402 payments count, and the next one past the cap is refused before it is signed', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const { budget, client } = await setup();
@@ -145,7 +145,7 @@ test('a settlement the guard cannot record throws PaymentNotRecorded, and the pa
   budget.close();
   await assert.rejects(
     client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: settled }),
-    error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError),
+    error => error instanceof PaymentNotRecorded && !(error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError),
   );
   assert.equal((await (await openBudget({ wallet: kit.account.address, path })).status()).inFlight, 50_000n);
 });
@@ -159,7 +159,7 @@ test("a refusal or a lost answer the guard can't record throws PaymentNotRecorde
     // 0.3.0 let the ledger's BudgetError through, which code that retries on one would retry.
     await assert.rejects(
       client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, ...answer }),
-      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError) && /what happened to the payment could not be recorded/.test(error.message),
+      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError) && /what happened to the payment could not be recorded/.test(error.message),
     );
     assert.equal((await (await openBudget({ wallet: kit.account.address, path })).status()).inFlight, 50_000n);
   }
@@ -167,15 +167,15 @@ test("a refusal or a lost answer the guard can't record throws PaymentNotRecorde
 
 test("the agent is told why the guard refused, not which holds its owner could release", { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
   const { budget, client } = await setup({ perDay: '$0.05' });
-  (await budget.reserve('$0.05')).annotate({ outcome: 'unknown' });
+  await (await budget.hold('$0.05')).note('unknown');
   const owner = await budget.check('$0.01');
-  assert.match(owner.message, /1 open payment \(wc-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
+  assert.match(owner.message, /1 open payment \(wc-\w+; walletcap holds lists them, and if one never left the wallet its owner can void it\)$/);
   // 0.3.0's guard (and so AgentKit's) passed the owner's message to the agent.
   const brief = error => refusedFor('budget')(error) && error.message === owner.brief && !/wc-|release/.test(error.message);
   await assert.rejects(client.createPaymentPayload(kit.required(10_000)), brief);
   // The same when another process takes the room between the check and the reservation.
   const raced = await setup({ perDay: '$0.05' });
-  raced.client.onBeforePaymentCreation(async () => { (await raced.budget.reserve('$0.05')).annotate({ outcome: 'unknown' }); });
+  raced.client.onBeforePaymentCreation(async () => { await (await raced.budget.hold('$0.05')).note('unknown'); });
   await assert.rejects(raced.client.createPaymentPayload(kit.required(10_000)), error => refusedFor('budget')(error) && !/wc-|release/.test(error.message));
   assert.equal((await raced.budget.status()).inFlight, 50_000n);
 });

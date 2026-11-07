@@ -29,11 +29,15 @@ JS = REPO / "packages" / "js"
 sys.path.insert(0, str(SOURCE))
 
 from walletcap import (  # noqa: E402
-    BudgetError,
+    Budget,
     BudgetRefused,
+    BudgetUnavailable,
     BudgetWarning,
-    Ledger,
+    Micros,
     NotSent,
+    Owner,
+    UsageError,
+    open_owner,
     PaymentNotRecorded,
     _clock,
     default_budget_path,
@@ -92,14 +96,14 @@ def test_the_cap_holds_and_a_restart_cannot_raise_the_limits_it_finds(tmp_path: 
         _pay(budget, "$0.05")
     with pytest.raises(BudgetRefused) as refused:
         _pay(budget, "$0.05")
-    assert refused.value.reason == "budget"
+    assert refused.value.code == "budget"
     assert "$0.15 limit ($0.00 left)" in str(refused.value)
     # The code comes back with a kit's looser defaults: the stored limits stay.
     with pytest.warns(BudgetWarning, match=r"keeps its stored limits \(\$0\.15 per 24h"):
         restarted = open_budget(WALLET, path=path, per_payment="$2.50", per_day="$5")
     with pytest.raises(BudgetRefused) as over:
         _pay(restarted, "$1.00")
-    assert over.value.reason == "per_payment"
+    assert over.value.code == "per_payment"
     status = restarted.status()
     assert (status.cap, status.per_payment, status.spent) == (150_000, 50_000, 150_000)
 
@@ -108,7 +112,7 @@ def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_payment="$0.05", per_day="$0.15", create=True)
     for _ in range(3):
         _pay(budget, "0.05")
-    status = budget.set_limits(per_day="$0.20")
+    status = open_owner(budget.path).set_limits(WALLET, per_day="$0.20")
     assert (status.spent, status.remaining) == (150_000, 50_000)
     _pay(budget, "0.05")
     with pytest.raises(BudgetRefused):
@@ -118,22 +122,32 @@ def test_raising_a_limit_keeps_what_was_spent(tmp_path: Path) -> None:
 def test_the_window_cannot_change_after_spend(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "window.sqlite", per_day="$150", create=True)
     _pay(budget, "$1")
-    with pytest.raises(BudgetError, match="window can't change while payments count"):
-        budget.set_limits(cap="$150", window="1ms")
+    with pytest.raises(UsageError, match="window can't change while payments count"):
+        open_owner(budget.path).set_limits(WALLET, cap="$150", window="1ms")
     assert budget.status().spent == 1_000_000
 
     fresh = open_budget(WALLET, path=tmp_path / "fresh.sqlite", per_day="$150", create=True)
-    assert fresh.set_limits(cap="$150", window="1h").window_ms == 3_600_000
+    assert open_owner(fresh.path).set_limits(WALLET, cap="$150", window="1h").window_ms == 3_600_000
 
 
-def test_code_can_lower_a_limit_for_everyone_and_the_window_rolls(
+def test_a_payers_tighter_limits_bind_its_own_process_only(
     tmp_path: Path, clock: Clock
 ) -> None:
     path = tmp_path / "b.sqlite"
     budget = open_budget(WALLET, path=path, per_day="$150", create=True)
-    open_budget(WALLET, path=path, per_day="$100")
-    assert budget.status().cap == 100_000_000
-    _pay(budget, "$100")
+    # 0.3.0 wrote a payer's tighter limits into the file, for everyone that opened it.
+    tighter = open_budget(WALLET, path=path, per_day="$100", per_payment="$60")
+    assert (budget.status().cap, budget.status().per_payment) == (150_000_000, None)
+    with pytest.raises(BudgetRefused) as over:
+        _pay(tighter, "$61")
+    assert (over.value.code, over.value.source) == ("per_payment", "process")
+    assert str(over.value) == "$61.00 is over the $60.00 limit per payment this process set"
+    _pay(tighter, "$60")
+    with pytest.raises(BudgetRefused) as capped:
+        _pay(tighter, "$41")
+    assert (capped.value.code, capped.value.source) == ("budget", "process")
+    assert "over the $100.00 limit this process set ($40.00 left)" in str(capped.value)
+    _pay(budget, "$90")  # the budget itself is as its owner set it
     clock.at += DAY
     with pytest.raises(BudgetRefused):
         _pay(budget, "$1")
@@ -190,15 +204,15 @@ def test_a_payment_that_went_through_but_was_not_recorded(
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
 
     def locked(payment: str, *, evidence: str | None = None) -> None:
-        raise BudgetError("the budget file is locked")
+        raise BudgetUnavailable("the budget file is locked")
 
     monkeypatch.setattr(budget._ledger, "settle", locked)
     with pytest.raises(PaymentNotRecorded) as raised, budget.pay("$5") as payment:
         payment.tx = TX
-    # Code that retries on BudgetError must not pay twice.
-    assert not isinstance(raised.value, BudgetError)
-    assert raised.value.reservation_id == payment.id
-    assert isinstance(raised.value.cause, BudgetError)
+    # Code that retries on any of the other three must not pay twice.
+    assert not isinstance(raised.value, BudgetUnavailable | BudgetRefused | UsageError)
+    assert raised.value.payment_id == payment.id
+    assert isinstance(raised.value.cause, BudgetUnavailable)
     assert raised.value.__cause__ is raised.value.cause
     assert str(raised.value).endswith(f"still counts as in flight ({payment.id})")
     assert budget.status().in_flight == 5_000_000
@@ -214,9 +228,9 @@ def test_a_refusal_names_the_open_payments_and_holds_lists_them(
         with pytest.raises(TimeoutError), budget.pay(amount):
             raise TimeoutError("rpc timeout")
     clock.at += 3_600
-    budget.reserve("$5", settles_by=datetime.fromtimestamp(clock.at + 300, tz=UTC))
+    budget.hold("$5", settles_by=datetime.fromtimestamp(clock.at + 300, tz=UTC))
     holds = budget.holds()
-    assert [(hold.reason, hold.amount, hold.age_ms, hold.until is None) for hold in holds] == [
+    assert [(hold.reason, hold.amount, hold.age_ms, hold.counts_until is None) for hold in holds] == [
         ("unknown", 10_000_000, 3_600_000, True),
         ("unknown", 20_000_000, 3_600_000, True),
         ("in flight", 5_000_000, 0, False),
@@ -224,7 +238,7 @@ def test_a_refusal_names_the_open_payments_and_holds_lists_them(
     assert holds[0].error == "rpc timeout"
     # 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
     used = budget.check("$1")
-    assert used.reason == "max_payments"
+    assert used.code == "max_payments"
     assert used.message is not None
     assert re.search(
         r"has 3 payments counting in the last 24h, the most its budget allows, and 3 of them "
@@ -243,7 +257,7 @@ def test_a_refusal_names_the_open_payments_and_holds_lists_them(
     )
 
 
-def test_an_owner_lists_holds_and_releases_the_unknown_ones_in_bulk(
+def test_an_owner_lists_holds_and_voids_the_unknown_ones_in_bulk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "holds.sqlite"
@@ -253,23 +267,23 @@ def test_an_owner_lists_holds_and_releases_the_unknown_ones_in_bulk(
         with pytest.raises(TimeoutError), budget.pay(amount):
             raise TimeoutError("rpc timeout")
     monkeypatch.undo()
-    recent = budget.reserve("$3")
+    recent = budget.hold("$3")
     listed = _cli(path, "holds")
     assert listed.returncode == 0, listed.stderr
     assert re.search(
-        r"wc-\w+ +\$1\.00 +unknown +2h 0m old +python +counts until released", listed.stdout
+        r"wc-\w+ +\$1\.00 +unknown +2h 0m old +python +counts until voided or settled", listed.stdout
     )
     assert re.search(rf"{recent.id} +\$3\.00 +in flight +\d+s old", listed.stdout)
     assert len(json.loads(_cli(path, "holds", "--json").stdout)) == 3
-    assert _cli(path, "release", "--all-unknown").returncode == 2
-    released = _cli(path, "release", "--all-unknown", "--older-than", "1h")
+    assert _cli(path, "void", "--all-unknown").returncode == 2
+    released = _cli(path, "void", "--all-unknown", "--older-than", "1h")
     assert released.returncode == 0, released.stderr
     assert (
-        "Released 2 payments of unknown or refused outcome older than 1h ($3.00 from 0xd797…ca02)"
+        "Voided 2 payments of unknown or refused outcome older than 1h ($3.00 from 0xd797…ca02)"
         in released.stdout
     )
     assert [hold.id for hold in budget.holds()] == [recent.id]
-    nothing = _cli(path, "release", "--all-unknown", "--older-than", "1h")
+    nothing = _cli(path, "void", "--all-unknown", "--older-than", "1h")
     assert "No payment of unknown or refused outcome" in nothing.stdout
 
 
@@ -280,23 +294,23 @@ def test_a_bulk_release_keeps_what_the_payee_could_still_settle(
     budget = open_budget(WALLET, path=path, per_day="$150", create=True)
     now = time.time()
     monkeypatch.setattr(_clock, "source", lambda: now - 7_200)  # all three taken two hours ago
-    live = budget.reserve(
+    live = budget.hold(
         "$100", rail="x402", settles_by=datetime.fromtimestamp(now + 3_600, UTC)
     )
-    lapsed = budget.reserve(
+    lapsed = budget.hold(
         "$20", rail="x402", settles_by=datetime.fromtimestamp(now - 3_600, UTC)
     )
-    refused = budget.reserve("$10", rail="x402")  # as the CDP store reopens a rolled-back one
+    refused = budget.hold("$10", rail="x402")  # as the CDP store reopens a rolled-back one
     monkeypatch.undo()
-    live.annotate(outcome="unknown")
-    lapsed.annotate(outcome="unknown")
-    refused.annotate(outcome="refused")
+    live.note("unknown")
+    lapsed.note("unknown")
+    refused.note("refused")
     # 0.3.0 gave back the first too, with its authorization redeemable for another hour, and
     # kept the refused one counting until released one by one.
-    released = _cli(path, "release", "--all-unknown", "--older-than", "1h")
+    released = _cli(path, "void", "--all-unknown", "--older-than", "1h")
     assert released.returncode == 0, released.stderr
     assert (
-        "Released 2 payments of unknown or refused outcome older than 1h ($30.00 from 0xd797…ca02)"
+        "Voided 2 payments of unknown or refused outcome older than 1h ($30.00 from 0xd797…ca02)"
         in released.stdout
     )
     assert [hold.id for hold in budget.holds()] == [live.id]
@@ -310,22 +324,22 @@ def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
     budget = open_budget(WALLET, path=path, per_day="$10", create=True)
     now = time.time()
     monkeypatch.setattr(_clock, "source", lambda: now - 62 * 60)  # taken 62 minutes ago
-    old = budget.reserve("$1")
+    old = budget.hold("$1")
     monkeypatch.undo()
-    fresh = budget.reserve("$2")
+    fresh = budget.hold("$2")
     for hold in (old, fresh):
-        hold.annotate(outcome="unknown")  # the payment may have been signed as it failed
+        hold.note("unknown")  # the payment may have been signed as it failed
     time.sleep(0.02)
     # 0.3.0 gave back both 20 ms later, though the fresh one may still be settled.
-    released = _cli(path, "release", "--all-unknown", "--older-than", "10ms")
+    released = _cli(path, "void", "--all-unknown", "--older-than", "10ms")
     assert released.returncode == 0, released.stderr
     assert (
-        "Released 1 payment of unknown or refused outcome older than 10ms ($1.00 from 0xd797…ca02)"
+        "Voided 1 payment of unknown or refused outcome older than 10ms ($1.00 from 0xd797…ca02)"
         in released.stdout
     )
     assert [hold.id for hold in budget.holds()] == [fresh.id]
-    nothing = _cli(path, "release", "--all-unknown", "--older-than", "10ms")
-    assert "can be released yet" in nothing.stdout
+    nothing = _cli(path, "void", "--all-unknown", "--older-than", "10ms")
+    assert "can be voided yet" in nothing.stdout
     assert "one with no settle-by time, once it is also an hour and a minute old" in nothing.stdout
 
 
@@ -393,7 +407,7 @@ def test_a_reservation_with_a_settle_by_time_counts_one_window_past_it(
 ) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
     settles_by = datetime.fromtimestamp(clock.at, tz=UTC) + timedelta(minutes=5)
-    budget.reserve("$100", settles_by=settles_by)
+    budget.hold("$100", settles_by=settles_by)
     clock.at += 300 + DAY
     assert budget.status().in_flight == 100_000_000
     clock.at += 0.002
@@ -405,14 +419,14 @@ def test_a_naive_settle_by_time_is_refused(tmp_path: Path, clock: Clock) -> None
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
     # 0.2.x read a naive datetime as this machine's local time: 9 hours early in Tokyo.
     naive = datetime(2027, 1, 15, 8, 0)
-    with pytest.raises(BudgetError, match="timezone-aware"):
-        budget.reserve("$1", settles_by=naive)
-    with pytest.raises(BudgetError, match="timezone-aware"), budget.pay("$1", settles_by=naive):
+    with pytest.raises(UsageError, match="timezone-aware"):
+        budget.hold("$1", settles_by=naive)
+    with pytest.raises(UsageError, match="timezone-aware"), budget.pay("$1", settles_by=naive):
         pass
     assert budget.status().in_flight == 0
     # An aware time that isn't after now is refused too: the payment is made after it is reserved.
-    with pytest.raises(BudgetError, match="is not after now"):
-        budget.reserve("$150", settles_by=datetime(2000, 1, 1, tzinfo=UTC))
+    with pytest.raises(UsageError, match="is not after now"):
+        budget.hold("$150", settles_by=datetime(2000, 1, 1, tzinfo=UTC))
     assert budget.status().in_flight == 0
 
 
@@ -420,30 +434,31 @@ def test_freeze_check_and_mistakes(tmp_path: Path) -> None:
     path = tmp_path / "b.sqlite"
     budget = open_budget(WALLET, path=path, per_day="$150", max_payments=1, create=True)
     assert budget.check("$150").ok
-    budget.freeze()
+    owner = open_owner(path)
+    owner.freeze(WALLET)
     check = budget.check("$1")
-    assert (check.ok, check.reason) == (False, "frozen")
-    budget.unfreeze()
+    assert (check.ok, check.code) == (False, "frozen")
+    owner.unfreeze(WALLET)
     _pay(budget, "$1")
-    assert budget.check("$1").reason == "max_payments"
-    with pytest.raises(BudgetError, match="not 40 hex digits"):
+    assert budget.check("$1").code == "max_payments"
+    with pytest.raises(UsageError, match="not 40 hex digits"):
         open_budget(WALLET[:-1], path=path, per_day="$1")
-    with pytest.raises(BudgetError, match="has no declared budget"):
+    with pytest.raises(BudgetUnavailable, match="has no budget in"):
         open_budget("0x" + "0" * 39 + "1", path=path)
-    with pytest.raises(BudgetError, match="no budget file"):
+    with pytest.raises(BudgetUnavailable, match="no budget file"):
         open_budget(WALLET, path=tmp_path / "missing.sqlite", create=False)
 
 
 def test_the_default_is_fail_closed(tmp_path: Path) -> None:
     path = tmp_path / "default-missing.sqlite"
-    with pytest.raises(BudgetError, match="no budget file"):
+    with pytest.raises(BudgetUnavailable, match="no budget file"):
         open_budget(WALLET, path=path, per_day="$5")
     budget = open_budget(WALLET, path=path, per_day="$5", create=True)
     assert budget.status().cap == 5_000_000
     budget.close()
     corrupt = tmp_path / "corrupt.sqlite"
     corrupt.write_text("not a database " * 100)
-    with pytest.raises(BudgetError, match="cannot be used"):
+    with pytest.raises(BudgetUnavailable, match="cannot be used"):
         open_budget(WALLET, path=corrupt, per_day="$1")
 
 
@@ -463,14 +478,14 @@ def test_dollars_are_read_the_way_people_write_them(value: object, micros: int) 
 
 @pytest.mark.parametrize("value", ["-5", "1,5", "0.0000001", True, float("nan"), "12 EUR", None])
 def test_amounts_that_are_not_dollars_are_refused(value: object) -> None:
-    with pytest.raises(BudgetError):
+    with pytest.raises(UsageError):
         to_micros(value)
 
 
 def test_amounts_stop_at_a_billion_dollars() -> None:
     assert to_micros("$1,000,000,000") == 10**15
     for value in ("$1,000,000,000.000001", 1_000_000_001, 9_223_372_036_854):
-        with pytest.raises(BudgetError, match=r"more than \$1,000,000,000\.00"):
+        with pytest.raises(UsageError, match=r"more than \$1,000,000,000\.00"):
             to_micros(value)
 
 
@@ -510,21 +525,31 @@ def test_the_python_cli_sets_reads_and_freezes(tmp_path: Path) -> None:
     with pytest.raises(BudgetRefused):
         _pay(budget, "$1")
     assert _cli(path, "unfreeze").returncode == 0
-    held = budget.reserve("$1")
+    held = budget.hold("$1")
     assert held.id in _cli(path, "history").stdout
-    assert _cli(path, "release", held.id).returncode == 0
+    assert _cli(path, "void", held.id).returncode == 0
     assert budget.status().in_flight == 0
-    assert _cli(path, "release", held.id).returncode == 1
+    assert "void already" in _cli(path, "void", held.id).stdout
+    settled = budget.hold("$2")
+    settled.settle()
+    refused = _cli(path, "void", settled.id)
+    assert (refused.returncode, "a settled payment can't be voided" in refused.stderr) == (1, True)
+    lost = budget.hold("$3")
+    recorded = _cli(path, "settle", lost.id, "--tx", TX)
+    assert recorded.returncode == 0, recorded.stderr
+    assert recorded.stdout.startswith(f"Settled {lost.id} ($3.00 from 0xd797…ca02); it counts until ")
+    assert budget.history()[0].tx == TX
+    assert _cli(path, "settle", "wc-nobody").returncode == 2
 
 
-def test_an_owner_can_release_a_payment_whose_outcome_is_unknown(tmp_path: Path) -> None:
+def test_an_owner_can_void_a_payment_whose_outcome_is_unknown(tmp_path: Path) -> None:
     path = tmp_path / "unknown.sqlite"
     budget = open_budget(WALLET, path=path, per_day="$10", create=True)
     with pytest.raises(TimeoutError), budget.pay("$4"):
         raise TimeoutError("rpc timeout")
     [payment] = budget.history()
     assert f"({payment.id})" in _cli(path, "history").stdout
-    released = _cli(path, "release", payment.id)
+    released = _cli(path, "void", payment.id)
     assert released.returncode == 0, released.stderr
     assert budget.status().in_flight == 0
 
@@ -558,7 +583,7 @@ def test_python_and_javascript_spend_from_one_budget(tmp_path: Path) -> None:
         "const results = [];"
         "for (const amount of ['$50', '$50']) {"
         "  try { await budget.pay(amount, async () => 'ok'); results.push('paid'); }"
-        "  catch (error) { results.push(error.reason); } }"
+        "  catch (error) { results.push(error.code); } }"
         "console.log(JSON.stringify({ results, spent: String((await budget.status()).spent) }));"
     )
     result = subprocess.run(  # noqa: S603 - fixed local Node script, owned test file in argv
@@ -685,7 +710,7 @@ def test_the_upgrade_says_what_it_did(tmp_path: Path, clock: Clock) -> None:
     frozen = open_budget(WALLET, path=path)
     with pytest.raises(BudgetRefused) as refused:
         _pay(frozen, "$1")
-    assert refused.value.reason == "frozen"
+    assert refused.value.code == "frozen"
     assert str(refused.value).endswith(
         f"The 0.3.0 upgrade froze it: 0.2.x also kept a budget in wei under {CHECKSUMMED} for "
         "this wallet, which can't be merged with this one in usd, so that budget no longer counts"
@@ -694,9 +719,80 @@ def test_the_upgrade_says_what_it_did(tmp_path: Path, clock: Clock) -> None:
     status = _cli(path, "status")
     assert status.returncode == 0, status.stderr
     assert status.stdout.count("0xd797") == 1
-    frozen.unfreeze()
+    owner = open_owner(path)
+    owner.unfreeze(WALLET)
     _pay(frozen, "$1")
-    frozen.freeze()
+    owner.freeze(WALLET)
     with pytest.raises(BudgetRefused) as again:
         _pay(frozen, "$1")
     assert "0.3.0 upgrade" not in str(again.value)
+
+
+def test_the_four_errors_share_no_base_and_none_is_a_value_error(tmp_path: Path) -> None:
+    errors = [BudgetUnavailable, BudgetRefused, PaymentNotRecorded, UsageError]
+    for one in errors:
+        assert not issubclass(one, ValueError)
+        for other in errors:
+            assert one is other or not issubclass(one, other)
+    with pytest.raises(BudgetUnavailable):
+        open_budget(WALLET, path=tmp_path / "none.sqlite")
+    with pytest.raises(UsageError):
+        open_budget("has space", path=tmp_path / "none.sqlite")
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$1", create=True)
+    with pytest.raises(BudgetRefused) as refused:
+        budget.hold("$2")
+    assert (refused.value.code, refused.value.source) == ("budget", "budget")
+    assert refused.value.brief == str(refused.value)
+
+
+def test_the_payer_has_no_owner_methods_and_the_owner_reconciles_with_evidence(
+    tmp_path: Path, clock: Clock
+) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$150", create=True)
+    for method in ("set_limits", "freeze", "unfreeze", "void", "settle", "void_unknown", "reserve"):
+        assert not hasattr(budget, method), method
+    owner = open_owner(path)
+    assert isinstance(budget, Budget) and isinstance(owner, Owner)
+    lost = budget.hold("$100")
+    lost.note("unknown", "rpc timeout")
+    # The chain shows the authorization unused past its expiry: the owner voids it, with that.
+    voided = owner.void(lost.id, evidence="authorizationState false after validBefore")
+    assert (voided.state, voided.counting, budget.status().in_flight) == ("void", False, 0)
+    # Later evidence that it paid after all: VOID -> SETTLED, and it counts again.
+    settled = owner.settle(lost.id, evidence=TX)
+    assert (settled.state, settled.tx) == ("settled", TX)
+    assert settled.counts_until == datetime.fromtimestamp(clock.at + DAY, tz=UTC)
+    with pytest.raises(UsageError, match="a settled payment can't be voided"):
+        owner.void(lost.id)
+    with pytest.raises(UsageError, match="no payment"):
+        owner.void("wc-nobody")
+    record = owner.payment(lost.id)
+    assert record is not None and record.wallet == WALLET
+    assert owner.payment("wc-nobody") is None
+
+
+def test_amounts_come_back_as_micros_that_read_back_as_micros(tmp_path: Path) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$100", create=True)
+    remaining = budget.status().remaining
+    assert isinstance(remaining, Micros) and remaining == 100_000_000
+    # 0.3.0 read the int it returned as dollars: check(status().remaining) asked for $100,000,000.
+    assert budget.check(remaining).ok
+    assert not budget.check(remaining + 1).ok
+    assert isinstance(remaining - 1, Micros) and isinstance(2 * Micros(3), Micros)
+    assert to_micros(100) == 100_000_000  # a plain int is still dollars
+    assert str(remaining) == "100000000" and repr(Micros(5)) == "Micros(5)"
+
+
+def test_one_id_is_one_payment_and_pay_never_makes_it_twice(tmp_path: Path) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
+    first = budget.hold("$40", id="order-17")
+    again = budget.hold("$40", id="order-17")
+    assert (first.created, again.created, again.id) == (True, False, "order-17")
+    assert budget.status().payments == 1
+    with pytest.raises(UsageError, match="already in the ledger"):
+        budget.hold("$41", id="order-17")
+    ran = False
+    with pytest.raises(UsageError), budget.pay("$40", id="order-17"):
+        ran = True
+    assert not ran

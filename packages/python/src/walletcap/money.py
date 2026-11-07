@@ -19,10 +19,51 @@ from pathlib import Path
 from typing import Final
 
 from walletcap._keccak import keccak256
-from walletcap.errors import BudgetError
+from walletcap.errors import UsageError
+
+class Micros(int):
+    """An amount in micro-dollars: what every amount walletcap returns is.
+
+    ``to_micros`` reads a ``Micros`` as micro-dollars and a plain ``int`` as whole dollars, so
+    ``budget.check(budget.status().remaining)`` means what it says. Adding, subtracting,
+    negating or multiplying by an int keeps the type.
+    """
+
+    __slots__ = ()
+
+    def __add__(self, other: int) -> Micros:
+        return Micros(int(self) + int(other))
+
+    def __radd__(self, other: int) -> Micros:
+        return Micros(int(other) + int(self))
+
+    def __sub__(self, other: int) -> Micros:
+        return Micros(int(self) - int(other))
+
+    def __rsub__(self, other: int) -> Micros:
+        return Micros(int(other) - int(self))
+
+    def __mul__(self, other: int) -> Micros:
+        return Micros(int(self) * int(other))
+
+    def __rmul__(self, other: int) -> Micros:
+        return Micros(int(other) * int(self))
+
+    def __neg__(self) -> Micros:
+        return Micros(-int(self))
+
+    def __abs__(self) -> Micros:
+        return Micros(abs(int(self)))
+
+    def __repr__(self) -> str:
+        return f"Micros({int(self)})"
+
+    def __str__(self) -> str:
+        return int.__repr__(self)
+
 
 MICROS: Final = 1_000_000
-MAX_AMOUNT: Final = 10**15
+MAX_AMOUNT: Final = Micros(10**15)
 """The most a budget, a limit or one payment can be, in the budget's own unit.
 
 10^15 is a billion dollars in micro-dollars, far below 2^63, so no sum of payments
@@ -78,7 +119,7 @@ def _float_micros(value: float) -> int:
 
     match = _FLOAT.fullmatch(repr(abs(value)))  # abs: -0.0 is 0, as String(-0) is "0"
     if match is None:
-        raise BudgetError(f"{value!r} is not a number of dollars")
+        raise UsageError(f"{value!r} is not a number of dollars")
     fraction = match.group(2) or ""
     coefficient = int(match.group(1) + fraction)
     shift = int(match.group(3) or 0) - len(fraction) + 6
@@ -105,54 +146,56 @@ def _decimal_micros(value: Decimal, label: str) -> int:
     if shift >= 0:
         return int("".join(map(str, digits))) * _pow10(shift)
     if any(digits[max(whole, 0) :]):
-        raise BudgetError(f"{label} is finer than a millionth of a dollar: {value}")
+        raise UsageError(f"{label} is finer than a millionth of a dollar: {value}")
     return int("".join(map(str, digits[:whole]))) if whole > 0 else 0
 
 
-def to_micros(value: object, label: str = "amount") -> int:
+def to_micros(value: object, label: str = "amount") -> Micros:
     """Dollars as integer micro-dollars.
 
     Strings and Decimals are exact (``"$12.50"``, ``"12.50 USDC"``, ``"$1,000"``);
     ints are whole dollars; floats are dollars, read as the shortest decimal that
     gives the float back and rounded half up to the micro-dollar, as JavaScript
-    reads a number.
+    reads a number. A ``Micros`` is already micro-dollars.
     """
 
     if isinstance(value, bool):
-        raise BudgetError(f"{label} must be {_EXAMPLES}")
-    if isinstance(value, int):
+        raise UsageError(f"{label} must be {_EXAMPLES}")
+    if isinstance(value, Micros):
+        micros = int(value)
+    elif isinstance(value, int):
         micros = value * MICROS
     elif isinstance(value, float):
         if not math.isfinite(value) or value < 0:
-            raise BudgetError(f"{label} must be a nonnegative number of dollars")
+            raise UsageError(f"{label} must be a nonnegative number of dollars")
         micros = _float_micros(value)
     elif isinstance(value, Decimal):
         if not value.is_finite():
-            raise BudgetError(f"{label} must be {_EXAMPLES}")
+            raise UsageError(f"{label} must be {_EXAMPLES}")
         if value < 0:
-            raise BudgetError(f"{label} must be a nonnegative amount")
+            raise UsageError(f"{label} must be a nonnegative amount")
         micros = _decimal_micros(value, label)
     elif isinstance(value, str):
         match = _DOLLARS.fullmatch(strip_ascii(value))
         if match is None:
-            raise BudgetError(f"{label} must be {_EXAMPLES}; got {value!r}")
+            raise UsageError(f"{label} must be {_EXAMPLES}; got {value!r}")
         fraction = match.group(2) or ""
         if fraction[6:].strip("0"):
-            raise BudgetError(f"{label} is finer than a millionth of a dollar: {value!r}")
+            raise UsageError(f"{label} is finer than a millionth of a dollar: {value!r}")
         whole = match.group(1).replace(",", "").lstrip("0") or "0"
         if len(whole) > _AMOUNT_DIGITS:
             micros = MAX_AMOUNT + 1  # more than the most a budget can hold
         else:
             micros = int(whole) * MICROS + int(fraction[:6].ljust(6, "0"))
     else:
-        raise BudgetError(f"{label} must be {_EXAMPLES}")
+        raise UsageError(f"{label} must be {_EXAMPLES}")
     if micros < 0:
-        raise BudgetError(f"{label} must be a nonnegative amount")
+        raise UsageError(f"{label} must be a nonnegative amount")
     if micros > MAX_AMOUNT:
-        raise BudgetError(
+        raise UsageError(
             f"{label} is more than {format_usd(MAX_AMOUNT)}, the most a budget can hold"
         )
-    return micros
+    return Micros(micros)
 
 
 def format_usd(micros: int) -> str:
@@ -188,7 +231,7 @@ def to_window_ms(value: object, label: str = "window") -> int:
         else:
             ms = _DURATION_WORDS.get(text)
     if ms is None or ms <= 0 or ms > MAX_INTEGER:
-        raise BudgetError(
+        raise UsageError(
             f'{label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds'
         )
     return ms
@@ -244,7 +287,7 @@ def normalize_wallet(wallet: object) -> str:
     """
 
     if not isinstance(wallet, str) or not strip_ascii(wallet):
-        raise BudgetError("wallet is required: the address or account the money leaves from")
+        raise UsageError("wallet is required: the address or account the money leaves from")
     name = strip_ascii(wallet)
     caip = _CAIP10_EVM.fullmatch(name)
     if caip is not None:
@@ -260,16 +303,16 @@ def normalize_wallet(wallet: object) -> str:
             and hexpart != hexpart.upper()
             and not _checksum_ok(name)
         ):
-            raise BudgetError(
+            raise UsageError(
                 f"wallet {name!r} has an invalid EIP-55 checksum; "
                 "copy the address or use all lowercase"
             )
         return name.lower()
     # A mistyped address must not quietly open a second budget.
     if name[:2].lower() == "0x":
-        raise BudgetError(f"wallet {name!r} looks like an EVM address but is not 40 hex digits")
+        raise UsageError(f"wallet {name!r} looks like an EVM address but is not 40 hex digits")
     if _IDENTIFIER.fullmatch(name) is None:
-        raise BudgetError(
+        raise UsageError(
             "wallet must be an address or a plain name "
             "(letters, digits and _ . : @ / -, at most 128)"
         )

@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { parseArgs } from 'node:util';
-import { type Budget, BudgetError, openBudget } from 'walletcap';
+import { type Budget, BudgetUnavailable, openBudget } from 'walletcap';
 import { type GuardedWallet, guardAgenticWallet, type WalletRequest } from 'walletcap/agentic';
 
 const messageOf = (error: unknown): string => String((error as Error | undefined)?.message ?? error);
@@ -25,7 +25,7 @@ const addressOf = (value: unknown): string | undefined => {
 async function openGuard(env: NodeJS.ProcessEnv, request: WalletRequest): Promise<GuardedWallet> {
   let wallet = env.WALLETCAP_WALLET;
   if (wallet === undefined) wallet = addressOf(await request('get-wallet-address', {}));
-  if (wallet === undefined) throw new BudgetError('walletcap could not learn the wallet address; pass --wallet');
+  if (wallet === undefined) throw new BudgetUnavailable('walletcap could not learn the wallet address; pass --wallet');
   const path = env.WALLETCAP_PATH;
   const budget: Budget = await openBudget({ wallet, ...(path === undefined ? {} : { path }), create: false });
   return guardAgenticWallet(budget, { request });

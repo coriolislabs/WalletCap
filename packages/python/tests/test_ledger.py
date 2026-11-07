@@ -18,7 +18,8 @@ REPO = ROOT.parents[1]
 SOURCE = ROOT / "src"
 sys.path.insert(0, str(SOURCE))
 
-from walletcap import MAX_AMOUNT, BudgetError, BudgetRefused, Ledger, _clock  # noqa: E402
+from walletcap import MAX_AMOUNT, BudgetRefused, BudgetUnavailable, UsageError, _clock  # noqa: E402
+from walletcap._ledger import Ledger  # noqa: E402
 
 DAY = 86_400_000
 
@@ -59,7 +60,7 @@ def test_a_restart_reads_the_same_count(tmp_path: Path, clock: Clock) -> None:
     restarted = Ledger(tmp_path / "budget.sqlite")
     with pytest.raises(BudgetRefused) as refused:
         restarted.hold("agent", 1, rail="python")
-    assert refused.value.reason == "budget"
+    assert refused.value.code == "budget"
     assert restarted.status("agent")["spent"] == 150
 
 
@@ -70,7 +71,8 @@ def test_racing_processes_cannot_both_take_the_last_of_the_budget(tmp_path: Path
     script = """
 import pathlib, sys, time
 sys.path.insert(0, sys.argv[1])
-from walletcap import BudgetRefused, Ledger
+from walletcap import BudgetRefused
+from walletcap._ledger import Ledger
 ledger = Ledger(sys.argv[2])
 pathlib.Path(sys.argv[3]).touch()
 while not pathlib.Path(sys.argv[4]).exists():
@@ -132,12 +134,12 @@ def test_the_limits_refuse_in_order(tmp_path: Path, clock: Clock) -> None:
     ledger.create_budget("agent", unit="usdc", cap=150, window_ms=DAY, per_payment=50, max_payments=2)
     with pytest.raises(BudgetRefused) as over:
         ledger.hold("agent", 51, rail="python")
-    assert over.value.reason == "per_payment"
+    assert over.value.code == "per_payment"
     _pay(ledger, 10)
     _pay(ledger, 10)
     with pytest.raises(BudgetRefused) as many:
         ledger.hold("agent", 10, rail="python")
-    assert many.value.reason == "max_payments"
+    assert many.value.code == "max_payments"
     clock.at += DAY / 1000 + 1
     _pay(ledger, 10)
 
@@ -148,7 +150,7 @@ def test_a_freeze_refuses_new_holds_but_lets_held_payments_settle(tmp_path: Path
     ledger.freeze("agent")
     with pytest.raises(BudgetRefused) as refused:
         ledger.hold("agent", 1, rail="python")
-    assert refused.value.reason == "frozen"
+    assert refused.value.code == "frozen"
     ledger.settle(held)
     status = ledger.status("agent")
     assert (status["frozen_at"] is not None, status["spent"], status["remaining"]) == (True, 50, 0)
@@ -164,9 +166,9 @@ def test_a_void_gives_the_budget_back_and_states_only_move_forward(tmp_path: Pat
     assert ledger.void(held[0])["state"] == "void"  # idempotent
     settled = _pay(ledger)
     assert ledger.settle(settled)["state"] == "settled"  # idempotent
-    with pytest.raises(BudgetError, match="can't be voided"):
+    with pytest.raises(UsageError, match="can't be voided"):
         ledger.void(settled)
-    with pytest.raises(BudgetError, match="no payment"):
+    with pytest.raises(UsageError, match="no payment"):
         ledger.settle("wc-missing")
     status = ledger.status("agent")
     assert (status["spent"], status["in_flight"], status["payments"]) == (50, 100, 3)
@@ -217,7 +219,7 @@ def test_a_settle_by_time_that_isnt_after_now_is_refused(tmp_path: Path, clock: 
     now = int(clock.at * 1000)
     # 0.2.x stored a past moment as given: the holds never counted, and more was reserved.
     for until in (0, now - 1, now):
-        with pytest.raises(BudgetError, match="is not after now"):
+        with pytest.raises(UsageError, match="is not after now"):
             ledger.hold("agent", 50, rail="python", until=until)
     assert ledger.status("agent")["payments"] == 0
     held = [str(ledger.hold("agent", 50, rail="python", until=now + 1)["payment"]) for _ in range(3)]
@@ -237,10 +239,10 @@ def test_amounts_and_caps_stop_at_a_billion_dollars_so_no_sum_overflows(
     assert MAX_AMOUNT == 10**15
     ledger = Ledger(tmp_path / "budget.sqlite", create=True)
     for too_much in (MAX_AMOUNT + 1, 2**63 - 1):
-        with pytest.raises(BudgetError, match="from 0 to 1000000000000000"):
+        with pytest.raises(UsageError, match="from 0 to 1000000000000000"):
             ledger.create_budget("big", unit="usd", cap=too_much, window_ms=DAY)
     ledger.create_budget("agent", unit="usd", cap=MAX_AMOUNT, window_ms=DAY)
-    with pytest.raises(BudgetError, match="from 1 to 1000000000000000"):
+    with pytest.raises(UsageError, match="from 1 to 1000000000000000"):
         ledger.hold("agent", MAX_AMOUNT + 1, rail="python")
     # Two holds of the most a budget can hold count at once: one lapsed, then settled late.
     first = str(ledger.hold("agent", MAX_AMOUNT, rail="python", until=int(clock.at * 1000) + 1)["payment"])
@@ -306,12 +308,12 @@ def test_a_checksummed_address_names_the_one_lowercase_budget(tmp_path: Path) ->
     for name in (checksummed, f"eip155:8453:{checksummed}", "0x" + lower[2:].upper()):
         with pytest.raises(BudgetRefused):
             ledger.hold(name, 1, rail="python")
-    with pytest.raises(BudgetError, match="already has a budget"):
+    with pytest.raises(UsageError, match="already has a budget"):
         ledger.create_budget(lower, unit="usd", cap=300, window_ms=DAY)
     assert [budget["wallet"] for budget in ledger.budgets()] == [lower]
     assert ledger.status(checksummed)["wallet"] == lower
     # A mistyped checksum is refused rather than opening a budget of its own.
-    with pytest.raises(BudgetError, match="EIP-55"):
+    with pytest.raises(UsageError, match="EIP-55"):
         ledger.create_budget("0xD797ead28C38575FDf4fC523866287372340Ca02", unit="usd", cap=1, window_ms=1)
 
 
@@ -322,7 +324,7 @@ def test_one_identity_is_one_payment(tmp_path: Path) -> None:
     assert ledger.hold("agent", 50, rail="x402", payment=payment)["created"] is True
     # The same signed authorization seen twice is one payment, counted once.
     assert ledger.hold("agent", 50, rail="x402", payment=payment)["created"] is False
-    with pytest.raises(BudgetError, match="already in the ledger"):
+    with pytest.raises(UsageError, match="already in the ledger"):
         ledger.hold("agent", 40, rail="x402", payment=payment)
     assert ledger.status("agent")["payments"] == 1
 
@@ -330,14 +332,14 @@ def test_one_identity_is_one_payment(tmp_path: Path) -> None:
 @pytest.mark.parametrize("amount", [0, -1, True, 2**63, 1.5, "50"])
 def test_a_malformed_amount_is_refused(tmp_path: Path, amount: object) -> None:
     ledger = _ledger(tmp_path / "budget.sqlite")
-    with pytest.raises(BudgetError, match="integer"):
+    with pytest.raises(UsageError, match="integer"):
         ledger.hold("agent", amount, rail="python")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("wallet", ["", "has space", "x" * 129, "semi;colon"])
 def test_a_malformed_wallet_is_refused(tmp_path: Path, wallet: str) -> None:
     ledger = Ledger(tmp_path / "budget.sqlite", create=True)
-    with pytest.raises(BudgetError, match="wallet"):
+    with pytest.raises(UsageError, match="wallet"):
         ledger.create_budget(wallet, unit="usdc", cap=1, window_ms=1)
 
 
@@ -346,14 +348,14 @@ def test_files_walletcap_did_not_write_or_cannot_read_are_refused(tmp_path: Path
     Ledger(path, create=True)
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("UPDATE budget_meta SET value = '4' WHERE key = 'schema'")
-    with pytest.raises(BudgetError, match="schema 4, which a newer walletcap wrote"):
+    with pytest.raises(BudgetUnavailable, match="schema 4, which a newer walletcap wrote"):
         Ledger(path)
     other = tmp_path / "other.sqlite"
     with closing(sqlite3.connect(other)) as connection, connection:
         connection.execute("CREATE TABLE notes (body TEXT)")
-    with pytest.raises(BudgetError, match="not a walletcap budget"):
+    with pytest.raises(BudgetUnavailable, match="not a walletcap budget"):
         Ledger(other)
-    with pytest.raises(BudgetError, match="no budget file"):
+    with pytest.raises(BudgetUnavailable, match="no budget file"):
         Ledger(tmp_path / "missing.sqlite")
 
 
@@ -417,7 +419,7 @@ def test_replaying_the_ledger_rebuilds_each_payments_state(tmp_path: Path, clock
     # projection triggers, holds the same states.
     replay = tmp_path / "replay.sqlite"
     with closing(sqlite3.connect(replay)) as connection, connection:
-        from walletcap.ledger import parse_spec  # noqa: PLC0415
+        from walletcap._ledger import parse_spec  # noqa: PLC0415
 
         spec = parse_spec((REPO / "spec" / "schema.sql").read_text(encoding="utf-8"))
         connection.executescript(spec.sections["tables"] + spec.sections["projection"])

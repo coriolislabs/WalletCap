@@ -6,7 +6,7 @@
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { keccak256Hex } from './_keccak.js';
-import { BudgetError } from './errors.js';
+import { UsageError } from './errors.js';
 
 declare const microsBrand: unique symbol;
 /**
@@ -68,7 +68,7 @@ export const trimAscii = (text: string): string => {
 // (String() here, repr() in Python: the same digits), rounded half up to a micro-dollar.
 const numberMicros = (value: number): bigint => {
   const match = NUMBER.exec(String(value));
-  if (match === null) throw new BudgetError(`${value} is not a number of dollars`);
+  if (match === null) throw new UsageError(`${value} is not a number of dollars`);
   const [, whole = '0', fraction = '', exponent = '0'] = match;
   const coefficient = BigInt(whole + fraction);
   const shift = Number(exponent) - fraction.length + 6;
@@ -87,21 +87,21 @@ const tooLarge = (label: string): string => `${label} is more than ${formatUsd(M
 export function toMicros(value: unknown, label = 'amount'): Micros {
   let micros: bigint;
   if (typeof value === 'bigint') {
-    if (value < 0n) throw new BudgetError(`${label} must be a nonnegative bigint of micro-dollars`);
+    if (value < 0n) throw new UsageError(`${label} must be a nonnegative bigint of micro-dollars`);
     micros = value;
   } else if (typeof value === 'number') {
-    if (!Number.isFinite(value) || value < 0) throw new BudgetError(`${label} must be a nonnegative number of dollars`);
+    if (!Number.isFinite(value) || value < 0) throw new UsageError(`${label} must be a nonnegative number of dollars`);
     micros = numberMicros(value);
   } else if (typeof value === 'string') {
     const match = DOLLARS.exec(trimAscii(value));
-    if (match === null) throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"; got ${JSON.stringify(value)}`);
+    if (match === null) throw new UsageError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"; got ${JSON.stringify(value)}`);
     const [, whole = '0', fraction = ''] = match;
-    if (/[^0]/.test(fraction.slice(6))) throw new BudgetError(`${label} is finer than a millionth of a dollar: ${JSON.stringify(value)}`);
+    if (/[^0]/.test(fraction.slice(6))) throw new UsageError(`${label} is finer than a millionth of a dollar: ${JSON.stringify(value)}`);
     micros = BigInt(whole.replaceAll(',', '')) * MICROS + BigInt(fraction.slice(0, 6).padEnd(6, '0'));
   } else {
-    throw new BudgetError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"`);
+    throw new UsageError(`${label} must be dollars, like "$12.50", 12.5 or "12.50 USDC"`);
   }
-  if (micros > MAX_AMOUNT) throw new BudgetError(tooLarge(label));
+  if (micros > MAX_AMOUNT) throw new UsageError(tooLarge(label));
   return asMicros(micros);
 }
 
@@ -130,7 +130,7 @@ export function toWindowMs(value: unknown, label = 'window'): bigint {
     else ms = DURATION_WORDS[text];
   }
   if (ms === undefined || ms <= 0n || ms > MAX_INTEGER) {
-    throw new BudgetError(`${label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds`);
+    throw new UsageError(`${label} must be a duration like "24h", "7d" or "30m", or a positive number of milliseconds`);
   }
   return ms;
 }
@@ -179,7 +179,7 @@ const checksumOk = (address: string): boolean => {
  */
 export function normalizeWallet(wallet: unknown): string {
   if (typeof wallet !== 'string' || trimAscii(wallet).length === 0) {
-    throw new BudgetError('wallet is required: the address or account the money leaves from');
+    throw new UsageError('wallet is required: the address or account the money leaves from');
   }
   let name = trimAscii(wallet);
   const caip = CAIP10_EVM.exec(name) ?? CAIP10_SOLANA.exec(name);
@@ -187,14 +187,14 @@ export function normalizeWallet(wallet: unknown): string {
   if (EVM_ADDRESS.test(name)) {
     const hex = name.slice(2);
     if (hex !== hex.toLowerCase() && hex !== hex.toUpperCase() && !checksumOk(name)) {
-      throw new BudgetError(`wallet ${JSON.stringify(name)} has an invalid EIP-55 checksum; copy the address or use all lowercase`);
+      throw new UsageError(`wallet ${JSON.stringify(name)} has an invalid EIP-55 checksum; copy the address or use all lowercase`);
     }
     return name.toLowerCase();
   }
   // A mistyped address must not quietly open a second budget.
-  if (/^0x/i.test(name)) throw new BudgetError(`wallet ${JSON.stringify(name)} looks like an EVM address but is not 40 hex digits`);
+  if (/^0x/i.test(name)) throw new UsageError(`wallet ${JSON.stringify(name)} looks like an EVM address but is not 40 hex digits`);
   if (!IDENTIFIER.test(name)) {
-    throw new BudgetError('wallet must be an address or a plain name (letters, digits and _ . : @ / -, at most 128)');
+    throw new UsageError('wallet must be an address or a plain name (letters, digits and _ . : @ / -, at most 128)');
   }
   return name;
 }
@@ -232,12 +232,12 @@ export function defaultBudgetPath(env: NodeJS.ProcessEnv = process.env, platform
 
 /** Refuse an option `what` doesn't take, naming the one that was probably meant. */
 export const checkKeys = (source: unknown, known: ReadonlySet<string>, what: string): void => {
-  if (source === null || typeof source !== 'object') throw new BudgetError(`${what} takes an options object`);
+  if (source === null || typeof source !== 'object') throw new UsageError(`${what} takes an options object`);
   for (const key of Object.keys(source)) {
     if (known.has(key)) continue;
     const plain = key.toLowerCase().replaceAll(/[-_]/g, '');
     const match = [...known].find(candidate => candidate.toLowerCase() === plain);
-    throw new BudgetError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
+    throw new UsageError(`unknown option ${key}${match ? `; did you mean ${match}?` : ''}`);
   }
 };
 
@@ -245,7 +245,7 @@ const positiveCount = (value: unknown, label: string): bigint => {
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
   if (typeof value === 'bigint' && value >= 0n && value <= MAX_INTEGER) return value;
   if (typeof value === 'string' && /^[0-9]+$/.test(trimAscii(value)) && BigInt(trimAscii(value)) <= MAX_INTEGER) return BigInt(trimAscii(value));
-  throw new BudgetError(`${label} must be a whole number of payments`);
+  throw new UsageError(`${label} must be a whole number of payments`);
 };
 
 /** Limits as a caller writes them: dollars, windows and counts. */
@@ -267,7 +267,7 @@ export interface Limits {
   cap?: Micros;
   windowMs?: bigint;
   perPayment?: Micros | null;
-  maxUses?: bigint | null;
+  maxPayments?: bigint | null;
 }
 
 /**
@@ -280,7 +280,7 @@ export function parseLimits(source: LimitOptions): Limits {
   const shorthands = (Object.keys(WINDOWS) as (keyof typeof WINDOWS)[]).filter(key => source[key] !== undefined);
   const explicit = source.cap !== undefined || source.window !== undefined;
   if (shorthands.length + (explicit ? 1 : 0) > 1) {
-    throw new BudgetError('give one rolling limit: perHour, perDay, perWeek, or cap with window');
+    throw new UsageError('give one rolling limit: perHour, perDay, perWeek, or cap with window');
   }
   const [shorthand] = shorthands;
   if (shorthand !== undefined) {
@@ -288,17 +288,17 @@ export function parseLimits(source: LimitOptions): Limits {
     limits.windowMs = WINDOWS[shorthand];
   } else if (explicit) {
     if (source.cap === undefined || source.window === undefined) {
-      throw new BudgetError('cap and window go together, like { cap: "$150", window: "24h" }');
+      throw new UsageError('cap and window go together, like { cap: "$150", window: "24h" }');
     }
     limits.cap = toMicros(source.cap, 'cap');
     limits.windowMs = toWindowMs(source.window);
   }
   if (source.perPayment !== undefined) {
     limits.perPayment = source.perPayment === null ? null : toMicros(source.perPayment, 'perPayment');
-    if (limits.perPayment === 0n) throw new BudgetError('perPayment must be more than $0; to stop every payment, freeze the budget');
+    if (limits.perPayment === 0n) throw new UsageError('perPayment must be more than $0; to stop every payment, freeze the budget');
   }
   if (source.maxPayments !== undefined) {
-    limits.maxUses = source.maxPayments === null ? null : positiveCount(source.maxPayments, 'maxPayments');
+    limits.maxPayments = source.maxPayments === null ? null : positiveCount(source.maxPayments, 'maxPayments');
   }
   return limits;
 }
@@ -308,7 +308,7 @@ export function parseLimits(source: LimitOptions): Limits {
  * With `nulls`, a field set to null reads as "no limit".
  */
 export function describeLimits(
-  { cap, windowMs, perPayment, maxUses }: { cap?: bigint | undefined; windowMs?: bigint | undefined; perPayment?: bigint | null | undefined; maxUses?: bigint | null | undefined },
+  { cap, windowMs, perPayment, maxPayments }: { cap?: bigint | undefined; windowMs?: bigint | undefined; perPayment?: bigint | null | undefined; maxPayments?: bigint | null | undefined },
   { window = windowMs, nulls = false }: { window?: bigint | undefined; nulls?: boolean } = {},
 ): string {
   const parts: string[] = [];
@@ -316,13 +316,13 @@ export function describeLimits(
   if (perPayment !== undefined && perPayment !== null) parts.push(`at most ${formatUsd(perPayment)} a payment`);
   else if (perPayment === null && nulls) parts.push('no limit per payment');
   const countWindow = windowMs ?? window;
-  if (maxUses !== undefined && maxUses !== null && countWindow !== undefined) parts.push(`${maxUses} payments per ${formatWindow(countWindow)}`);
-  else if (maxUses === null && nulls) parts.push('no limit on the number of payments');
+  if (maxPayments !== undefined && maxPayments !== null && countWindow !== undefined) parts.push(`${maxPayments} payments per ${formatWindow(countWindow)}`);
+  else if (maxPayments === null && nulls) parts.push('no limit on the number of payments');
   return parts.join(', ');
 }
 
 /** The CLI flags that would set these limits, for messages that tell an owner what to run. */
-export function limitFlags({ cap, windowMs, perPayment, maxUses }: Limits): string {
+export function limitFlags({ cap, windowMs, perPayment, maxPayments }: Limits): string {
   const flags: string[] = [];
   const dollars = (micros: bigint): string => formatUsd(micros).slice(1).replaceAll(',', '').replace(/\.00$/, '');
   if (cap !== undefined && windowMs !== undefined) {
@@ -331,6 +331,6 @@ export function limitFlags({ cap, windowMs, perPayment, maxUses }: Limits): stri
     else flags.push(`--cap ${dollars(cap)} --window ${formatWindow(windowMs)}`);
   }
   if (perPayment !== undefined && perPayment !== null) flags.push(`--per-payment ${dollars(perPayment)}`);
-  if (maxUses !== undefined && maxUses !== null) flags.push(`--max-payments ${maxUses}`);
+  if (maxPayments !== undefined && maxPayments !== null) flags.push(`--max-payments ${maxPayments}`);
   return flags.join(' ');
 }

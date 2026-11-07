@@ -10,7 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { type GuardedWallet, guardAgenticWallet, type RequestData, usdcAtomic, type WalletRequest } from '../adapters/agentic.js';
 import { openBudget } from '../core/budget.js';
-import { BudgetError, BudgetRefused } from '../core/errors.js';
+import { BudgetRefused, BudgetUnavailable, UsageError } from '../core/errors.js';
 import { formatUsd, normalizeWallet } from '../core/money.js';
 
 const messageOf = (error: unknown): string => String((error as Error | undefined)?.message ?? error);
@@ -34,7 +34,7 @@ export function locateAwal(env: NodeJS.ProcessEnv = process.env, from: string = 
     candidates.push(dirname(createRequire(join(from, 'noop.js')).resolve('awal/package.json')));
   } catch { /* not installed here */ }
   const found = candidates.find(dir => existsSync(join(dir, 'dist', 'ipcClient.js')));
-  if (found === undefined) throw new BudgetError('walletcap awal needs the awal CLI: npm install awal, or set WALLETCAP_AWAL to its package directory');
+  if (found === undefined) throw new BudgetUnavailable('walletcap awal needs the awal CLI: npm install awal, or set WALLETCAP_AWAL to its package directory');
   return found;
 }
 
@@ -49,7 +49,7 @@ const addressOf = (value: unknown): string | undefined => {
 async function openGuard(env: NodeJS.ProcessEnv, request: WalletRequest, options: { wallet?: string; path?: string } = {}): Promise<GuardedWallet> {
   let wallet = env.WALLETCAP_WALLET ?? options.wallet;
   if (wallet === undefined) wallet = addressOf(await request('get-wallet-address', {}));
-  if (wallet === undefined) throw new BudgetError('walletcap could not learn the wallet address; set WALLETCAP_WALLET');
+  if (wallet === undefined) throw new BudgetUnavailable('walletcap could not learn the wallet address; set WALLETCAP_WALLET');
   const path = env.WALLETCAP_PATH ?? options.path;
   const budget = await openBudget({ wallet: normalizeWallet(wallet), ...(path === undefined ? {} : { path }), create: false });
   return guardAgenticWallet(budget, { request });
@@ -76,14 +76,14 @@ function payData(url: string, values: Values): RequestData {
   const jsonOption = (name: string, key: string): void => {
     const value = values[name];
     if (value === undefined) return;
-    try { data[key] = JSON.parse(String(value)); } catch { throw new BudgetError(`The --${name} option must be valid JSON`); }
+    try { data[key] = JSON.parse(String(value)); } catch { throw new UsageError(`The --${name} option must be valid JSON`); }
   };
   jsonOption('data', 'body');
   jsonOption('query', 'queryParams');
   jsonOption('headers', 'headers');
   if (values['max-amount'] !== undefined) {
     const max = Number.parseInt(String(values['max-amount']), 10);
-    if (Number.isNaN(max) || max < 0) throw new BudgetError('--max-amount must be a non-negative integer (USDC atomic units)');
+    if (Number.isNaN(max) || max < 0) throw new UsageError('--max-amount must be a non-negative integer (USDC atomic units)');
     data.maxAmountPerRequest = max;
   }
   if (values.scheme !== undefined) data.preferredScheme = String(values.scheme);

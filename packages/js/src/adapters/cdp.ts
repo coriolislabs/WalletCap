@@ -9,8 +9,8 @@
 // which every process on the host opens, for every rail. append() holds the payment through the
 // ledger's admission, inside one write transaction, so two processes that both pass the SDK's
 // own in-memory check cannot both record a payment past the cap.
-import { type Budget, ledgerOf } from '../core/budget.js';
-import { BudgetError, forAgent } from '../core/errors.js';
+import { type Budget, type Hold, ledgerOf } from '../core/budget.js';
+import { BudgetRefused, forAgent, UsageError } from '../core/errors.js';
 import { OPEN } from '../core/ledger.js';
 import { checkKeys, MAX_AMOUNT } from '../core/money.js';
 import { MAX_PAYMENT_TIMEOUT_SECONDS } from './_x402.js';
@@ -83,13 +83,13 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
   checkKeys(options, OPTION_KEYS, 'cdpStore');
   const ledger = ledgerOf(budget);
   const { asset: given, scale: givenScale = 1n } = options;
-  if (typeof given !== 'string' || given.trim().length === 0) throw new BudgetError('asset is required');
-  if (!(typeof givenScale === 'bigint' || Number.isSafeInteger(givenScale)) || BigInt(givenScale) <= 0n) throw new BudgetError('scale must be a positive integer');
+  if (typeof given !== 'string' || given.trim().length === 0) throw new UsageError('asset is required');
+  if (!(typeof givenScale === 'bigint' || Number.isSafeInteger(givenScale)) || BigInt(givenScale) <= 0n) throw new UsageError('scale must be a positive integer');
   const asset = normalizeAsset(given);
   const scale = BigInt(givenScale);
   const wallet = budget.wallet;
   // The payments this store appended, by CDP's entry, so removeEntry() can find one.
-  const appended = new Map<string, string[]>();
+  const appended = new Map<string, Hold[]>();
 
   return {
     async size() {
@@ -116,24 +116,25 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
 
     async append(entry) {
       const paid = normalizeAsset(entry.asset);
-      if (paid !== asset) throw new BudgetError(`this CDP store counts ${asset}, not ${paid}`);
+      if (paid !== asset) throw new BudgetRefused('asset', `this CDP store counts ${asset}, not ${paid}`);
       let atomic: bigint;
-      try { atomic = BigInt(entry.atomicAmount); } catch { throw new BudgetError('atomicAmount must be an integer'); }
-      if (atomic < 0n) throw new BudgetError('atomicAmount must be an integer');
+      try { atomic = BigInt(entry.atomicAmount); } catch { throw new BudgetRefused('terms', 'atomicAmount must be an integer'); }
+      if (atomic < 0n) throw new BudgetRefused('terms', 'atomicAmount must be an integer');
       if (atomic === 0n) return;
       const spend = atomic * scale;
-      if (spend > MAX_AMOUNT) throw new BudgetError('payment does not fit in the budget unit');
+      if (spend > MAX_AMOUNT) throw new BudgetRefused('terms', 'payment does not fit in the budget unit');
       // CDP records a payment when it creates it and removes it if settlement fails, so it is held
       // at once, from the ledger's own time, until the signed authorization can no longer be
       // redeemed. The entry's own `at` is CDP's, kept only with the payment.
-      let held;
-      try {
-        held = await ledger.hold(wallet, spend, { rail: RAIL, info: fingerprint(entry), withinMs: SETTLES_WITHIN_MS });
-      } catch (error) {
-        throw forAgent(error); // CDP passes it on to the agent: no hold ids, no release instructions
-      }
+      // Held through the budget, so the paying process's own limits bind it too.
       const key = fingerprint(entry);
-      appended.set(key, [...(appended.get(key) ?? []), held.payment]);
+      let held: Hold;
+      try {
+        held = await budget.hold(spend, { rail: RAIL, details: JSON.parse(key) as Record<string, unknown>, settlesWithinMs: SETTLES_WITHIN_MS });
+      } catch (error) {
+        throw forAgent(error); // CDP passes it on to the agent: no hold ids, no void instructions
+      }
+      appended.set(key, [...(appended.get(key) ?? []), held]);
     },
 
     async prune() {
@@ -145,11 +146,11 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
       // authorization may still be out there. So the payment keeps counting for as long as it
       // would have settled, noted refused. Someone who has checked the chain can void it sooner.
       const key = fingerprint(entry);
-      const [payment, ...rest] = appended.get(key) ?? [];
-      if (payment === undefined) return;
+      const [held, ...rest] = appended.get(key) ?? [];
+      if (held === undefined) return;
       if (rest.length === 0) appended.delete(key);
       else appended.set(key, rest);
-      await ledger.note(payment, 'refused', { evidence: 'removed by CDP' });
+      await held.note('refused', 'removed by CDP');
     },
 
     close() {},

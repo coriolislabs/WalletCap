@@ -15,8 +15,8 @@ REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from walletcap import _clock  # noqa: E402
-from walletcap.errors import BudgetError, BudgetRefused  # noqa: E402
-from walletcap.ledger import Ledger, ProcessLimits  # noqa: E402
+from walletcap.errors import BudgetRefused, UsageError  # noqa: E402
+from walletcap._ledger import Ledger, ProcessLimits  # noqa: E402
 
 VECTORS: dict[str, Any] = json.loads(
     (REPO / "spec" / "vectors" / "ledger.json").read_text(encoding="utf-8")
@@ -27,14 +27,14 @@ def _outcome(work: Callable[[], Any], expect: dict[str, Any], check: Callable[[A
     try:
         result = work()
     except BudgetRefused as error:
-        assert "refused" in expect, f"refused {error.reason}: {error}"
-        assert (error.reason, error.source, error.brief) == (
+        assert "refused" in expect, f"refused {error.code}: {error}"
+        assert (error.code, error.source, error.brief) == (
             expect["refused"],
             expect["source"],
             expect["brief"],
         )
         return
-    except BudgetError as error:
+    except UsageError as error:
         assert expect.get("error") == "usage", str(error)
         return
     assert "refused" not in expect and "error" not in expect, f"expected {expect}, got {result}"

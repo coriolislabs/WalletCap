@@ -10,7 +10,7 @@ import { dirname } from 'node:path';
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { attachClock, clockTick, detachClock } from './_clock.js';
-import { BudgetError, BudgetRefused, type RefusalSource } from './errors.js';
+import { BudgetRefused, BudgetUnavailable, isWalletcapError, type RefusalSource, UsageError } from './errors.js';
 import { formatAmount, formatWindow, MAX_AMOUNT, type Micros, normalizeWallet, shortWallet } from './money.js';
 
 /** The file's format. 0.4 upgrades a 0.2 (1) or 0.3 (2) file when it opens it; they refuse 3. */
@@ -170,7 +170,7 @@ const loadSqlite = (): Sqlite => {
   try {
     sqlite = require('node:sqlite') as Sqlite;
   } catch (error) {
-    throw new BudgetError(`walletcap needs Node 22.13 or later, for node:sqlite (${(error as Error).message})`, { cause: error });
+    throw new BudgetUnavailable(`walletcap needs Node 22.13 or later, for node:sqlite (${(error as Error).message})`, { cause: error });
   } finally {
     process.emitWarning = emitWarning;
   }
@@ -228,7 +228,7 @@ export function loadSpec(): { schema: Spec; upgrade: Spec } {
     try {
       return readFileSync(new URL(`../spec/${name}`, import.meta.url), 'utf8');
     } catch (error) {
-      throw new BudgetError(`walletcap's package is missing spec/${name}; reinstall it`, { cause: error });
+      throw new BudgetUnavailable(`walletcap's package is missing spec/${name}; reinstall it`, { cause: error });
     }
   };
   spec = { schema: parseSpec(read('schema.sql')), upgrade: parseSpec(read('upgrade.sql')) };
@@ -260,8 +260,8 @@ const whole = (value: unknown, label: string, { min, max }: { min: bigint; max: 
   if (typeof value === 'bigint') parsed = value;
   else if (typeof value === 'number' && Number.isSafeInteger(value)) parsed = BigInt(value);
   else if (typeof value === 'string' && /^[0-9]+$/.test(value)) parsed = BigInt(value);
-  else throw new BudgetError(`${label} must be an integer`);
-  if (parsed < min || parsed > max) throw new BudgetError(`${label} must be an integer from ${min} to ${max}`);
+  else throw new UsageError(`${label} must be an integer`);
+  if (parsed < min || parsed > max) throw new UsageError(`${label} must be an integer from ${min} to ${max}`);
   return parsed;
 };
 
@@ -276,19 +276,19 @@ export const millis = (value: unknown, label: string, { min = 0n }: { min?: bigi
 /** A payment's identity: the rail's own (eip3009:<from>:<nonce>, tx:<hash>) or the caller's key. */
 export const paymentId = (value: unknown): string => {
   if (typeof value !== 'string' || !ID.test(value)) {
-    throw new BudgetError('a payment id is 1 to 160 of letters, digits and _ . : @ / + -');
+    throw new UsageError('a payment id is 1 to 160 of letters, digits and _ . : @ / + -');
   }
   return value;
 };
 
 const railName = (value: unknown): string => {
-  if (typeof value !== 'string' || !RAIL.test(value)) throw new BudgetError('rail must be a plain identifier');
+  if (typeof value !== 'string' || !RAIL.test(value)) throw new UsageError('rail must be a plain identifier');
   return value;
 };
 
 const text = (value: unknown, label: string, limit: number): string | null => {
   if (value === null || value === undefined) return null;
-  if (typeof value !== 'string' || value.length > limit) throw new BudgetError(`${label} must be a string of at most ${limit} characters`);
+  if (typeof value !== 'string' || value.length > limit) throw new UsageError(`${label} must be a string of at most ${limit} characters`);
   return value;
 };
 
@@ -312,7 +312,7 @@ export const mergedNoteOf = (json: string | null): string | null => parsedNote(j
 
 const heldNote = (heldPayments: bigint, ids: string[]): string => {
   const more = heldPayments > BigInt(ids.length) ? ` and ${heldPayments - BigInt(ids.length)} more` : '';
-  return `${ids.join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can release it`;
+  return `${ids.join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can void it`;
 };
 
 /**
@@ -360,7 +360,7 @@ export function refusal(why: RefusalRow, amount: bigint, limits: OwnLimits, open
 
 // --- The ledger ---------------------------------------------------------------------------
 
-const unusable = (path: string, error: unknown): BudgetError => new BudgetError(`the budget file ${path} cannot be used: ${(error as Error)?.message ?? error}`, { cause: error });
+const unusable = (path: string, error: unknown): BudgetUnavailable => new BudgetUnavailable(`the budget file ${path} cannot be used: ${(error as Error)?.message ?? error}`, { cause: error });
 
 /** A guard trigger's refusal ('walletcap: …'), or null. */
 const guardMessage = (error: unknown): string | null => {
@@ -408,12 +408,12 @@ export class Ledger {
    * `create`. A file another walletcap version wrote is upgraded; a newer one is refused.
    */
   static async open(path: string, { busyTimeoutMs = 30_000, create = false }: LedgerOptions = {}): Promise<Ledger> {
-    if (typeof path !== 'string' || path.length === 0) throw new BudgetError('path is required');
-    if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs <= 0) throw new BudgetError('busyTimeoutMs must be a positive integer');
+    if (typeof path !== 'string' || path.length === 0) throw new UsageError('path is required');
+    if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs <= 0) throw new UsageError('busyTimeoutMs must be a positive integer');
     const { DatabaseSync } = loadSqlite();
     loadSpec();
     if (!existsSync(path)) {
-      if (!create) throw new BudgetError(`no budget file at ${path}`);
+      if (!create) throw new BudgetUnavailable(`no budget file at ${path}`);
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
       try {
         closeSync(openSync(path, 'wx', 0o600));
@@ -432,7 +432,7 @@ export class Ledger {
     try {
       const { version } = db.prepare('SELECT sqlite_version() AS version').get() as { version: string };
       if (!versionAtLeast(version, MIN_SQLITE_VERSION)) {
-        throw new BudgetError(`walletcap needs SQLite ${MIN_SQLITE_VERSION} or later; this Node has ${version}`);
+        throw new BudgetUnavailable(`walletcap needs SQLite ${MIN_SQLITE_VERSION} or later; this Node has ${version}`);
       }
       db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
       db.exec('PRAGMA foreign_keys = ON');
@@ -440,7 +440,7 @@ export class Ledger {
       await ledger.#prepareFile();
     } catch (error) {
       ledger.close();
-      throw error instanceof BudgetError ? error : unusable(path, error);
+      throw isWalletcapError(error) ? error : unusable(path, error);
     }
     return ledger;
   }
@@ -451,9 +451,9 @@ export class Ledger {
   #schema(): string | null {
     const tables = (this.#db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as { name: string }[]).map(row => row.name);
     if (tables.length === 0) return null;
-    if (!tables.includes('budget_meta')) throw new BudgetError(`${this.#path} is a SQLite file, not a walletcap budget`);
+    if (!tables.includes('budget_meta')) throw new BudgetUnavailable(`${this.#path} is a SQLite file, not a walletcap budget`);
     const row = this.#db.prepare("SELECT value FROM budget_meta WHERE key = 'schema'").get() as { value: string } | undefined;
-    if (row === undefined) throw new BudgetError(`${this.#path} has no schema version; it is not a walletcap budget walletcap can read`);
+    if (row === undefined) throw new BudgetUnavailable(`${this.#path} has no schema version; it is not a walletcap budget walletcap can read`);
     return row.value;
   }
 
@@ -482,7 +482,7 @@ export class Ledger {
         this.#db.exec(section(upgrade, 'migrate'));
         this.#db.exec(section(schema, 'guards'));
       } else {
-        throw new BudgetError(`${this.#path} is at schema ${found}, which a newer walletcap wrote; this one reads ${SCHEMA_VERSION}`);
+        throw new BudgetUnavailable(`${this.#path} is at schema ${found}, which a newer walletcap wrote; this one reads ${SCHEMA_VERSION}`);
       }
       this.#db.prepare("INSERT INTO budget_meta (key, value) VALUES ('schema', ?)").run(SCHEMA_VERSION);
     });
@@ -522,7 +522,7 @@ export class Ledger {
 
   // One try: a whole transaction, synchronous, so nothing else on this thread sees it half done.
   #run<T>(begin: string, work: () => T): T {
-    if (this.#closed) throw new BudgetError(`the budget file ${this.#path} is closed`);
+    if (this.#closed) throw new BudgetUnavailable(`the budget file ${this.#path} is closed`);
     clockTick();
     try {
       this.#db.exec(begin);
@@ -535,7 +535,7 @@ export class Ledger {
       return result;
     } catch (error) {
       try { this.#db.exec('ROLLBACK'); } catch { /* already rolled back */ }
-      throw error instanceof BudgetError || error instanceof Busy ? error : this.#failure(error);
+      throw isWalletcapError(error) || error instanceof Busy ? error : this.#failure(error);
     }
   }
 
@@ -551,7 +551,7 @@ export class Ledger {
         if (!(error instanceof Busy)) throw error;
         const left = deadline - Date.now();
         if (left <= 0) {
-          throw new BudgetError(`the budget file ${this.#path} is busy: another process held its write lock for more than ${this.#busyTimeoutMs} ms`, { cause: error.cause });
+          throw new BudgetUnavailable(`the budget file ${this.#path} is busy: another process held its write lock for more than ${this.#busyTimeoutMs} ms`, { cause: error.cause });
         }
         await sleep(Math.min(left, wait + Math.random() * wait));
         wait = Math.min(wait * 2, MAX_BACKOFF_MS);
@@ -561,13 +561,13 @@ export class Ledger {
 
   #failure(error: unknown): Error {
     const guard = guardMessage(error);
-    if (guard !== null) return new BudgetError(guard, { cause: error });
+    if (guard !== null) return new UsageError(guard, { cause: error });
     if (isBusy(error)) return new Busy('busy', { cause: error });
     return unusable(this.#path, error);
   }
 
-  #noBudget(wallet: string): BudgetError {
-    return new BudgetError(`${shortWallet(wallet)} has no budget in ${this.#path}`);
+  #noBudget(wallet: string): BudgetUnavailable {
+    return new BudgetUnavailable(`${shortWallet(wallet)} has no budget in ${this.#path}`);
   }
 
   /** The ledger's time, in milliseconds. */
@@ -591,7 +591,7 @@ export class Ledger {
       max_payments: maxPayments === null ? null : whole(maxPayments, 'maxPayments', { min: 0n, max: 1n << 62n }),
     };
     return this.#write(() => {
-      if (this.#get<BudgetRow>('budget', { wallet }) !== null) throw new BudgetError(`${shortWallet(wallet)} already has a budget in ${this.#path}`);
+      if (this.#get<BudgetRow>('budget', { wallet }) !== null) throw new UsageError(`${shortWallet(wallet)} already has a budget in ${this.#path}`);
       this.#all('create_budget', values);
       return this.#get<BudgetRow>('budget', { wallet }) as BudgetRow;
     });
@@ -684,13 +684,13 @@ export class Ledger {
         if (existing.wallet === wallet && BigInt(existing.amount) === args.amount) {
           return { payment: args.payment as string, at: null, until: null, state: existing.state, created: false };
         }
-        throw new BudgetError(`payment ${args.payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`);
+        throw new UsageError(`payment ${args.payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`);
       }
       if (why.settles_too_soon) {
         const iso = (ms: bigint): string => new Date(Number(ms)).toISOString();
-        throw new BudgetError(`settlesBy ${iso(args.until ?? 0n)} is not after now (${iso(why.now)}): a payment can't settle before it is made`);
+        throw new UsageError(`settlesBy ${iso(args.until ?? 0n)} is not after now (${iso(why.now)}): a payment can't settle before it is made`);
       }
-      if (why.code === null) throw new BudgetError('walletcap could not hold the payment, and the ledger gives no reason');
+      if (why.code === null) throw new BudgetUnavailable('walletcap could not hold the payment, and the ledger gives no reason');
       throw refusal(why, args.amount, own, () => this.#all<{ payment: string }>('open_ids', { wallet }).map(row => row.payment));
     });
   }
@@ -701,10 +701,10 @@ export class Ledger {
     return this.#write(() => {
       const moved = this.#get(statement, { payment: id, ...args });
       const current = this.#get<PaymentRow>('payment', { payment: id });
-      if (current === null) throw new BudgetError(`no payment ${id} in ${this.#path}`);
+      if (current === null) throw new UsageError(`no payment ${id} in ${this.#path}`);
       if (moved === null) {
         const reason = refused(current);
-        if (reason !== null) throw new BudgetError(reason);
+        if (reason !== null) throw new UsageError(reason);
       }
       return current;
     });
@@ -727,7 +727,7 @@ export class Ledger {
       until: until === null ? null : millis(until, 'until'),
       within_ms: withinMs === null ? null : millis(withinMs, 'withinMs', { min: 1n }),
     };
-    if ((args.until === null) === (args.within_ms === null)) throw new BudgetError('bound takes until or withinMs');
+    if ((args.until === null) === (args.within_ms === null)) throw new UsageError('bound takes until or withinMs');
     return this.#move('bound', payment, args, current => (current.state === 'held' && current.until === null && args.until !== null
       ? `settlesBy ${new Date(Number(args.until)).toISOString()} is not after now: a payment can't settle before it is made`
       : null));
@@ -735,7 +735,7 @@ export class Ledger {
 
   /** Note a held payment's outcome: 'unknown' or 'refused'. It counts the same. */
   note(payment: string, outcome: Outcome, { evidence = null }: { evidence?: string | null } = {}): Promise<PaymentRow> {
-    if (outcome !== 'unknown' && outcome !== 'refused') throw new BudgetError("outcome is 'unknown' or 'refused'");
+    if (outcome !== 'unknown' && outcome !== 'refused') throw new UsageError("outcome is 'unknown' or 'refused'");
     return this.#move('note', payment, { outcome, evidence: text(evidence, 'evidence', EVIDENCE_LIMIT) }, () => null);
   }
 
@@ -772,7 +772,7 @@ export class Ledger {
    * The owner's bulk release: void every held payment of unknown or refused outcome, held at
    * least `olderThanMs` ago, that can no longer settle. Returns { payment, amount } for each.
    */
-  voidUnknown(name: string, olderThanMs: bigint, { evidence = 'released by its owner: unknown or refused outcome' }: { evidence?: string } = {}): Promise<{ payment: string; amount: Micros }[]> {
+  voidUnknown(name: string, olderThanMs: bigint, { evidence = 'voided by its owner: unknown or refused outcome' }: { evidence?: string } = {}): Promise<{ payment: string; amount: Micros }[]> {
     const wallet = walletKey(name);
     const age = millis(olderThanMs, 'olderThanMs');
     const note = text(evidence, 'evidence', EVIDENCE_LIMIT);

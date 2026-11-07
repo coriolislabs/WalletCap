@@ -1,17 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
-// The budget: one per wallet, counted across every process, replica, key, permission and payment
-// rail on one host that pays from it. The core imports no vendor adapter; the adapters
-// (src/adapters) import the core.
+// The payer's handle: one wallet's budget, counted across every process, replica, key,
+// permission and payment rail on one host that pays from it. A payer checks, holds and pays,
+// and reads what counts; changing limits, freezing and voiding or settling by id are the
+// owner's (owner.ts). The core imports no vendor adapter; the adapters import the core.
 //
 // Agent payment kits count "spent so far" per process, per key, per permission or per period, so
 // a restart, a second replica, one more key or the next period starts the count again. This
 // budget is counted per wallet, in a file every process on the host shares, over a rolling
-// window. Changing a limit never resets what has been spent, a restart can lower a limit but
-// never raise one, and if the count cannot be read, nothing is paid.
+// window. Changing a limit never resets what has been spent, the limits a payer passes only
+// tighten things for its own process, and if the count cannot be read, nothing is paid.
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { BudgetError, isNotSent, PaymentNotRecorded, type RefusalReason } from './errors.js';
-import { type BudgetRow, Ledger, mergedNoteOf, OPEN, type Outcome, type PaymentRow, SETTLES_BY } from './ledger.js';
+import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, UsageError } from './errors.js';
+import {
+  type BudgetRow, Ledger, mergedNoteOf, OPEN, type Outcome, type PaymentRow, type PaymentState, type ProcessLimits, type StatusRow,
+} from './ledger.js';
 import {
   checkKeys, defaultBudgetPath, describeLimits, type Dollars, expandHome, formatUsd, formatWindow, type LimitOptions, type Limits, limitFlags,
   type Micros, normalizeWallet, parseLimits, shortWallet, toMicros,
@@ -23,12 +26,13 @@ const ledgers = new WeakMap<Budget, Ledger>();
 /** Internal, for the adapters (not exported by the package): the ledger a budget counts in. */
 export function ledgerOf(budget: Budget): Ledger {
   const ledger = ledgers.get(budget);
-  if (ledger === undefined) throw new BudgetError('that is not a budget walletcap opened');
+  if (ledger === undefined) throw new UsageError('that is not a budget walletcap opened');
   return ledger;
 }
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
 const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
+const HOLD_KEYS = new Set(['id', 'to', 'note', 'details', 'rail', 'settlesBy', 'settlesWithinMs']);
 const TO_LIMIT = 256;
 const NOTE_LIMIT = 1024;
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -38,18 +42,21 @@ export interface BudgetOptions extends LimitOptions {
   wallet: string;
   /** The budget file. Defaults to $WALLETCAP_PATH, else the per-user state directory. */
   path?: string;
-  /** Create the file and the wallet's budget if missing. Defaults to false: only its owner's `walletcap set` creates them. Pass true only for a demo or a first-run setup. */
+  /**
+   * Create the file and the wallet's budget, with these limits, if missing. Defaults to false:
+   * its owner creates them (`walletcap set`). Pass true only for a demo or a first-run setup.
+   */
   create?: boolean;
   /** How long to wait for another process's write, in milliseconds. Defaults to 30000. The wait never blocks the event loop. */
   busyTimeoutMs?: number;
-  /** Called instead of process.emitWarning when the file keeps a limit tighter than the code asks for. */
+  /** Called instead of process.emitWarning when a limit this code asks for is looser than the budget's, and so does nothing. */
   onWarning?: (message: string) => void;
 }
 
 /** Whether an amount would be paid right now. */
 export interface Check {
   ok: boolean;
-  reason?: RefusalReason;
+  code?: RefusalCode;
   message?: string;
   /** The message without the ids of open payments or what their owner can do about them. */
   brief?: string;
@@ -57,8 +64,13 @@ export interface Check {
   remaining: Micros;
 }
 
-/** What a payment is for, and how long it can still settle. */
-export interface PaymentDetails {
+/** A payment's identity, what it is for, and how long it can still settle. */
+export interface HoldOptions {
+  /**
+   * The payment's identity: the rail's own (eip3009:<from>:<nonce>, tx:<hash>) or your own key.
+   * One id is one payment: holding it again returns that payment. Defaults to a new one.
+   */
+  id?: string;
   /** Who is paid, for the history. */
   to?: string;
   /** What for, for the history. */
@@ -68,15 +80,12 @@ export interface PaymentDetails {
   /** The rail, for the history. Defaults to 'js'. */
   rail?: string;
   /**
-   * The last moment the payment could still settle, after now (a moment that isn't is refused).
-   * An open reservation, one whose outcome is unknown included, stops counting one window after
-   * it. Without it, an open reservation counts until it is committed or released.
+   * The last moment the payment could still settle, after now. A held payment counts until one
+   * window after it; without one, it counts until it is settled or voided.
    */
   settlesBy?: Date | number | bigint;
   /** The same, as a time from now by the ledger's clock, in milliseconds. */
-  settlesWithinMs?: bigint;
-  /** The payment's identity on its rail (eip3009:<from>:<nonce>, tx:<hash>) or your own key: one id is one payment. */
-  id?: string;
+  settlesWithinMs?: number | bigint;
 }
 
 /** What has been spent, what is in flight and what is left. Amounts are micro-dollars. */
@@ -88,9 +97,9 @@ export interface Status {
   window: bigint;
   perPayment: Micros | null;
   maxPayments: bigint | null;
-  /** Settled in the window. */
+  /** Settled payments that count in the window. */
   spent: Micros;
-  /** Held and not yet settled or voided. */
+  /** Held payments that count: not yet settled or voided. */
   inFlight: Micros;
   remaining: Micros;
   payments: bigint;
@@ -113,8 +122,8 @@ export interface Payment {
   tx?: string;
 }
 
-/** An open payment that still counts against the budget. */
-export interface Hold {
+/** A held payment that still counts against the budget. */
+export interface HeldPayment {
   id: string;
   amount: Micros;
   /**
@@ -123,34 +132,51 @@ export interface Hold {
    */
   reason: 'in flight' | Outcome;
   at: Date;
-  /** How long ago it was taken, in milliseconds. */
+  /** How long ago it was held, in milliseconds. */
   ageMs: bigint;
+  /** The last moment it could settle, or null if nothing bounds it. */
+  settlesBy: Date | null;
   /** When it stops counting, or null if only evidence ends it. */
-  until: Date | null;
+  countsUntil: Date | null;
   rail: string;
   to?: string;
   note?: string;
   error?: string;
 }
 
+/** One payment as its owner sees it. */
+export interface PaymentRecord extends Payment {
+  wallet: string;
+  state: PaymentState;
+  settlesBy: Date | null;
+  countsUntil: Date | null;
+}
+
 type Info = Record<string, unknown>;
 
 const positive = (micros: Micros): Micros => {
-  if (micros === 0n) throw new BudgetError('the amount must be more than $0');
+  if (micros === 0n) throw new UsageError('the amount must be more than $0');
   return micros;
 };
 
-const millis = (value: unknown, label: string): bigint => {
-  if (value instanceof Date) return BigInt(value.getTime());
+/** A moment as milliseconds since the epoch: a Date, or a whole number. */
+export const momentMs = (value: unknown, label: string): bigint => {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return BigInt(value.getTime());
   if (typeof value === 'bigint') return value;
   if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
-  throw new BudgetError(`${label} must be a Date or milliseconds since the epoch`);
+  throw new UsageError(`${label} must be a Date or milliseconds since the epoch`);
+};
+
+const durationMs = (value: unknown, label: string): bigint => {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
+  throw new UsageError(`${label} must be a whole number of milliseconds`);
 };
 
 const describe = (to: unknown, note: unknown, details: unknown): Info | null => {
-  if (to !== undefined && (typeof to !== 'string' || to.length > TO_LIMIT)) throw new BudgetError(`to must be a string of at most ${TO_LIMIT} characters`);
-  if (note !== undefined && (typeof note !== 'string' || note.length > NOTE_LIMIT)) throw new BudgetError(`note must be a string of at most ${NOTE_LIMIT} characters`);
-  if (details !== undefined && (details === null || typeof details !== 'object' || Array.isArray(details))) throw new BudgetError('details must be a plain object');
+  if (to !== undefined && (typeof to !== 'string' || to.length > TO_LIMIT)) throw new UsageError(`to must be a string of at most ${TO_LIMIT} characters`);
+  if (note !== undefined && (typeof note !== 'string' || note.length > NOTE_LIMIT)) throw new UsageError(`note must be a string of at most ${NOTE_LIMIT} characters`);
+  if (details !== undefined && (details === null || typeof details !== 'object' || Array.isArray(details))) throw new UsageError('details must be a plain object');
   const info: Info = { ...(details as Info | undefined), ...(to === undefined ? {} : { to }), ...(note === undefined ? {} : { note }) };
   for (const key of Object.keys(info)) if (info[key] === undefined || info[key] === null) delete info[key];
   return Object.keys(info).length === 0 ? null : info;
@@ -178,6 +204,10 @@ const parseInfo = (text: string | null): Info => {
 
 const textOf = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
 
+const errorText = (error: unknown): string => String((error as Error)?.message ?? error).slice(0, 200);
+
+// --- Views of the ledger's rows, shared with the owner's handle -------------------------------
+
 const label = (row: PaymentRow, info: Info): Payment['status'] => {
   if (row.state === 'settled') return info.outcome === 'unknown' ? 'unknown' : 'settled';
   if (row.state === 'void') return 'void';
@@ -185,321 +215,73 @@ const label = (row: PaymentRow, info: Info): Payment['status'] => {
   return row.outcome ?? 'in flight';
 };
 
+const settlesByOf = (row: PaymentRow): Date | null => (row.until === null ? null : new Date(Number(row.until)));
+
 // When a payment stops counting, or null while only evidence can end it.
-const countsUntil = (row: PaymentRow): Date | null => (row.counts_from === null || row.counts_from === OPEN ? null : new Date(Number(row.counts_from + row.window_ms)));
+const countsUntilOf = (row: PaymentRow): Date | null => (row.counts_from === null || row.counts_from === OPEN
+  ? null
+  : new Date(Number(row.counts_from + row.window_ms)));
 
 const noteOf = (info: Info): string | undefined => textOf(info.note) ?? (info.network ? String(info.network) : undefined);
 
-/** An amount taken from the budget for one payment, until it is committed or released. */
-export class Reservation {
-  readonly #ledger: Ledger;
-  readonly #id: string;
-  readonly #amount: Micros;
-  #info: Info | null;
-  #state: 'open' | 'committed' | 'released' = 'open';
-
-  /** Internal: Budget.reserve() makes these. */
-  constructor(ledger: Ledger, id: string, amount: Micros, info: Info | null) {
-    this.#ledger = ledger;
-    this.#id = id;
-    this.#amount = amount;
-    this.#info = info;
-  }
-
-  /** The payment's identity in the ledger: a good idempotency key for the rail you pay through. */
-  get id(): string { return this.#id; }
-
-  /** In micro-dollars. */
-  get amount(): Micros { return this.#amount; }
-
-  get open(): boolean { return this.#state === 'open'; }
-
-  /**
-   * The payment settled. It counts for one rolling window from now, and, with a settlesBy, at
-   * least until one window past it: a commit never shortens a hold.
-   */
-  async commit({ tx }: { tx?: string | undefined } = {}): Promise<void> {
-    if (!this.open) throw new BudgetError(`reservation ${this.#id} is already ${this.#state}`);
-    await this.#ledger.settle(this.#id, { evidence: tx ?? null });
-    this.#state = 'committed';
-  }
-
-  /** The payment never left the wallet: give its amount back. */
-  async release(): Promise<void> {
-    if (!this.open) throw new BudgetError(`reservation ${this.#id} is already ${this.#state}`);
-    await this.#ledger.void(this.#id, { evidence: 'not sent' });
-    this.#state = 'released';
-  }
-
-  /** Note what is known about an open payment, like { outcome: 'unknown' }; it keeps counting. */
-  async annotate(fields: { outcome?: Outcome; error?: string } & Info): Promise<void> {
-    if (!this.open) return;
-    this.#info = { ...this.#info, ...fields };
-    if (fields.outcome !== undefined) await this.#ledger.note(this.#id, fields.outcome, { evidence: fields.error ?? null });
-  }
-
-  // Internal (the key is not exported): an open payment learns, once, the last moment it could settle.
-  async [SETTLES_BY](bound: { until?: bigint; withinMs?: bigint }): Promise<void> {
-    if (this.open) await this.#ledger.bound(this.#id, { until: bound.until ?? null, withinMs: bound.withinMs ?? null });
-  }
+/** Internal: a history row as a Payment. */
+export function paymentOf(row: PaymentRow): Payment {
+  const info = parseInfo(row.info);
+  const payment: Payment = {
+    id: row.payment, amount: row.amount, status: label(row, info), counting: row.counting === 1n, at: new Date(Number(row.held_at)), rail: row.rail,
+  };
+  const to = textOf(info.to) ?? textOf(info.payTo);
+  const note = noteOf(info);
+  const tx = row.settled_by ?? textOf(info.tx);
+  if (to !== undefined) payment.to = to;
+  if (note !== undefined) payment.note = note;
+  if (tx !== undefined) payment.tx = tx;
+  return payment;
 }
 
-/**
- * Open the wallet's budget. Its owner creates it first with `walletcap set`; pass
- * `create: true` only to create it on first use (a demo or a first-run setup). Limits are
- * dollars: strings ("$150", "12.50 USDC"), numbers (12.5) or bigint micro-dollars.
- *
- *   // The owner creates it once: npx walletcap set --wallet 0x… --per-payment 50 --per-day 150
- *   const budget = await openBudget({ wallet: '0x…', perPayment: '$50', perDay: '$150' });
- *   await budget.pay('$12.50', () => sendUsdc(to, amount));
- */
-export function openBudget(options: BudgetOptions): Promise<Budget> {
-  return Budget.open(options);
+/** Internal: a payment row as its owner sees it. */
+export function recordOf(row: PaymentRow): PaymentRecord {
+  return { ...paymentOf(row), wallet: row.wallet, state: row.state, settlesBy: settlesByOf(row), countsUntil: countsUntilOf(row) };
 }
 
-export class Budget {
-  readonly #ledger: Ledger;
-  readonly #wallet: string;
-  readonly #path: string;
-
-  private constructor(ledger: Ledger, wallet: string, path: string) {
-    this.#ledger = ledger;
-    this.#wallet = wallet;
-    this.#path = path;
-  }
-
-  /** The same as openBudget(). */
-  static async open(options: BudgetOptions): Promise<Budget> {
-    checkKeys(options, OPTION_KEYS, 'openBudget');
-    const wallet = normalizeWallet(options.wallet);
-    const path = resolve(expandHome(options.path ?? defaultBudgetPath()));
-    // Fail closed: a missing budget file refuses every payment until its owner creates it.
-    // `create: true` is for a demo or a first-run setup.
-    const create = options.create ?? false;
-    const limits = parseLimits(options);
-    if (!create && !existsSync(path)) {
-      throw new BudgetError(`no budget file at ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`);
-    }
-    const ledger = await Ledger.open(path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000, create });
-    const budget = new Budget(ledger, wallet, path);
-    ledgers.set(budget, ledger);
-    try {
-      await budget.#ensure(limits, create, options.onWarning);
-    } catch (error) {
-      ledger.close();
-      throw error;
-    }
-    return budget;
-  }
-
-  // Create the budget with `limits`, or move its stored limits toward them: a tighter limit is
-  // stored, a looser one is reported and left alone. A restart can lower a limit; only
-  // setLimits() raises one.
-  async #ensure(limits: Limits, create: boolean, onWarning: ((message: string) => void) | undefined): Promise<void> {
-    let row = await this.#ledger.budget(this.#wallet);
-    if (row === null) {
-      if (!create) throw new BudgetError(`${shortWallet(this.#wallet)} has no budget in ${this.#path}`);
-      if (limits.cap === undefined || limits.windowMs === undefined) {
-        throw new BudgetError(`${shortWallet(this.#wallet)} has no budget yet: give it a rolling limit, like perDay: '$150'`);
-      }
-      await this.#ledger.createBudget(this.#wallet, {
-        cap: limits.cap, windowMs: limits.windowMs, perPayment: limits.perPayment ?? null, maxPayments: limits.maxUses ?? null,
-      });
-      return;
-    }
-    if (row.unit !== 'usd' && row.unit !== 'usdc') throw new BudgetError(`${shortWallet(this.#wallet)}'s budget counts in ${row.unit}, not usd`);
-    const lowered: { cap?: bigint; perPayment?: bigint | null; maxPayments?: bigint | null } = {};
-    let looser = false;
-    const sameWindow = limits.windowMs === undefined || limits.windowMs === row.window_ms;
-    if (limits.cap !== undefined) {
-      if (!sameWindow) looser = true;
-      else if (limits.cap < row.cap) lowered.cap = limits.cap;
-      else if (limits.cap > row.cap) looser = true;
-    }
-    if (limits.perPayment !== undefined) {
-      const asked = limits.perPayment;
-      if (asked !== null && (row.per_payment === null || asked < row.per_payment)) lowered.perPayment = asked;
-      else if (row.per_payment !== null && (asked === null || asked > row.per_payment)) looser = true;
-    }
-    if (limits.maxUses !== undefined && limits.maxUses !== row.max_payments) {
-      const asked = limits.maxUses;
-      if (sameWindow && asked !== null && (row.max_payments === null || asked < row.max_payments)) lowered.maxPayments = asked;
-      else looser = true;
-    }
-    if (Object.keys(lowered).length > 0) row = await this.#ledger.setLimits(this.#wallet, lowered);
-    if (looser) this.#warnKept(onWarning, row, limits);
-  }
-
-  /** The name the budget is kept under: an EVM address, lowercased. */
-  get wallet(): string { return this.#wallet; }
-
-  /** The budget file. */
-  get path(): string { return this.#path; }
-
-  #warnKept(onWarning: ((message: string) => void) | undefined, row: BudgetRow, asked: Limits): void {
-    const stored = { cap: row.cap, windowMs: row.window_ms, perPayment: row.per_payment, maxUses: row.max_payments };
-    const merged = mergedNoteOf(row.merged_from);
-    const message = `walletcap: ${shortWallet(this.#wallet)} keeps its stored limits (${describeLimits(stored)}); `
-      + `your code asks for ${describeLimits(asked, { window: row.window_ms, nulls: true })}. A restart can lower a limit but never raise one. `
-      + `To raise it, its owner runs: npx walletcap set --wallet ${this.#wallet}${pathFlag(this.#path)} ${limitFlags(asked)}`.trimEnd()
-      + (merged === null ? '' : `. ${merged}`);
-    if (typeof onWarning === 'function') onWarning(message);
-    else process.emitWarning(message, { type: 'BudgetWarning', code: 'WALLETCAP_LIMIT_KEPT' });
-  }
-
-  /** Whether `amount` would be paid right now, without taking it. */
-  async check(amount: Dollars): Promise<Check> {
-    const { refusal, remaining } = await this.#ledger.check(this.#wallet, positive(toMicros(amount)));
-    return refusal === null
-      ? { ok: true, remaining }
-      : { ok: false, reason: refusal.reason, message: refusal.message, brief: refusal.brief, remaining };
-  }
-
-  /**
-   * Take `amount` before paying, or throw BudgetRefused. Commit the reservation when the
-   * payment settles; release it only if the payment never left. `settlesBy` is the last moment
-   * the payment could still settle, if known: an open reservation stops counting one window
-   * after it. It must be after now.
-   */
-  async reserve(amount: Dollars, { to, note, details, rail = 'js', settlesBy, settlesWithinMs, id }: PaymentDetails = {}): Promise<Reservation> {
-    const micros = positive(toMicros(amount));
-    const info = describe(to, note, details);
-    const held = await this.#ledger.hold(this.#wallet, micros, {
-      payment: id ?? null,
-      rail,
-      info: info === null ? null : JSON.stringify(info),
-      until: settlesBy === undefined || settlesBy === null ? null : millis(settlesBy, 'settlesBy'),
-      withinMs: settlesWithinMs ?? null,
-    });
-    return new Reservation(this.#ledger, held.payment, micros, info);
-  }
-
-  /**
-   * Reserve `amount`, run `fn` to make the payment, then record it. If `fn` throws, the payment
-   * may still have left, so it stays in flight, marked unknown: it counts until one window past
-   * `settlesBy`, or, without one, until its owner releases it. An error tagged with notSent()
-   * gives the amount back. If the payment went through but can't be recorded, it throws
-   * PaymentNotRecorded, which is not a BudgetError: don't pay again. `fn` receives the
-   * reservation; its id makes a good idempotency key. Returns what `fn` returns.
-   */
-  async pay<T>(amount: Dollars, fn: (reservation: Reservation) => T | Promise<T>, options: PaymentDetails = {}): Promise<T> {
-    if (typeof fn !== 'function') throw new BudgetError('pay(amount, fn) calls fn to make the payment, and fn is missing');
-    const reservation = await this.reserve(amount, options);
-    let result: T;
-    try {
-      result = await fn(reservation);
-    } catch (error) {
-      if (reservation.open) {
-        try {
-          if (isNotSent(error)) await reservation.release();
-          else await reservation.annotate({ outcome: 'unknown', error: String((error as Error)?.message ?? error).slice(0, 200) });
-        } catch {
-          // Recording failed; the reservation stays open, and keeps counting.
-        }
-      }
-      throw error;
-    }
-    if (reservation.open) {
-      try {
-        await reservation.commit({ tx: transactionOf(result) });
-      } catch (error) {
-        throw new PaymentNotRecorded(reservation.id, { cause: error });
-      }
-    }
-    return result;
-  }
-
-  /** What has been spent, what is in flight and what is left, in micro-dollars, plus a one-line summary. */
-  async status(): Promise<Status> {
-    const s = await this.#ledger.status(this.#wallet);
-    const status = {
-      wallet: this.#wallet,
-      path: this.#path,
-      cap: s.cap,
-      window: s.window_ms,
-      perPayment: s.per_payment,
-      maxPayments: s.max_payments,
-      spent: s.spent,
-      inFlight: s.in_flight,
-      remaining: s.remaining,
-      payments: s.payments,
-      frozen: s.frozen_at !== null,
-    };
-    return { ...status, summary: summarize(status) };
-  }
-
-  /** Change the limits, up or down. What was spent keeps counting: nothing resets. */
-  async setLimits(limits: LimitOptions): Promise<Status> {
-    checkKeys(limits, new Set(LIMIT_KEYS), 'setLimits');
-    const parsed = parseLimits(limits);
-    if (Object.keys(parsed).length === 0) throw new BudgetError("setLimits needs a limit, like { perDay: '$150' }");
-    const { maxUses, ...rest } = parsed;
-    await this.#ledger.setLimits(this.#wallet, { ...rest, ...(maxUses === undefined ? {} : { maxPayments: maxUses }) });
-    return this.status();
-  }
-
-  /** Refuse every payment from this wallet, on every rail and in every process, until unfreeze(). */
-  async freeze(): Promise<void> { await this.#ledger.freeze(this.#wallet); }
-
-  async unfreeze(): Promise<void> { await this.#ledger.unfreeze(this.#wallet); }
-
-  /**
-   * The open payments that still count, oldest first, with why each is open: 'in flight' (no
-   * outcome yet), 'refused' (the payee said it failed but may still hold the authorization) or
-   * 'unknown' (the payment call failed after the money may have left). `until` is when it stops
-   * counting, or null if only evidence ends it. Its owner releases one that never left the wallet.
-   */
-  async holds(): Promise<Hold[]> {
-    return (await this.#ledger.counting(this.#wallet, { heldOnly: true })).map(row => {
-      const info = parseInfo(row.info);
-      const hold: Hold = {
-        id: row.payment,
-        amount: row.amount,
-        reason: row.outcome ?? 'in flight',
-        at: new Date(Number(row.held_at)),
-        ageMs: row.now - row.held_at,
-        until: countsUntil(row),
-        rail: row.rail,
-      };
-      const to = textOf(info.to) ?? textOf(info.payTo);
-      const note = noteOf(info);
-      const error = row.noted ?? textOf(info.error);
-      if (to !== undefined) hold.to = to;
-      if (note !== undefined) hold.note = note;
-      if (error !== undefined) hold.error = error;
-      return hold;
-    });
-  }
-
-  /** The newest payments first. */
-  async history({ limit = 20 }: { limit?: number | string } = {}): Promise<Payment[]> {
-    return (await this.#ledger.history(this.#wallet, { limit })).map(row => {
-      const info = parseInfo(row.info);
-      const payment: Payment = {
-        id: row.payment,
-        amount: row.amount,
-        status: label(row, info),
-        counting: row.counting === 1n,
-        at: new Date(Number(row.held_at)),
-        rail: row.rail,
-      };
-      const to = textOf(info.to) ?? textOf(info.payTo);
-      const note = noteOf(info);
-      const tx = row.settled_by ?? textOf(info.tx);
-      if (to !== undefined) payment.to = to;
-      if (note !== undefined) payment.note = note;
-      if (tx !== undefined) payment.tx = tx;
-      return payment;
-    });
-  }
-
-  close(): void { this.#ledger.close(); }
-
-  [Symbol.dispose](): void { this.close(); }
+/** Internal: a counting row of a held payment. */
+export function heldPaymentOf(row: PaymentRow): HeldPayment {
+  const info = parseInfo(row.info);
+  const held: HeldPayment = {
+    id: row.payment,
+    amount: row.amount,
+    reason: row.outcome ?? 'in flight',
+    at: new Date(Number(row.held_at)),
+    ageMs: row.now - row.held_at,
+    settlesBy: settlesByOf(row),
+    countsUntil: countsUntilOf(row),
+    rail: row.rail,
+  };
+  const to = textOf(info.to) ?? textOf(info.payTo);
+  const note = noteOf(info);
+  const error = row.noted ?? textOf(info.error);
+  if (to !== undefined) held.to = to;
+  if (note !== undefined) held.note = note;
+  if (error !== undefined) held.error = error;
+  return held;
 }
 
-function pathFlag(path: string): string {
-  return path === resolve(defaultBudgetPath()) ? '' : ` --path ${JSON.stringify(path)}`;
+/** Internal: a status row as a Status. */
+export function statusOf(row: StatusRow, path: string): Status {
+  const status = {
+    wallet: row.wallet,
+    path,
+    cap: row.cap,
+    window: row.window_ms,
+    perPayment: row.per_payment,
+    maxPayments: row.max_payments,
+    spent: row.spent,
+    inFlight: row.in_flight,
+    remaining: row.remaining,
+    payments: row.payments,
+    frozen: row.frozen_at !== null,
+  };
+  return { ...status, summary: summarize(status) };
 }
 
 function summarize({ wallet, cap, window, perPayment, maxPayments, spent, inFlight, remaining, frozen }: Omit<Status, 'summary' | 'path' | 'payments'>): string {
@@ -509,4 +291,282 @@ function summarize({ wallet, cap, window, perPayment, maxPayments, spent, inFlig
   if (maxPayments !== null) parts.push(`at most ${maxPayments} payments per ${formatWindow(window)}`);
   if (frozen) parts.push('FROZEN');
   return parts.join(' · ');
+}
+
+/** Internal: ` --path "<file>"` unless it is the default file, for commands a message names. */
+export function pathFlag(path: string): string {
+  return path === resolve(defaultBudgetPath()) ? '' : ` --path ${JSON.stringify(path)}`;
+}
+
+// --- The paying process's own limits ---------------------------------------------------------
+
+/**
+ * The limits this process passed that are tighter than the budget's, as the ledger takes them,
+ * and whether any of them was looser, and so does nothing. A limit in another window than the
+ * budget's binds as its own.
+ */
+function processLimits(row: BudgetRow, asked: Limits): { limits: ProcessLimits; looser: boolean } {
+  const limits: ProcessLimits = {};
+  let looser = false;
+  if (asked.perPayment !== undefined) {
+    if (asked.perPayment === null) looser ||= row.per_payment !== null;
+    else if (row.per_payment === null || asked.perPayment < row.per_payment) limits.perPayment = asked.perPayment;
+    else if (asked.perPayment > row.per_payment) looser = true;
+  }
+  if (asked.cap !== undefined && asked.windowMs !== undefined) {
+    if (asked.windowMs !== row.window_ms || asked.cap < row.cap) {
+      limits.cap = asked.cap;
+      limits.windowMs = asked.windowMs;
+    } else if (asked.cap > row.cap) {
+      looser = true;
+    }
+  }
+  if (asked.maxPayments !== undefined) {
+    const window = asked.windowMs ?? row.window_ms;
+    if (asked.maxPayments === null) {
+      looser ||= row.max_payments !== null;
+    } else if (window !== row.window_ms || row.max_payments === null || asked.maxPayments < row.max_payments) {
+      limits.maxPayments = asked.maxPayments;
+      limits.windowMs = window;
+    } else if (asked.maxPayments > row.max_payments) {
+      looser = true;
+    }
+  }
+  return { limits, looser };
+}
+
+// --- The handles -----------------------------------------------------------------------------
+
+/**
+ * One payment, held in the budget: settle it when it settles, void it if it never left the
+ * wallet, and tell it how long it can still settle once you know. Every move is idempotent, and
+ * only moves forward: held, then void or settled; void, then settled.
+ */
+export class Hold {
+  readonly #ledger: Ledger;
+  readonly #id: string;
+  readonly #amount: Micros;
+  readonly #created: boolean;
+  #state: PaymentState;
+
+  /** Internal: Budget.hold() makes these. */
+  constructor(ledger: Ledger, id: string, amount: Micros, state: PaymentState, created: boolean) {
+    this.#ledger = ledger;
+    this.#id = id;
+    this.#amount = amount;
+    this.#state = state;
+    this.#created = created;
+  }
+
+  /** The payment's identity in the ledger: a good idempotency key for the rail you pay through. */
+  get id(): string { return this.#id; }
+
+  /** In micro-dollars. */
+  get amount(): Micros { return this.#amount; }
+
+  /** The state this handle last saw: 'held', 'settled' or 'void'. */
+  get state(): PaymentState { return this.#state; }
+
+  /** False when the id was already in the ledger, for this wallet and amount: this is that payment. */
+  get created(): boolean { return this.#created; }
+
+  /**
+   * The payment settled. It counts through one window from now, or from its settle-by time if
+   * that is later: a settlement never shortens a hold. `tx` is the evidence, a transaction hash.
+   */
+  async settle({ tx }: { tx?: string | undefined } = {}): Promise<void> {
+    this.#state = (await this.#ledger.settle(this.#id, { evidence: tx ?? null })).state;
+  }
+
+  /** The payment never left the wallet, and never will: it stops counting. A settled payment can't be voided. */
+  async void({ reason }: { reason?: string | undefined } = {}): Promise<void> {
+    this.#state = (await this.#ledger.void(this.#id, { evidence: reason ?? 'not sent' })).state;
+  }
+
+  /** The last moment the payment could still settle, after now. A hold learns it once. */
+  async settlesBy(when: Date | number | bigint): Promise<void> {
+    this.#state = (await this.#ledger.bound(this.#id, { until: momentMs(when, 'settlesBy'), withinMs: null })).state;
+  }
+
+  /** The same, as a time from now by the ledger's clock, in milliseconds. */
+  async settlesWithin(ms: number | bigint): Promise<void> {
+    this.#state = (await this.#ledger.bound(this.#id, { until: null, withinMs: durationMs(ms, 'settlesWithin') })).state;
+  }
+
+  /** What is known about a held payment's outcome; it counts the same. */
+  async note(outcome: Outcome, detail?: string): Promise<void> {
+    this.#state = (await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024) })).state;
+  }
+}
+
+/**
+ * Open the wallet's budget, to pay from it. Its owner creates it first with `walletcap set`;
+ * pass `create: true` only to create it on first use (a demo or a first-run setup). Limits are
+ * dollars: strings ("$150", "12.50 USDC"), numbers (12.5) or bigint micro-dollars. Limits given
+ * here only tighten the budget's, for this process.
+ *
+ *   // The owner creates it once: npx walletcap set --wallet 0x… --per-payment 50 --per-day 150
+ *   const budget = await openBudget({ wallet: '0x…' });
+ *   await budget.pay('$12.50', () => sendUsdc(to, amount));
+ */
+export function openBudget(options: BudgetOptions): Promise<Budget> {
+  return Budget.open(options);
+}
+
+/** The payer's handle. Open it with openBudget(). */
+export class Budget {
+  readonly #ledger: Ledger;
+  readonly #wallet: string;
+  readonly #path: string;
+  readonly #limits: ProcessLimits;
+
+  private constructor(ledger: Ledger, wallet: string, path: string, limits: ProcessLimits) {
+    this.#ledger = ledger;
+    this.#wallet = wallet;
+    this.#path = path;
+    this.#limits = limits;
+  }
+
+  /** The same as openBudget(). */
+  static async open(options: BudgetOptions): Promise<Budget> {
+    checkKeys(options, OPTION_KEYS, 'openBudget');
+    const wallet = normalizeWallet(options.wallet);
+    const path = resolve(expandHome(options.path ?? defaultBudgetPath()));
+    // Fail closed: a missing budget file refuses every payment until its owner creates it.
+    const create = options.create ?? false;
+    const asked = parseLimits(options);
+    if (!create && !existsSync(path)) {
+      throw new BudgetUnavailable(`no budget file at ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`);
+    }
+    const ledger = await Ledger.open(path, { busyTimeoutMs: options.busyTimeoutMs ?? 30_000, create });
+    try {
+      let row = await ledger.budget(wallet);
+      if (row === null) {
+        if (!create) throw new BudgetUnavailable(`${shortWallet(wallet)} has no budget in ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`);
+        if (asked.cap === undefined || asked.windowMs === undefined) {
+          throw new UsageError(`${shortWallet(wallet)} has no budget yet: give it a rolling limit, like perDay: '$150'`);
+        }
+        row = await ledger.createBudget(wallet, {
+          cap: asked.cap, windowMs: asked.windowMs, perPayment: asked.perPayment ?? null, maxPayments: asked.maxPayments ?? null,
+        });
+      }
+      if (row.unit !== 'usd' && row.unit !== 'usdc') throw new UsageError(`${shortWallet(wallet)}'s budget counts in ${row.unit}, not usd`);
+      const { limits, looser } = processLimits(row, asked);
+      if (looser) warnLooser(options.onWarning, row, asked, path);
+      const budget = new Budget(ledger, wallet, path, limits);
+      ledgers.set(budget, ledger);
+      return budget;
+    } catch (error) {
+      ledger.close();
+      throw error;
+    }
+  }
+
+  /** The name the budget is kept under: an EVM address, lowercased. */
+  get wallet(): string { return this.#wallet; }
+
+  /** The budget file. */
+  get path(): string { return this.#path; }
+
+  /** Whether `amount` would be paid right now, without holding it. */
+  async check(amount: Dollars): Promise<Check> {
+    const { refusal, remaining } = await this.#ledger.check(this.#wallet, positive(toMicros(amount)), { limits: this.#limits });
+    return refusal === null
+      ? { ok: true, remaining }
+      : { ok: false, code: refusal.code, message: refusal.message, brief: refusal.brief, remaining };
+  }
+
+  /**
+   * Hold `amount` before paying, or throw BudgetRefused. Settle the hold when the payment
+   * settles; void it only if the payment never left. An id already in the ledger, for this
+   * wallet and amount, returns that payment's hold (`created` is false).
+   */
+  async hold(amount: Dollars, options: HoldOptions = {}): Promise<Hold> {
+    checkKeys(options, HOLD_KEYS, 'hold');
+    const { to, note, details, rail = 'js', settlesBy, settlesWithinMs, id } = options;
+    const micros = positive(toMicros(amount));
+    const info = describe(to, note, details);
+    const held = await this.#ledger.hold(this.#wallet, micros, {
+      payment: id ?? null,
+      rail,
+      info: info === null ? null : JSON.stringify(info),
+      until: settlesBy === undefined || settlesBy === null ? null : momentMs(settlesBy, 'settlesBy'),
+      withinMs: settlesWithinMs === undefined || settlesWithinMs === null ? null : durationMs(settlesWithinMs, 'settlesWithinMs'),
+      limits: this.#limits,
+    });
+    return new Hold(this.#ledger, held.payment, micros, held.state, held.created);
+  }
+
+  /**
+   * Hold `amount`, run `fn` to make the payment, then settle it. An error never settles a
+   * payment: if `fn` throws, the payment may still have left, so it stays held, noted unknown,
+   * and counts until one window past its settle-by time or, without one, until its owner voids
+   * it. An error tagged with notSent() voids it. If the payment went through but can't be
+   * recorded, this throws PaymentNotRecorded: don't pay again. `fn` gets the hold, whose id
+   * makes a good idempotency key. Returns what `fn` returns.
+   */
+  async pay<T>(amount: Dollars, fn: (hold: Hold) => T | Promise<T>, options: HoldOptions = {}): Promise<T> {
+    if (typeof fn !== 'function') throw new UsageError('pay(amount, fn) calls fn to make the payment, and fn is missing');
+    const hold = await this.hold(amount, options);
+    if (!hold.created) throw new UsageError(`payment ${hold.id} is already in the ledger (${hold.state}); pay() doesn't make it again`);
+    let result: T;
+    try {
+      result = await fn(hold);
+    } catch (error) {
+      if (hold.state === 'held') {
+        try {
+          if (isNotSent(error)) await hold.void({ reason: `not sent: ${errorText(error)}` });
+          else await hold.note('unknown', errorText(error));
+        } catch {
+          // Recording failed; the payment stays held, and keeps counting.
+        }
+      }
+      throw error;
+    }
+    if (hold.state === 'held') {
+      try {
+        await hold.settle({ tx: transactionOf(result) });
+      } catch (error) {
+        throw new PaymentNotRecorded(hold.id, { cause: error });
+      }
+    }
+    return result;
+  }
+
+  /** What has been spent, what is in flight and what is left, in micro-dollars, plus a one-line summary. */
+  async status(): Promise<Status> {
+    return statusOf(await this.#ledger.status(this.#wallet), this.#path);
+  }
+
+  /** The newest payments first. */
+  async history({ limit = 20 }: { limit?: number | string } = {}): Promise<Payment[]> {
+    return (await this.#ledger.history(this.#wallet, { limit })).map(paymentOf);
+  }
+
+  /**
+   * The held payments that still count, oldest first, and why each is open: 'in flight' (no
+   * outcome yet), 'refused' (the payee said it failed but may still hold the authorization) or
+   * 'unknown' (the payment call failed after the money may have left). Its owner voids one that
+   * never left the wallet.
+   */
+  async holds(): Promise<HeldPayment[]> {
+    return (await this.#ledger.counting(this.#wallet, { heldOnly: true })).map(heldPaymentOf);
+  }
+
+  close(): void { this.#ledger.close(); }
+
+  [Symbol.dispose](): void { this.close(); }
+
+  async [Symbol.asyncDispose](): Promise<void> { this.close(); }
+}
+
+function warnLooser(onWarning: ((message: string) => void) | undefined, row: BudgetRow, asked: Limits, path: string): void {
+  const stored = { cap: row.cap, windowMs: row.window_ms, perPayment: row.per_payment, maxPayments: row.max_payments };
+  const merged = mergedNoteOf(row.merged_from);
+  const message = `walletcap: ${shortWallet(row.wallet)} keeps its stored limits (${describeLimits(stored)}); `
+    + `your code asks for ${describeLimits(asked, { window: row.window_ms, nulls: true })}. A process can tighten the limits for itself, never loosen them. `
+    + `To raise them, its owner runs: npx walletcap set --wallet ${row.wallet}${pathFlag(path)} ${limitFlags(asked)}`.trimEnd()
+    + (merged === null ? '' : `. ${merged}`);
+  if (typeof onWarning === 'function') onWarning(message);
+  else process.emitWarning(message, { type: 'BudgetWarning', code: 'WALLETCAP_LIMIT_KEPT' });
 }

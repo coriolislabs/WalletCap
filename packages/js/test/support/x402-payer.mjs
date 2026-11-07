@@ -27,7 +27,7 @@ for (const atomic of config.payments) {
     results.push('paid');
   } catch (error) {
     if (error.name !== 'BudgetRefused') throw error;
-    results.push(error.reason);
+    results.push(error.code);
   }
 }
 process.stdout.write(JSON.stringify({ results, spent: String((await budget.status()).spent), asset: USDC, payTo: PAY_TO }));

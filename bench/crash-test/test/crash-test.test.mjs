@@ -70,7 +70,7 @@ test("CDP's controls on walletcap's cdpStore, set as walletcap's README shows, h
   const run = await crashTestOnce();
   const by = Object.fromEntries(run.scenarios.map(s => [s.id, s]));
   // CDP refuses on its own check, or walletcap's store refuses when CDP records past the cap.
-  const refusals = new Set(['cumulative_cap', 'budget_budget']);
+  const refusals = new Set(['cumulative_cap', 'budget']);
 
   // The restarted process reads the first one's $150 from the budget file, and CDP refuses it.
   assert.equal(by.restart.cdpStore.usdc, 150n * USD);

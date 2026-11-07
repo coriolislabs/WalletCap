@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
-import { BudgetError, BudgetRefused, MAX_AMOUNT, notSent, openBudget, PaymentNotRecorded } from 'walletcap';
+import {
+  Budget, BudgetRefused, BudgetUnavailable, MAX_AMOUNT, notSent, openBudget, openOwner, Owner, PaymentNotRecorded, UsageError,
+} from 'walletcap';
 import { cdpStore } from 'walletcap/cdp';
 import { Ledger } from '../dist/core/ledger.js';
 
@@ -24,10 +26,11 @@ const fixture = async (limits = { perPayment: '$50', perDay: '$150' }) => {
   const clock = { now: 1_800_000_000_000 };
   setClock(() => clock.now);
   const open = (more = {}) => openBudget({ wallet: WALLET, path, create: true, ...more });
-  return { path, clock, open, budget: await open(limits) };
+  const budget = await open(limits);
+  return { path, clock, open, budget, owner: await openOwner({ path }) };
 };
 
-const refusedFor = reason => error => error instanceof BudgetRefused && error.reason === reason;
+const refusedFor = code => error => error instanceof BudgetRefused && error.code === code;
 const paid = async (budget, amount) => budget.pay(amount, async () => TX);
 
 test('the cap holds across payments and says why it refused', async () => {
@@ -55,19 +58,26 @@ test('a restart reads the same count, and cannot raise the limits it finds', asy
   assert.equal(status.perPayment, 50_000n);
 });
 
-test('code can lower a limit for everyone that opens the file', async () => {
+test("a payer's tighter limits bind its own process only", async () => {
   const { budget, open } = await fixture();
-  const tighter = await open({ perPayment: '$10', perDay: '$100' });
-  assert.equal((await tighter.status()).cap, 100_000_000n);
-  // Every other process now sees the lower limits, even one that asks for the old ones.
-  await assert.rejects(paid(budget, '$20'), refusedFor('per_payment'));
-  assert.equal((await (await open({ perPayment: '$50', perDay: '$150', onWarning: () => {} })).status()).cap, 100_000_000n);
+  // 0.3.0 wrote a payer's tighter limits into the file, for everyone that opened it.
+  const tighter = await open({ perPayment: '$10', perHour: '$25' });
+  await assert.rejects(paid(tighter, '$20'), error => refusedFor('per_payment')(error) && error.source === 'process'
+    && error.message === '$20.00 is over the $10.00 limit per payment this process set');
+  await paid(tighter, '$10');
+  await paid(tighter, '$10');
+  await assert.rejects(paid(tighter, '$10'), error => refusedFor('budget')(error) && error.source === 'process' && /over the \$25\.00 limit this process set \(\$5\.00 left\)/.test(error.message));
+  assert.deepEqual((await tighter.check('$10')).code, 'budget');
+  // The budget itself is as its owner set it: another process pays $50 at once.
+  assert.deepEqual([(await budget.status()).cap, (await budget.status()).perPayment], [150_000_000n, 50_000_000n]);
+  await paid(budget, '$50');
+  assert.equal((await budget.status()).spent, 70_000_000n);
 });
 
 test('raising a limit keeps what was spent: the total stays a total', async () => {
-  const { budget } = await fixture({ perPayment: '$0.05', perDay: '$0.15' });
+  const { budget, owner } = await fixture({ perPayment: '$0.05', perDay: '$0.15' });
   for (let i = 0; i < 3; i += 1) await paid(budget, '$0.05');
-  const raised = await budget.setLimits({ perDay: '$0.20' });
+  const raised = await owner.setLimits(WALLET, { perDay: '$0.20' });
   assert.equal(raised.spent, 150_000n);
   assert.equal(raised.remaining, 50_000n);
   await paid(budget, '$0.05');
@@ -75,17 +85,17 @@ test('raising a limit keeps what was spent: the total stays a total', async () =
 });
 
 test('the window cannot change after spend, so the count cannot be reset', async () => {
-  const { budget } = await fixture({ perPayment: '$0.05', perDay: '$0.15' });
+  const { budget, owner } = await fixture({ perPayment: '$0.05', perDay: '$0.15' });
   await paid(budget, '$0.05');
-  await assert.rejects(budget.setLimits({ cap: '$0.15', window: '1ms' }), /window can't change while payments count/);
+  await assert.rejects(owner.setLimits(WALLET, { cap: '$0.15', window: '1ms' }), /window can't change while payments count/);
   assert.equal((await budget.status()).spent, 50_000n);
 });
 
 test('lowering a limit below what was spent refuses until the spend ages out', async () => {
-  const { budget, clock } = await fixture();
+  const { budget, clock, owner } = await fixture();
   await paid(budget, '$50');
   await paid(budget, '$50');
-  assert.equal((await budget.setLimits({ perDay: '$60' })).remaining, 0n);
+  assert.equal((await owner.setLimits(WALLET, { perDay: '$60' })).remaining, 0n);
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
   clock.now += DAY + 1;
   await paid(budget, '$50');
@@ -142,22 +152,22 @@ test('an unknown outcome with a settle-by time counts until one window past it',
 test('pay() returns what the payment returns and keeps its transaction hash', async () => {
   const { budget } = await fixture();
   let seen;
-  const result = await budget.pay('$5', async reservation => {
-    seen = reservation;
+  const result = await budget.pay('$5', async hold => {
+    seen = hold;
     return { hash: TX, ok: true };
   }, { to: '0x4165cb72De51A67aac32DC33197d779552205efD', note: 'one API call' });
   assert.deepEqual(result, { hash: TX, ok: true });
   assert.match(seen.id, /^wc-[0-9a-f]{32}$/);
-  assert.equal(seen.open, false);
+  assert.deepEqual([seen.state, seen.created], ['settled', true]);
   const [entry] = await budget.history();
   assert.deepEqual([entry.status, entry.amount, entry.tx, entry.to, entry.note], ['settled', 5_000_000n, TX, '0x4165cb72De51A67aac32DC33197d779552205efD', 'one API call']);
 });
 
-test("a commit never shortens a hold: it counts until one window past the hold's settle-by time", async () => {
+test("a settlement never shortens a hold: it counts until one window past the hold's settle-by time", async () => {
   const { budget, clock } = await fixture({ perDay: '$150' });
   // A payee can answer "settled" at once and keep a signed authorization that is valid two days.
-  const held = await budget.reserve('$150', { settlesBy: new Date(clock.now + 2 * DAY) });
-  await held.commit({ tx: TX });
+  const held = await budget.hold('$150', { settlesBy: new Date(clock.now + 2 * DAY) });
+  await held.settle({ tx: TX });
   clock.now += DAY + 1;
   assert.equal((await budget.status()).spent, 150_000_000n);
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
@@ -173,53 +183,56 @@ test('a refusal names the open payments that take up the room, and holds() lists
   const { budget, clock } = await fixture({ perDay: '$150', maxPayments: 3 });
   for (const amount of ['$10', '$20']) await assert.rejects(budget.pay(amount, async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
   clock.now += 3_600_000;
-  await budget.reserve('$5', { settlesBy: new Date(clock.now + 300_000) });
+  await budget.hold('$5', { settlesBy: new Date(clock.now + 300_000) });
   const holds = await budget.holds();
-  assert.deepEqual(holds.map(hold => [hold.reason, hold.amount, hold.ageMs, hold.until === null]), [
+  assert.deepEqual(holds.map(hold => [hold.reason, hold.amount, hold.ageMs, hold.countsUntil === null]), [
     ['unknown', 10_000_000n, 3_600_000n, true], ['unknown', 20_000_000n, 3_600_000n, true], ['in flight', 5_000_000n, 0n, false],
   ]);
   assert.equal(holds[0].error, 'rpc timeout');
-  assert.equal(holds[2].until.getTime(), clock.now + 300_000 + DAY);
+  assert.equal(holds[2].countsUntil.getTime(), clock.now + 300_000 + DAY);
   // 0.3.0 said "already made 3 payments in the last 24h", naming none of them.
   const used = await budget.check('$1');
-  assert.equal(used.reason, 'max_payments');
+  assert.equal(used.code, 'max_payments');
   assert.match(used.message, /has 3 payments counting in the last 24h, the most its budget allows, and 3 of them are still open \(wc-\w+, wc-\w+, wc-\w+; walletcap holds lists them/);
   const { budget: other } = await fixture({ perDay: '$150' });
   await assert.rejects(other.pay('$100', async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
   assert.match((await other.check('$60')).message, /over its \$150\.00 limit \(\$50\.00 left\); \$100\.00 of it is 1 open payment \(wc-\w+; walletcap holds lists them/);
 });
 
-test('a payment that went through but cannot be recorded throws PaymentNotRecorded, not a BudgetError', async () => {
+test('a payment that went through but cannot be recorded throws PaymentNotRecorded, which is none of the other errors', async () => {
   const { path, budget } = await fixture({ perDay: '$150' });
   let id;
   // The ledger becomes unusable between the payment and its record (here, it is closed).
-  const error = await budget.pay('$5', async reservation => { id = reservation.id; budget.close(); return TX; }).catch(caught => caught);
+  const error = await budget.pay('$5', async hold => { id = hold.id; budget.close(); return TX; }).catch(caught => caught);
   assert.ok(error instanceof PaymentNotRecorded, error);
-  assert.equal(error instanceof BudgetError, false); // code that retries on a BudgetError must not pay twice
+  // Code that retries on any of the other three must not pay twice.
+  for (const other of [BudgetUnavailable, BudgetRefused, UsageError]) assert.equal(error instanceof other, false, other.name);
   assert.equal(error.name, 'PaymentNotRecorded');
-  assert.equal(error.reservationId, id);
-  assert.ok(error.cause instanceof BudgetError);
+  assert.equal(error.paymentId, id);
+  assert.ok(error.cause instanceof BudgetUnavailable);
   assert.ok(error.message.endsWith(`still counts as in flight (${id})`), error.message);
   assert.equal((await (await openBudget({ wallet: WALLET, path })).status()).inFlight, 5_000_000n);
 });
 
-test('a reservation counts while the payment is in flight, and once only', async () => {
+test('a hold counts while the payment is in flight, and once only', async () => {
   const { budget } = await fixture({ perDay: '$150' });
-  const held = await budget.reserve('$100');
+  const held = await budget.hold('$100');
   await assert.rejects(paid(budget, '$100'), refusedFor('budget'));
   assert.equal((await budget.status()).inFlight, 100_000_000n);
-  await held.commit({ tx: TX });
-  await assert.rejects(held.commit(), /already committed/);
-  await assert.rejects(held.release(), /already committed/);
-  const other = await budget.reserve('$50');
-  await other.release();
+  await held.settle({ tx: TX });
+  // Settling again is the same settlement; a settled payment can't be voided.
+  await held.settle();
+  assert.equal(held.state, 'settled');
+  await assert.rejects(held.void(), error => error instanceof UsageError && /a settled payment can't be voided/.test(error.message));
+  const other = await budget.hold('$50');
+  await other.void();
   assert.equal((await budget.status()).spent, 100_000_000n);
   assert.equal((await budget.status()).inFlight, 0n);
 });
 
-test('a reservation with a settle-by time stops counting a window after it', async () => {
+test('a hold with a settle-by time stops counting a window after it', async () => {
   const { budget, clock } = await fixture({ perDay: '$150' });
-  await budget.reserve('$100', { settlesBy: new Date(clock.now + 300_000) });
+  await budget.hold('$100', { settlesBy: new Date(clock.now + 300_000) });
   clock.now += 300_000 + DAY;
   assert.equal((await budget.status()).inFlight, 100_000_000n);
   clock.now += 1;
@@ -231,35 +244,35 @@ test("a settle-by time that isn't after now is refused: a payment can't settle b
   const { budget, clock } = await fixture({ perDay: '$150' });
   // 0.2.x stored a past moment as given, so the reservation never counted and a second $150 passed.
   for (const settlesBy of [new Date(0), clock.now - 1, new Date(clock.now)]) {
-    await assert.rejects(budget.reserve('$150', { settlesBy }), /is not after now/);
+    await assert.rejects(budget.hold('$150', { settlesBy }), /is not after now/);
     await assert.rejects(budget.pay('$150', async () => TX, { settlesBy }), /is not after now/);
   }
   assert.equal((await budget.status()).payments, 0n);
-  const held = await budget.reserve('$150', { settlesBy: new Date(clock.now + 1) });
+  const held = await budget.hold('$150', { settlesBy: new Date(clock.now + 1) });
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
   clock.now += DAY + 2;
   assert.equal((await budget.status()).inFlight, 0n);
-  await held.commit(); // settled late after all: it counts again, for a window from now
+  await held.settle(); // settled late after all: it counts again, for a window from now
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
 });
 
 test('amounts and limits stop at a billion dollars, so no sum of payments can overflow', async () => {
-  const { budget, clock } = await fixture({ perDay: '$1,000,000,000' });
+  const { budget, clock, owner } = await fixture({ perDay: '$1,000,000,000' });
   assert.equal(MAX_AMOUNT, 1_000_000_000_000_000n);
   for (const tooMuch of ['$1,000,000,000.000001', MAX_AMOUNT + 1n, (1n << 63n) - 1n]) {
-    await assert.rejects(budget.reserve(tooMuch), /more than \$1,000,000,000\.00/);
-    await assert.rejects(budget.setLimits({ perDay: tooMuch }), /more than \$1,000,000,000\.00/);
+    await assert.rejects(budget.hold(tooMuch), /more than \$1,000,000,000\.00/);
+    await assert.rejects(owner.setLimits(WALLET, { perDay: tooMuch }), /more than \$1,000,000,000\.00/);
   }
   // Two holds of the most a budget can hold count at once: one lapsed, then settled late.
-  const first = await budget.reserve(MAX_AMOUNT, { settlesBy: new Date(clock.now + 1) });
+  const first = await budget.hold(MAX_AMOUNT, { settlesBy: new Date(clock.now + 1) });
   clock.now += DAY + 2;
-  const second = await budget.reserve(MAX_AMOUNT);
-  await first.commit();
+  const second = await budget.hold(MAX_AMOUNT);
+  await first.settle();
   // 0.2.x took near-2^63 amounts, and two of them overflowed SQLite's SUM: every payment failed.
   const status = await budget.status();
   assert.deepEqual([status.spent, status.inFlight, status.remaining], [MAX_AMOUNT, MAX_AMOUNT, 0n]);
   await assert.rejects(paid(budget, '$1'), refusedFor('budget'));
-  await second.release();
+  await second.void();
 });
 
 test('the per-payment limit and the payment count hold too', async () => {
@@ -275,18 +288,56 @@ test('check() answers without taking anything', async () => {
   assert.deepEqual(await budget.check('$150'), { ok: true, remaining: 150_000_000n });
   const refused = await budget.check('$151');
   assert.equal(refused.ok, false);
-  assert.equal(refused.reason, 'budget');
+  assert.equal(refused.code, 'budget');
   assert.equal((await budget.status()).inFlight, 0n);
 });
 
 test('freezing stops every payment in every process until unfrozen', async () => {
-  const { budget, open } = await fixture();
-  await (await open()).freeze();
+  const { budget, owner } = await fixture();
+  await owner.freeze(WALLET);
   await assert.rejects(paid(budget, '$1'), refusedFor('frozen'));
   assert.equal((await budget.status()).frozen, true);
   assert.equal((await budget.status()).remaining, 0n);
-  await budget.unfreeze();
+  await owner.unfreeze(WALLET);
   await paid(budget, '$1');
+});
+
+test('the payer handle has no owner methods, and the owner reconciles with evidence', async () => {
+  const { budget, owner, clock } = await fixture({ perDay: '$150' });
+  for (const method of ['setLimits', 'freeze', 'unfreeze', 'void', 'settle', 'voidUnknown', 'reserve']) assert.equal(budget[method], undefined, method);
+  assert.ok(budget instanceof Budget && owner instanceof Owner);
+  const lost = await budget.hold('$100');
+  await lost.note('unknown', 'rpc timeout');
+  // The chain shows the authorization unused past its expiry: the owner voids it, with that evidence.
+  const voided = await owner.void(lost.id, { evidence: 'authorizationState false after validBefore' });
+  assert.deepEqual([voided.state, voided.counting, (await budget.status()).inFlight], ['void', false, 0n]);
+  // Later evidence that it paid after all: VOID -> SETTLED, and it counts again.
+  const settled = await owner.settle(lost.id, { evidence: TX });
+  assert.deepEqual([settled.state, settled.tx, settled.countsUntil.getTime()], ['settled', TX, clock.now + DAY]);
+  await assert.rejects(owner.void(lost.id), error => error instanceof UsageError && /a settled payment can't be voided/.test(error.message));
+  await assert.rejects(owner.void('wc-nobody'), UsageError);
+  assert.equal((await owner.payment(lost.id)).wallet, WALLET);
+  assert.equal(await owner.payment('wc-nobody'), null);
+});
+
+test('one id is one payment: holding it again returns it, and pay() never makes it twice', async () => {
+  const { budget } = await fixture({ perDay: '$150' });
+  const first = await budget.hold('$40', { id: 'order-17' });
+  const again = await budget.hold('$40', { id: 'order-17' });
+  assert.deepEqual([first.created, again.created, again.id, (await budget.status()).payments], [true, false, 'order-17', 1n]);
+  await assert.rejects(budget.hold('$41', { id: 'order-17' }), error => error instanceof UsageError && /already in the ledger/.test(error.message));
+  let ran = false;
+  await assert.rejects(budget.pay('$40', async () => { ran = true; }, { id: 'order-17' }), UsageError);
+  assert.equal(ran, false);
+});
+
+test('the four errors share no base, and say what happened', async () => {
+  const errors = [BudgetUnavailable, BudgetRefused, PaymentNotRecorded, UsageError];
+  for (const a of errors) for (const b of errors) if (a !== b) assert.equal(a.prototype instanceof b, false, `${a.name} extends ${b.name}`);
+  await assert.rejects(openBudget({ wallet: WALLET, path: join(DIR, 'none.sqlite') }), BudgetUnavailable);
+  await assert.rejects(openBudget({ wallet: 'has space', path: join(DIR, 'none.sqlite') }), UsageError);
+  const { budget } = await fixture({ perDay: '$1' });
+  await assert.rejects(budget.hold('$2'), error => error instanceof BudgetRefused && error.code === 'budget' && error.source === 'budget' && typeof error.brief === 'string');
 });
 
 test('checksummed, lowercase and CAIP-10 addresses spend from one budget', async () => {
@@ -322,14 +373,14 @@ test('the default is fail-closed: a missing budget is not created', async () => 
 test('a file that is not a budget is refused, not replaced', async () => {
   const path = join(DIR, 'corrupt.sqlite');
   writeFileSync(path, 'this is not a database, and it is not empty either: '.repeat(100));
-  await assert.rejects(openBudget({ wallet: WALLET, path, perDay: '$5' }), { name: 'BudgetError', message: /cannot be used/ });
+  await assert.rejects(openBudget({ wallet: WALLET, path, perDay: '$5' }), { name: 'BudgetUnavailable', message: /cannot be used/ });
 });
 
 test('zero and malformed amounts are refused before anything is reserved', async () => {
   const { budget } = await fixture();
   await assert.rejects(budget.pay('$0', async () => TX), /more than \$0/);
   await assert.rejects(budget.pay('$5', 'not a function'), /fn is missing/);
-  await assert.rejects(budget.reserve('five dollars'), { name: 'BudgetError' });
+  await assert.rejects(budget.hold('five dollars'), { name: 'UsageError' });
   assert.equal((await budget.status()).payments, 0n);
 });
 
@@ -369,9 +420,10 @@ test('the upgrade says what it did: a warning names the merged limits, and a wal
       + "which can't be merged with this one in usd, so that budget no longer counts",
   ));
   await paid(await openBudget({ wallet: APP, path }), '$1');
-  await frozen.unfreeze();
+  const owner = await openOwner({ path });
+  await owner.unfreeze(CHECKSUMMED);
   await paid(frozen, '$1');
-  await frozen.freeze();
+  await owner.freeze(CHECKSUMMED);
   await assert.rejects(paid(frozen, '$1'), error => refusedFor('frozen')(error) && !/0\.3\.0 upgrade/.test(error.message));
 });
 

@@ -27,7 +27,7 @@ const attempt = async (target, label, amount) => {
     console.log(`paid     ${label.padEnd(28)} ${amount}`);
   } catch (error) {
     if (!(error instanceof BudgetRefused)) throw error;
-    console.log(`REFUSED  ${label.padEnd(28)} ${amount}  (${error.reason})`);
+    console.log(`REFUSED  ${label.padEnd(28)} ${amount}  (${error.code})`);
   }
 };
 

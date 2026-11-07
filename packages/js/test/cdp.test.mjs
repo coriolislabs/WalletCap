@@ -32,7 +32,7 @@ const fixture = async () => {
 test('a lowercase 402 asset on the x402 rail does not break cdpStore.load()', async () => {
   const { budget, store } = await fixture();
   try {
-    await budget.reserve('$0.05', {
+    await budget.hold('$0.05', {
       rail: 'x402',
       details: { network: NETWORK, asset: USDC, scheme: 'exact' },
     });
@@ -124,7 +124,7 @@ test("an entry CDP backdates still counts from the ledger's own time", async () 
     assert.equal((await budget.status()).inFlight, 1_000_000n);
     const [row] = await store.load();
     assert.ok(row.at >= Date.now() - 60_000, `the entry is dated ${row.at}, not when CDP said`);
-    await assert.rejects(store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 }), { reason: 'budget' });
+    await assert.rejects(store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 }), { code: 'budget' });
     assert.equal((await budget.status()).inFlight, 1_000_000n);
   } finally {
     store.close();
@@ -142,7 +142,7 @@ test('a checksummed or CAIP-10 wallet spends from the one lowercase budget', asy
     const other = await openBudget({ wallet, path });
     try {
       assert.equal(other.wallet, WALLET);
-      await assert.rejects(cdpStore(other, { asset: USDC }).append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }), { reason: 'budget' });
+      await assert.rejects(cdpStore(other, { asset: USDC }).append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }), { code: 'budget' });
     } finally {
       other.close();
     }
@@ -160,11 +160,11 @@ test('a checksummed or CAIP-10 wallet spends from the one lowercase budget', asy
 
 test("a refusal CDP passes on to the agent names no holds and no release instructions", async () => {
   const { budget, store } = await fixture();
-  (await budget.reserve('$1')).annotate({ outcome: 'unknown' });
+  await (await budget.hold('$1')).note('unknown');
   try {
     // 0.3.0 passed the owner's message, with the hold's id, through CDP to the agent.
     await assert.rejects(store.append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }),
-      error => error.reason === 'budget' && /\$1\.00 of it is 1 open payment$/.test(error.message));
+      error => error.code === 'budget' && /\$1\.00 of it is 1 open payment$/.test(error.message));
     assert.match((await budget.check('$0.01')).message, /\(wc-\w+; walletcap holds lists them/);
   } finally {
     store.close();
@@ -183,7 +183,7 @@ test('a CDP payment counts until an hour after it is recorded, plus one window: 
     // CDP lets a payee ask for an authorization valid an hour; 0.3.0 counted the payment one
     // window from when CDP recorded it, so a second $1 passed the $1 cap while the first was redeemable.
     clock.now = recorded + DAY + 1;
-    await assert.rejects(store.append(entry(1n)), { reason: 'budget' });
+    await assert.rejects(store.append(entry(1n)), { code: 'budget' });
     const [counted] = await store.load();
     assert.ok(counted.at >= clock.now - DAY, "CDP's own window keeps it too");
     clock.now = recorded + HOUR + 60_000 + DAY;

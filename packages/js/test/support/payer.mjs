@@ -22,7 +22,7 @@ for (const amount of config.payments) {
     results.push('paid');
   } catch (error) {
     if (error.name !== 'BudgetRefused') throw error;
-    results.push(error.reason);
+    results.push(error.code);
   }
 }
 process.stdout.write(JSON.stringify({ results, warnings, spent: String((await budget.status()).spent) }));

@@ -13,7 +13,7 @@ test('dollars convert as the shared vectors say, the same as in Python', async (
   assert.ok(VECTORS.cases.length > 50);
   for (const { input, micros, error } of VECTORS.cases) {
     const shown = JSON.stringify(input);
-    if (error) assert.throws(() => toMicros(input), { name: 'BudgetError' }, shown);
+    if (error) assert.throws(() => toMicros(input), { name: 'UsageError' }, shown);
     else assert.equal(toMicros(input), BigInt(micros), shown);
   }
 });
@@ -22,19 +22,19 @@ test('trimming takes linear time: a long run of spaces inside an amount is refus
   // A regex like /[ \t]+$/ backtracks quadratically here: about 20 s for these 200,000 spaces.
   const text = `1${' '.repeat(200_000)}x`;
   const started = performance.now();
-  for (const parse of [toMicros, toWindowMs, normalizeWallet]) assert.throws(() => parse(text), { name: 'BudgetError' });
+  for (const parse of [toMicros, toWindowMs, normalizeWallet]) assert.throws(() => parse(text), { name: 'UsageError' });
   assert.ok(performance.now() - started < 1_000, `took ${performance.now() - started} ms`);
 });
 
 test('windows, wallet names and counts read only ASCII digits and trim only ASCII whitespace', async () => {
   assert.equal(toWindowMs(' 24h\t'), 86_400_000n);
   assert.equal(normalizeWallet(' 0xd797ead28c38575fdf4fc523866287372340ca02\n'), '0xd797ead28c38575fdf4fc523866287372340ca02');
-  assert.deepEqual(parseLimits({ maxPayments: ' 3 ' }), { maxUses: 3n });
-  for (const bad of ['\u0661\u0662h', '24h\u0085', '\u00a024h']) assert.throws(() => toWindowMs(bad), { name: 'BudgetError' }, bad);
+  assert.deepEqual(parseLimits({ maxPayments: ' 3 ' }), { maxPayments: 3n });
+  for (const bad of ['\u0661\u0662h', '24h\u0085', '\u00a024h']) assert.throws(() => toWindowMs(bad), { name: 'UsageError' }, bad);
   for (const bad of ['0xd797ead28c38575fdf4fc523866287372340ca02\u0085', 'eip155:\u0661:0xd797ead28c38575fdf4fc523866287372340ca02']) {
-    assert.throws(() => normalizeWallet(bad), { name: 'BudgetError' }, bad);
+    assert.throws(() => normalizeWallet(bad), { name: 'UsageError' }, bad);
   }
-  for (const bad of ['\u0661\u0662', '3\u0085']) assert.throws(() => parseLimits({ maxPayments: bad }), { name: 'BudgetError' }, bad);
+  for (const bad of ['\u0661\u0662', '3\u0085']) assert.throws(() => parseLimits({ maxPayments: bad }), { name: 'UsageError' }, bad);
 });
 
 test('dollars read exactly from strings, rounded from numbers, as-is from bigints', async () => {
@@ -47,7 +47,7 @@ test('dollars read exactly from strings, rounded from numbers, as-is from bigint
   assert.equal(toMicros(150), 150_000_000n);
   assert.equal(toMicros(150n), 150n);
   for (const bad of ['-5', '$', '1,5', '12.5 EUR', '0.0000001', '', NaN, -1, Infinity, '1e3', null, {}]) {
-    assert.throws(() => toMicros(bad), { name: 'BudgetError' }, String(bad));
+    assert.throws(() => toMicros(bad), { name: 'UsageError' }, String(bad));
   }
 });
 
@@ -64,7 +64,7 @@ test('amounts and windows read back the way people write them', async () => {
   assert.equal(formatWindow(604_800_000n), '7d');
   assert.equal(formatWindow(1_800_000n), '30m');
   assert.equal(formatWindow(1_500n), '1500ms');
-  for (const bad of ['0h', '1y', -5, 0, 'soon']) assert.throws(() => toWindowMs(bad), { name: 'BudgetError' });
+  for (const bad of ['0h', '1y', -5, 0, 'soon']) assert.throws(() => toWindowMs(bad), { name: 'UsageError' });
 });
 
 test('one wallet is one budget, however its address is written', async () => {
@@ -74,8 +74,8 @@ test('one wallet is one budget, however its address is written', async () => {
   assert.equal(normalizeWallet(' card-visa-4242 '), 'card-visa-4242');
   // A truncated address must not quietly open a second budget.
   assert.throws(() => normalizeWallet('0xd797ead28c38575fdf4fc523866287372340ca0'), /not 40 hex digits/);
-  assert.throws(() => normalizeWallet('has space'), { name: 'BudgetError' });
-  assert.throws(() => normalizeWallet(''), { name: 'BudgetError' });
+  assert.throws(() => normalizeWallet('has space'), { name: 'UsageError' });
+  assert.throws(() => normalizeWallet(''), { name: 'UsageError' });
 });
 
 
@@ -89,7 +89,7 @@ test('mixed-case EVM addresses are checked against EIP-55, and Solana CAIP-10 is
 
 test('one rolling limit at a time, and nothing left out silently', async () => {
   assert.deepEqual(parseLimits({ perDay: '$150', perPayment: '$50' }), { cap: 150_000_000n, windowMs: 86_400_000n, perPayment: 50_000_000n });
-  assert.deepEqual(parseLimits({ cap: 10, window: '1h', maxPayments: 3 }), { cap: 10_000_000n, windowMs: 3_600_000n, maxUses: 3n });
+  assert.deepEqual(parseLimits({ cap: 10, window: '1h', maxPayments: 3 }), { cap: 10_000_000n, windowMs: 3_600_000n, maxPayments: 3n });
   assert.deepEqual(parseLimits({ perPayment: null }), { perPayment: null });
   assert.throws(() => parseLimits({ perDay: 1, perHour: 1 }), /one rolling limit/);
   assert.throws(() => parseLimits({ cap: 1 }), /go together/);

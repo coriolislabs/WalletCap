@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from walletcap.errors import BudgetError  # noqa: E402
+from walletcap.errors import UsageError  # noqa: E402
 from walletcap.money import DAY_MS, normalize_wallet, to_micros, to_window_ms  # noqa: E402
 
 # The cases the JavaScript suite checks too (js/tests/money.test.mjs).
@@ -29,7 +29,7 @@ NODE = shutil.which("node")
 @pytest.mark.parametrize("case", VECTORS["cases"], ids=lambda case: repr(case["input"])[:40])
 def test_dollars_convert_as_the_shared_vectors_say(case: dict[str, Any]) -> None:
     if case.get("error"):
-        with pytest.raises(BudgetError):
+        with pytest.raises(UsageError):
             to_micros(case["input"])
     else:
         assert to_micros(case["input"]) == int(case["micros"])
@@ -65,12 +65,12 @@ def test_both_languages_convert_the_same_floats() -> None:
 def test_inputs_of_thousands_of_digits_are_budget_errors() -> None:
     # Python refuses int() of a string over 4,300 digits with ValueError; 0.3.0 let it through.
     for window in ("9" * 5000 + "ms", "1" * 4400 + "h"):
-        with pytest.raises(BudgetError):
+        with pytest.raises(UsageError):
             to_window_ms(window)
     assert to_window_ms("0" * 5000 + "5ms") == 5
-    with pytest.raises(BudgetError, match="more than"):
+    with pytest.raises(UsageError, match="more than"):
         to_micros(Decimal("1" * 5000))
-    with pytest.raises(BudgetError, match="finer than a millionth"):
+    with pytest.raises(UsageError, match="finer than a millionth"):
         to_micros(Decimal("1" * 5000 + "E-4995"))
     assert to_micros(Decimal("1" + "0" * 4999 + "E-4999")) == 1_000_000
 
@@ -80,9 +80,9 @@ def test_a_decimal_finer_than_a_micro_dollar_is_refused_at_any_precision() -> No
     assert to_micros(Decimal("1E+3")) == 1_000_000_000
     # 0.2.x multiplied at 28 digits, so this one rounded to exactly $1.
     for value in (Decimal("1.0000000000000000000000000001"), Decimal("1E-999999")):
-        with pytest.raises(BudgetError, match="finer than a millionth"):
+        with pytest.raises(UsageError, match="finer than a millionth"):
             to_micros(value)
-    with pytest.raises(BudgetError, match="more than"):
+    with pytest.raises(UsageError, match="more than"):
         to_micros(Decimal("1E+999999"))
 
 
@@ -90,7 +90,7 @@ def test_a_mixed_case_evm_address_must_pass_eip55() -> None:
     assert normalize_wallet("0xd797ead28C38575FDf4fC523866287372340Ca02") == (
         "0xd797ead28c38575fdf4fc523866287372340ca02"
     )
-    with pytest.raises(BudgetError, match="EIP-55"):
+    with pytest.raises(UsageError, match="EIP-55"):
         normalize_wallet("0xD797ead28C38575FDf4fC523866287372340Ca02")
     # All-uppercase hex has no checksum to verify and is still accepted.
     assert normalize_wallet("0xD797EAD28C38575FDF4FC523866287372340CA02") == (

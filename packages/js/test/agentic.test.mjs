@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, afterEach, before, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
-import { BudgetError, BudgetRefused, openBudget, PaymentNotRecorded } from 'walletcap';
+import { BudgetRefused, BudgetUnavailable, openBudget, PaymentNotRecorded, UsageError } from 'walletcap';
 import { guardAgenticWallet, usdcAtomic } from 'walletcap/agentic';
 
 const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
@@ -63,7 +63,7 @@ const wallet = (answer = () => ({ status: 200, headers: { 'PAYMENT-RESPONSE': b6
   return { calls, request: async (channel, data) => { calls.push({ channel, data }); return answer(channel, data); } };
 };
 const x402 = (query = '') => ({ baseURL: base, path: `/pay${query}`, method: 'GET' });
-const refused = reason => error => error instanceof BudgetRefused && error.reason === reason;
+const refused = code => error => error instanceof BudgetRefused && error.code === code;
 
 test("sends count in the wallet's budget, and the one past the cap never reaches the wallet", async () => {
   const { budget } = await newBudget();
@@ -300,7 +300,7 @@ test('the hold lasts as long as the longest terms the wallet was handed, not onl
   assert.equal((await budget.status()).inFlight, 0n);
 });
 
-test("a budget that can't be written after the wallet answered raises PaymentNotRecorded, not a BudgetError", async () => {
+test("a budget that can't be written after the wallet answered raises PaymentNotRecorded, not one of the errors code retries on", async () => {
   // The wallet answers, then the budget can't be written: closed here, a busy timeout in practice.
   // 0.3.0 let the ledger's BudgetError through, which code that retries on one would retry.
   const cases = [
@@ -314,7 +314,7 @@ test("a budget that can't be written after the wallet answered raises PaymentNot
     const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return answer(); }).request });
     await assert.rejects(
       guard.request(channel, data),
-      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError) && /could not be recorded; it still counts as in flight/.test(error.message),
+      error => error instanceof PaymentNotRecorded && !(error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError) && /could not be recorded; it still counts as in flight/.test(error.message),
       `${channel} ${data.path ?? ''}`,
     );
     assert.equal((await (await newBudget(undefined, path)).budget.status()).inFlight, held);
@@ -332,7 +332,7 @@ test('a discover() of its own may return the 402 answer or just its list of term
   assert.deepEqual(w.calls.map(call => call.data.paymentRequirements), [terms, terms]);
   for (const answer of [[], {}, { accepts: [] }]) {
     await assert.rejects(guardAgenticWallet(budget, { request: w.request, discover: async () => answer }).request('make-x402-request', x402()),
-      error => error instanceof BudgetError && /without payment requirements walletcap can read/.test(error.message));
+      error => error instanceof BudgetRefused && error.code === 'terms' && /without payment requirements walletcap can read/.test(error.message));
   }
   assert.equal(w.calls.length, 2);
 });
@@ -353,7 +353,7 @@ test('a send that went through but cannot be recorded throws PaymentNotRecorded'
   const guard = guardAgenticWallet(budget, { request: wallet(() => { budget.close(); return { transactionHash: TX }; }).request });
   await assert.rejects(
     guard.request('send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia' }),
-    error => error instanceof PaymentNotRecorded && !(error instanceof BudgetError),
+    error => error instanceof PaymentNotRecorded && !(error instanceof BudgetUnavailable || error instanceof BudgetRefused || error instanceof UsageError),
   );
   assert.equal((await (await newBudget(undefined, path)).budget.status()).inFlight, 50_000n);
   assert.throws(() => guardAgenticWallet(budget, { request: wallet().request, assets: [{ network: 'eip155:84532', asset: USDC, decimals: 18 }] }), /already priced/);
@@ -395,7 +395,7 @@ test("awal's amount rule, read exactly: dollars, or a whole number of atomic uni
   for (const [amount, atomic] of read) assert.equal(usdcAtomic(amount), atomic, amount);
   // 0.2.x used parseFloat: "100.5abc" was $100.50, "1e3" 1000 units, and "0.29" 289999.
   const refused = ['100.5abc', '1e3', '1,000', '0x10', '-5', '+5', '0', '0.0000001', '', '$', 'Infinity', '\u0661\u0662', '12\u0085', '\u00a05'];
-  for (const amount of refused) assert.throws(() => usdcAtomic(amount), { name: 'BudgetError' }, JSON.stringify(amount));
+  for (const amount of refused) assert.throws(() => usdcAtomic(amount), { name: 'UsageError' }, JSON.stringify(amount));
 });
 
 test('a send amount the wallet could read another way is refused, and the amount counted is the one sent', async () => {
@@ -403,7 +403,7 @@ test('a send amount the wallet could read another way is refused, and the amount
   const w = wallet(() => ({ transactionHash: TX }));
   const guard = guardAgenticWallet(budget, { request: w.request });
   for (const amountAtomic of ['0x10', ' 50000', '5e4', '50000.0', 1.5, -1, '-1', '', null]) {
-    await assert.rejects(guard.request('send-transaction', { recipient: PAY_TO, amountAtomic, chain: 'base-sepolia' }), { name: 'BudgetError' }, String(amountAtomic));
+    await assert.rejects(guard.request('send-transaction', { recipient: PAY_TO, amountAtomic, chain: 'base-sepolia' }), { name: 'UsageError' }, String(amountAtomic));
   }
   await guard.request('send-transaction', { recipient: PAY_TO, amountAtomic: 50000, chain: 'base-sepolia' });
   assert.deepEqual(w.calls.map(call => call.data.amountAtomic), ['50000']);
@@ -442,9 +442,9 @@ test("the agent is told why a payment was refused, not which holds its owner cou
   const log = join(DIR, 'awal-holds.log');
   writeFileSync(log, '');
   const budget = await openBudget({ wallet: WALLET, path, perDay: '$0.15', create: true });
-  for (let i = 0; i < 3; i += 1) await (await budget.reserve('$0.05')).annotate({ outcome: 'unknown' });
+  for (let i = 0; i < 3; i += 1) await (await budget.hold('$0.05')).note('unknown');
   // The owner's own check names the holds and how to release them.
-  assert.match((await budget.check('$0.05')).message, /3 open payments \(wc-\w+, wc-\w+, wc-\w+; walletcap holds lists them, and if one never left the wallet its owner can release it\)$/);
+  assert.match((await budget.check('$0.05')).message, /3 open payments \(wc-\w+, wc-\w+, wc-\w+; walletcap holds lists them, and if one never left the wallet its owner can void it\)$/);
   budget.close();
   // 0.3.0 passed all of it to the agent through the awal CLI. walletcap-mcp says the same (packages/mcp).
   const paid = await awal(path, log, 'settle', 'x402', 'pay', `${base}/pay?ttl=300`, '--json');

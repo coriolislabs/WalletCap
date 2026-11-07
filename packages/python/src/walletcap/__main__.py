@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""``walletcap`` (or ``python -m walletcap``): see, set and freeze a budget.
+"""``walletcap`` (or ``python -m walletcap``): see, set and freeze a budget, and reconcile payments.
 
-The same commands, options and output as ``npx walletcap``, on the same file.
+The same commands, options and output as ``npx walletcap``, on the same file, through the
+owner's handle.
 """
 
 from __future__ import annotations
@@ -10,14 +11,14 @@ import argparse
 import dataclasses
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from walletcap import __version__
-from walletcap.budget import UNSET, Budget, Status, _limits
-from walletcap.errors import BudgetError
-from walletcap.ledger import Ledger
+from walletcap.budget import UNSET, PaymentRecord, Status
+from walletcap.errors import BudgetUnavailable, UsageError, is_walletcap_error
 from walletcap.money import (
     default_budget_path,
     describe_limits,
@@ -31,8 +32,10 @@ from walletcap.money import (
     strip_ascii,
     to_window_ms,
 )
+from walletcap.owner import Owner
 
 _EPILOG = "Amounts are dollars: --per-day 150. Leave out the $ sign, which your shell would expand."
+_COMMAND_NAMES = ["status", "set", "freeze", "unfreeze", "history", "holds", "void", "settle"]
 
 
 class _Usage(Exception):
@@ -55,13 +58,8 @@ def _parser() -> argparse.ArgumentParser:
         epilog=_EPILOG,
     )
     parser.add_argument("--version", action="version", version=__version__)
-    parser.add_argument(
-        "command",
-        nargs="?",
-        default="status",
-        choices=["status", "set", "freeze", "unfreeze", "history", "holds", "release"],
-    )
-    parser.add_argument("id", nargs="?", help="the payment to release")
+    parser.add_argument("command", nargs="?", default="status", choices=_COMMAND_NAMES)
+    parser.add_argument("id", nargs="?", help="the payment to void or settle")
     parser.add_argument("--wallet", help="the wallet the money leaves from")
     parser.add_argument("--path", help=f"the budget file (default: {default_budget_path()})")
     parser.add_argument("--per-payment", help="most one payment may spend, or none")
@@ -75,10 +73,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--all-unknown",
         action="store_true",
-        help="with release: every payment of unknown or refused outcome older than --older-than "
+        help="with void: every payment of unknown or refused outcome older than --older-than "
         "that its payee can no longer settle; with no settle-by time, an hour and a minute old",
     )
-    parser.add_argument("--older-than", help="with release --all-unknown: 24h, 7d, 30m")
+    parser.add_argument("--older-than", help="with void --all-unknown: 24h, 7d, 30m")
+    parser.add_argument("--tx", help="with settle: the transaction that shows it paid")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
@@ -97,7 +96,7 @@ def _json(value: Any) -> str:
         if isinstance(item, dict):
             return {key: plain(entry) for key, entry in item.items()}
         if isinstance(item, int) and not isinstance(item, bool):
-            return str(item)
+            return str(int(item))
         if isinstance(item, Path):
             return str(item)
         if hasattr(item, "isoformat"):
@@ -107,11 +106,19 @@ def _json(value: Any) -> str:
     return json.dumps(plain(value), indent=2, ensure_ascii=False)
 
 
+def _iso(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _owner(path: Path, *, create: bool = False) -> Owner:
+    return Owner(path, create=create)
+
+
 def _wallets(path: Path) -> list[str]:
     if not path.exists():
         return []
     # A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
-    names = [stored_wallet_name(budget["wallet"]) for budget in Ledger(path).budgets()]
+    names = [stored_wallet_name(budget.wallet) for budget in _owner(path).budgets()]
     return list(dict.fromkeys(names))
 
 
@@ -122,16 +129,12 @@ def _wallet(args: argparse.Namespace, path: Path) -> str:
     if len(known) == 1:
         return known[0]
     if not known:
-        raise BudgetError(
+        raise BudgetUnavailable(
             f"no budget in {path} yet: walletcap set --wallet <address> --per-day <dollars>"
         )
     raise _Usage(
         f"the file holds {len(known)} budgets; pick one with --wallet:\n  " + "\n  ".join(known)
     )
-
-
-def _open(args: argparse.Namespace, path: Path) -> Budget:
-    return Budget(_wallet(args, path), path=path, create=False)
 
 
 def _detail(status: Status) -> str:
@@ -157,7 +160,8 @@ def _detail(status: Status) -> str:
 
 def _status(args: argparse.Namespace, path: Path) -> str:
     if args.wallet is None:
-        statuses = [Budget(wallet, path=path, create=False).status() for wallet in _wallets(path)]
+        known = _wallets(path)
+        statuses = [_owner(path).status(wallet) for wallet in known]
         if args.json:
             return _json({"path": path, "budgets": statuses})
         if not statuses:
@@ -166,7 +170,7 @@ def _status(args: argparse.Namespace, path: Path) -> str:
                 "  walletcap set --wallet <address> --per-day 150 --per-payment 50"
             )
         return "\n".join([f"Budget file {path}", "", *(status.summary for status in statuses)])
-    status = _open(args, path).status()
+    status = _owner(path).status(_wallet(args, path))
     return _json(status) if args.json else _detail(status)
 
 
@@ -180,33 +184,23 @@ def _set(args: argparse.Namespace, path: Path) -> str:
     if isinstance(max_payments, str):
         count = strip_ascii(max_payments)
         if not count.isascii() or not count.isdigit() or len(count.lstrip("0")) > 19:
-            raise BudgetError("--max-payments must be a whole number of payments, or none")
+            raise UsageError("--max-payments must be a whole number of payments, or none")
         max_payments = int(count)
-    limits = _limits(
-        per_payment=none(args.per_payment),
-        per_hour=args.per_hour,
-        per_day=args.per_day,
-        per_week=args.per_week,
-        cap=args.cap,
-        window=args.window,
-        max_payments=max_payments,
-    )
-    if not limits:
+    limits: dict[str, object] = {
+        "per_payment": none(args.per_payment),
+        "per_hour": args.per_hour,
+        "per_day": args.per_day,
+        "per_week": args.per_week,
+        "cap": args.cap,
+        "window": args.window,
+        "max_payments": max_payments,
+    }
+    if all(value is None or value is UNSET for value in limits.values()):
         raise _Usage("set needs a limit, like --per-day 150 or --per-payment 50")
     if args.wallet is None and len(_wallets(path)) != 1:
         raise _Usage("set needs --wallet <address>")
     wallet = _wallet(args, path)
-    ledger = Ledger(path, create=True)
-    if ledger.budget(wallet) is None:
-        if "cap" not in limits:
-            raise BudgetError(
-                f"{short_wallet(wallet)} has no budget yet: give it a rolling limit too, "
-                "like --per-day 150"
-            )
-        ledger.create_budget(wallet, **limits)
-    else:
-        ledger.set_limits(wallet, **limits)
-    status = Budget(wallet, path=path, create=False).status()
+    status = _owner(path, create=True).set_limits(wallet, **limits)  # type: ignore[arg-type]
     if args.json:
         return _json(status)
     now = describe_limits(
@@ -223,33 +217,36 @@ def _set(args: argparse.Namespace, path: Path) -> str:
 
 
 def _freeze(args: argparse.Namespace, path: Path) -> str:
-    budget = _open(args, path)
-    budget.freeze()
+    wallet = _wallet(args, path)
+    owner = _owner(path)
+    owner.freeze(wallet)
     if args.json:
-        return _json(budget.status())
+        return _json(owner.status(wallet))
     return (
-        f"Frozen {short_wallet(budget.wallet)}: every payment from it is refused, "
+        f"Frozen {short_wallet(wallet)}: every payment from it is refused, "
         "on every rail and in every process, until you run unfreeze."
     )
 
 
 def _unfreeze(args: argparse.Namespace, path: Path) -> str:
-    budget = _open(args, path)
-    budget.unfreeze()
-    return _json(budget.status()) if args.json else f"Unfrozen. {budget.status().summary}"
+    wallet = _wallet(args, path)
+    owner = _owner(path)
+    owner.unfreeze(wallet)
+    status = owner.status(wallet)
+    return _json(status) if args.json else f"Unfrozen. {status.summary}"
 
 
 def _history(args: argparse.Namespace, path: Path) -> str:
-    budget = _open(args, path)
-    payments = budget.history(limit=args.limit)
+    wallet = _wallet(args, path)
+    payments = _owner(path).history(wallet, limit=args.limit)
     if args.json:
         return _json(payments)
     if not payments:
-        return f"No payments from {short_wallet(budget.wallet)} yet."
+        return f"No payments from {short_wallet(wallet)} yet."
     lines = []
     for payment in payments:
         fields = [
-            payment.at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            _iso(payment.at),
             format_usd(payment.amount).rjust(10),
             payment.status.ljust(9),
             payment.rail.ljust(6),
@@ -262,18 +259,18 @@ def _history(args: argparse.Namespace, path: Path) -> str:
 
 
 def _holds(args: argparse.Namespace, path: Path) -> str:
-    budget = _open(args, path)
-    holds = budget.holds()
+    wallet = _wallet(args, path)
+    holds = _owner(path).holds(wallet)
     if args.json:
         return _json(holds)
     if not holds:
-        return f"No open payments from {short_wallet(budget.wallet)}."
+        return f"No open payments from {short_wallet(wallet)}."
     lines = []
     for hold in holds:
         until = (
-            "counts until released"
-            if hold.until is None
-            else f"counts until {hold.until.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+            "counts until voided or settled"
+            if hold.counts_until is None
+            else f"counts until {_iso(hold.counts_until)}"
         )
         fields = [
             hold.id,
@@ -288,76 +285,99 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
     return "\n".join(lines)
 
 
-def _release_unknown(args: argparse.Namespace, path: Path) -> str:
+def _void_unknown(args: argparse.Namespace, path: Path) -> str:
     """Every payment of unknown or refused outcome older than --older-than that can't settle.
 
-    With no settle-by time, once it is an hour and a minute old. For an owner who has
-    checked the chain.
+    With no settle-by time, once it is an hour and a minute old. For an owner who has checked
+    the chain.
     """
 
     if args.id is not None:
-        raise _Usage("release takes an id or --all-unknown, not both")
+        raise _Usage("void takes an id or --all-unknown, not both")
     if args.older_than is None:
-        raise _Usage("release --all-unknown needs --older-than, like --older-than 24h")
+        raise _Usage("void --all-unknown needs --older-than, like --older-than 24h")
     older_than = to_window_ms(args.older_than, "--older-than")
-    if not path.exists():
-        raise BudgetError(f"no budget file at {path}")
     wallet = _wallet(args, path)
-    released = Ledger(path).void_unknown(wallet, older_than)
+    voided = _owner(path).void_unknown(wallet, older_than=older_than)
     if args.json:
-        return _json([{"id": row["payment"], "amount": row["amount"]} for row in released])
+        return _json(voided)
     window = format_window(older_than)
-    if not released:
+    if not voided:
         return (
-            f"No payment of unknown or refused outcome from {short_wallet(wallet)} can be released "
+            f"No payment of unknown or refused outcome from {short_wallet(wallet)} can be voided "
             f"yet. One goes once it is older than {window} and its payee can no longer settle it; "
             "one with no settle-by time, once it is also an hour and a minute old."
         )
-    plural = "" if len(released) == 1 else "s"
-    total = sum(row["amount"] for row in released)
+    plural = "" if len(voided) == 1 else "s"
+    total = sum(payment.amount for payment in voided)
     return (
-        f"Released {len(released)} payment{plural} of unknown or refused outcome older than {window} "
+        f"Voided {len(voided)} payment{plural} of unknown or refused outcome older than {window} "
         f"({format_usd(total)} from {short_wallet(wallet)}): they no longer count. "
         "Only do this for payments you know never left the wallet."
     )
 
 
-def _release(args: argparse.Namespace, path: Path) -> str:
-    if args.all_unknown:
-        return _release_unknown(args, path)
-    if args.id is None:
-        raise _Usage("release needs the id of an in-flight payment; history shows it")
+def _payment(args: argparse.Namespace, path: Path, owner: Owner) -> PaymentRecord:
     if not path.exists():
-        raise BudgetError(f"no budget file at {path}")
-    ledger = Ledger(path)
-    payment = ledger.payment(args.id)
+        raise _Usage(f"no budget file at {path}")
+    payment = owner.payment(args.id)
     if payment is None:
-        raise BudgetError(f"no payment {args.id} in {path}")
-    if args.wallet is not None and payment["wallet"] != normalize_wallet(args.wallet):
-        raise BudgetError(
-            f"{args.id} is {short_wallet(payment['wallet'])}'s payment, "
+        raise _Usage(f"no payment {args.id} in {path}")
+    if args.wallet is not None and payment.wallet != normalize_wallet(args.wallet):
+        raise _Usage(
+            f"{args.id} is {short_wallet(payment.wallet)}'s payment, "
             f"not {short_wallet(normalize_wallet(args.wallet))}'s"
         )
-    if payment["state"] != "held":
-        raise BudgetError(
-            f"{args.id} is recorded as {payment['state']}; only an in-flight payment can be released"
-        )
-    ledger.void(args.id, evidence="released by its owner")
+    return payment
+
+
+def _void(args: argparse.Namespace, path: Path) -> str:
+    if args.all_unknown:
+        return _void_unknown(args, path)
+    if args.id is None:
+        raise _Usage("void needs the id of a held payment; holds and history show it")
+    if not path.exists():
+        raise _Usage(f"no budget file at {path}")
+    owner = _owner(path)
+    payment = _payment(args, path, owner)
+    if payment.state == "void":
+        return _json(payment) if args.json else f"{args.id} is void already: it counts nothing."
+    voided = owner.void(args.id, evidence="voided by its owner")
+    if args.json:
+        return _json(voided)
     return (
-        f"Released {args.id} ({format_usd(payment['amount'])} from "
-        f"{short_wallet(payment['wallet'])}): it no longer counts. "
+        f"Voided {args.id} ({format_usd(payment.amount)} from "
+        f"{short_wallet(payment.wallet)}): it no longer counts. "
         "Only do this for a payment you know never left the wallet."
     )
 
 
-_COMMANDS = {
+def _settle(args: argparse.Namespace, path: Path) -> str:
+    if args.id is None:
+        raise _Usage("settle needs the id of a payment; holds and history show it")
+    if not path.exists():
+        raise _Usage(f"no budget file at {path}")
+    owner = _owner(path)
+    payment = _payment(args, path, owner)
+    settled = owner.settle(args.id, evidence=args.tx or "settled by its owner")
+    if args.json:
+        return _json(settled)
+    until = "" if settled.counts_until is None else f"; it counts until {_iso(settled.counts_until)}"
+    return (
+        f"Settled {args.id} ({format_usd(payment.amount)} from "
+        f"{short_wallet(payment.wallet)}){until}."
+    )
+
+
+_COMMANDS: dict[str, Callable[[argparse.Namespace, Path], str]] = {
     "status": _status,
     "set": _set,
     "freeze": _freeze,
     "unfreeze": _unfreeze,
     "history": _history,
     "holds": _holds,
-    "release": _release,
+    "void": _void,
+    "settle": _settle,
 }
 
 
@@ -369,7 +389,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except _Usage as error:
         print(error, file=sys.stderr)
         return 2
-    except BudgetError as error:
+    except Exception as error:
+        if not is_walletcap_error(error):
+            raise
         print(error, file=sys.stderr)
         return 1
     return 0

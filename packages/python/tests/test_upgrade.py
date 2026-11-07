@@ -28,7 +28,8 @@ JS = REPO / "packages" / "js"
 FIXTURES = REPO / "spec" / "fixtures"
 sys.path.insert(0, str(SOURCE))
 
-from walletcap import Ledger, _clock  # noqa: E402
+from walletcap import _clock  # noqa: E402
+from walletcap._ledger import Ledger  # noqa: E402
 
 NODE = shutil.which("node")
 
@@ -101,7 +102,7 @@ def test_a_crash_mid_upgrade_leaves_the_file_as_it_was(tmp_path: Path) -> None:
     with closing(sqlite3.connect(source)) as connection:
         (payments,) = connection.execute("SELECT count(*) FROM spend").fetchone()
     script = (
-        "import sys; sys.path.insert(0, sys.argv[1]); from walletcap import Ledger; "
+        "import sys; sys.path.insert(0, sys.argv[1]); from walletcap._ledger import Ledger; "
         "Ledger(sys.argv[2]); print('done', flush=True)"
     )
 
@@ -155,7 +156,7 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
     wallet = "0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a"
     python = (
         "import json, pathlib, sys, time; sys.path.insert(0, sys.argv[1]); "
-        "from walletcap import Ledger\n"
+        "from walletcap._ledger import Ledger\n"
         "while not pathlib.Path(sys.argv[3]).exists(): time.sleep(0.001)\n"
         "status = Ledger(sys.argv[2]).status(sys.argv[4])\n"
         "print(json.dumps({'payments': status['payments'], 'in_flight': status['in_flight']}))"

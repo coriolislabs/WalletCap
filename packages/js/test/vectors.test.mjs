@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
-import { BudgetError, BudgetRefused } from '../dist/core/errors.js';
+import { BudgetRefused, UsageError } from '../dist/core/errors.js';
 import { Ledger } from '../dist/core/ledger.js';
 
 const VECTORS = JSON.parse(readFileSync(new URL('../../../spec/vectors/ledger.json', import.meta.url), 'utf8'));
@@ -22,11 +22,11 @@ const outcome = async (work, expect, check) => {
     result = await work();
   } catch (error) {
     if (expect.refused !== undefined && error instanceof BudgetRefused) {
-      assert.deepEqual({ refused: error.reason, source: error.source, brief: error.brief },
+      assert.deepEqual({ refused: error.code, source: error.source, brief: error.brief },
         { refused: expect.refused, source: expect.source, brief: expect.brief });
       return;
     }
-    if (expect.error === 'usage' && error instanceof BudgetError && !(error instanceof BudgetRefused)) return;
+    if (expect.error === 'usage' && error instanceof UsageError) return;
     throw error;
   }
   assert.equal(expect.refused ?? expect.error, undefined, `expected ${JSON.stringify(expect)}, got ${JSON.stringify(result, (_, v) => (typeof v === 'bigint' ? String(v) : v))}`);

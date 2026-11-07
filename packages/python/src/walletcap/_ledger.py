@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from walletcap import _clock
-from walletcap.errors import BudgetError, BudgetRefused
+from walletcap.errors import BudgetRefused, BudgetUnavailable, UsageError
 from walletcap.money import MAX_AMOUNT, format_amount, format_window, normalize_wallet, short_wallet
 
 __all__ = [
@@ -112,7 +112,7 @@ def _spec(name: str) -> Spec:
         try:
             text = (resources.files("walletcap") / "spec" / name).read_text(encoding="utf-8")
         except OSError as error:
-            raise BudgetError(f"walletcap's package is missing spec/{name}; reinstall it") from error
+            raise BudgetUnavailable(f"walletcap's package is missing spec/{name}; reinstall it") from error
         _SPEC[name] = parse_spec(text)
     return _SPEC[name]
 
@@ -129,10 +129,11 @@ def _version(text: str) -> tuple[int, ...]:
 
 
 def _whole(value: object, label: str, low: int, high: int) -> int:
-    if type(value) is not int:
-        raise BudgetError(f"{label} must be an integer")
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise UsageError(f"{label} must be an integer")
+    value = int(value)
     if not low <= value <= high:
-        raise BudgetError(f"{label} must be an integer from {low} to {high}")
+        raise UsageError(f"{label} must be an integer from {low} to {high}")
     return value
 
 
@@ -152,13 +153,13 @@ def payment_id(value: object) -> str:
     """A payment's identity: the rail's own (eip3009:<from>:<nonce>, tx:<hash>) or the caller's."""
 
     if not isinstance(value, str) or _ID.fullmatch(value) is None:
-        raise BudgetError("a payment id is 1 to 160 of letters, digits and _ . : @ / + -")
+        raise UsageError("a payment id is 1 to 160 of letters, digits and _ . : @ / + -")
     return value
 
 
 def _rail(value: object) -> str:
     if not isinstance(value, str) or _RAIL.fullmatch(value) is None:
-        raise BudgetError("rail must be a plain identifier")
+        raise UsageError("rail must be a plain identifier")
     return value
 
 
@@ -166,7 +167,7 @@ def _text(value: object, label: str, limit: int) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or len(value) > limit:
-        raise BudgetError(f"{label} must be a string of at most {limit} characters")
+        raise UsageError(f"{label} must be a string of at most {limit} characters")
     return value
 
 
@@ -224,7 +225,7 @@ def _held_note(held_payments: int, ids: list[str]) -> str:
     more = f" and {held_payments - len(ids)} more" if held_payments > len(ids) else ""
     return (
         f"{', '.join(ids)}{more}; walletcap holds lists them, "
-        "and if one never left the wallet its owner can release it"
+        "and if one never left the wallet its owner can void it"
     )
 
 
@@ -328,23 +329,23 @@ class Ledger:
         self, path: str | Path, *, busy_timeout_seconds: float = 30.0, create: bool = False
     ) -> None:
         if not busy_timeout_seconds > 0:
-            raise BudgetError("busy_timeout_seconds must be positive")
+            raise UsageError("busy_timeout_seconds must be positive")
         self._path = Path(path)
         self._busy_timeout = float(busy_timeout_seconds)
         self._names: dict[str, list[str]] = {}
         if not self._path.exists():
             if not create:
-                raise BudgetError(f"no budget file at {self._path}")
+                raise BudgetUnavailable(f"no budget file at {self._path}")
             self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             try:
                 os.close(os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
             except FileExistsError:
                 pass
             except OSError as error:
-                raise BudgetError(f"the budget file {self._path} cannot be used: {error}") from error
+                raise BudgetUnavailable(f"the budget file {self._path} cannot be used: {error}") from error
         version = sqlite3.sqlite_version
         if _version(version) < _version(MIN_SQLITE_VERSION):
-            raise BudgetError(
+            raise BudgetUnavailable(
                 f"walletcap needs SQLite {MIN_SQLITE_VERSION} or later; this Python has {version}"
             )
         self._prepare_file()
@@ -359,7 +360,7 @@ class Ledger:
                 self._path, timeout=self._busy_timeout, isolation_level=None
             )
         except sqlite3.Error as error:
-            raise BudgetError(f"the budget file {self._path} cannot be used: {error}") from error
+            raise BudgetUnavailable(f"the budget file {self._path} cannot be used: {error}") from error
         connection.row_factory = sqlite3.Row
         _clock.install(connection)
         try:
@@ -370,16 +371,17 @@ class Ledger:
             raise self._failure(error) from error
         return connection
 
-    def _failure(self, error: sqlite3.Error) -> BudgetError:
+    def _failure(self, error: sqlite3.Error) -> BudgetUnavailable | UsageError:
         message = str(error)
         if "walletcap: " in message:
-            return BudgetError(message[message.index("walletcap: ") + len("walletcap: ") :])
+            # A guard trigger refused the write: the call broke the ledger's rules.
+            return UsageError(message[message.index("walletcap: ") + len("walletcap: ") :])
         if getattr(error, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_BUSY or "locked" in message:
-            return BudgetError(
+            return BudgetUnavailable(
                 f"the budget file {self._path} is busy: another process held its write lock "
                 "past the busy timeout"
             )
-        return BudgetError(f"the budget file {self._path} cannot be used: {error}")
+        return BudgetUnavailable(f"the budget file {self._path} cannot be used: {error}")
 
     @contextmanager
     def _transaction(self, begin: str = "BEGIN IMMEDIATE") -> Iterator[sqlite3.Connection]:
@@ -414,10 +416,10 @@ class Ledger:
         if not tables:
             return None
         if "budget_meta" not in tables:
-            raise BudgetError(f"{self._path} is a SQLite file, not a walletcap budget")
+            raise BudgetUnavailable(f"{self._path} is a SQLite file, not a walletcap budget")
         row = connection.execute("SELECT value FROM budget_meta WHERE key = 'schema'").fetchone()
         if row is None:
-            raise BudgetError(
+            raise BudgetUnavailable(
                 f"{self._path} has no schema version; it is not a walletcap budget walletcap can read"
             )
         return str(row[0])
@@ -445,7 +447,7 @@ class Ledger:
                 _script(connection, upgrade.sections["migrate"])
                 _script(connection, schema.sections["guards"])
             else:
-                raise BudgetError(
+                raise BudgetUnavailable(
                     f"{self._path} is at schema {found}, which a newer walletcap wrote; "
                     f"this one reads {SCHEMA_VERSION}"
                 )
@@ -480,7 +482,7 @@ class Ledger:
     def _require(self, connection: sqlite3.Connection, wallet: str) -> Row:
         row = self._one(connection, "budget", {"wallet": wallet})
         if row is None:
-            raise BudgetError(f"{short_wallet(wallet)} has no budget in {self._path}")
+            raise BudgetUnavailable(f"{short_wallet(wallet)} has no budget in {self._path}")
         return row
 
     def now(self) -> int:
@@ -523,7 +525,7 @@ class Ledger:
         }
         with self._transaction() as connection:
             if self._one(connection, "budget", {"wallet": wallet}) is not None:
-                raise BudgetError(f"{short_wallet(wallet)} already has a budget in {self._path}")
+                raise UsageError(f"{short_wallet(wallet)} already has a budget in {self._path}")
             self._run(connection, "create_budget", values)
             return self._require(connection, wallet)
 
@@ -533,7 +535,7 @@ class Ledger:
         wallet = normalize_wallet(name)
         unknown = set(limits) - {"cap", "window_ms", "per_payment", "max_payments"}
         if unknown:
-            raise BudgetError(f"set_limits takes cap, window_ms, per_payment and max_payments, not {sorted(unknown)}")
+            raise UsageError(f"set_limits takes cap, window_ms, per_payment and max_payments, not {sorted(unknown)}")
         cap, window_ms = limits.get("cap"), limits.get("window_ms")
         per_payment, max_payments = limits.get("per_payment"), limits.get("max_payments")
         values = {
@@ -582,7 +584,7 @@ class Ledger:
         with self._read() as connection:
             why = self._one(connection, "refusal", args)
             if why is None:
-                raise BudgetError(f"{short_wallet(wallet)} has no budget in {self._path}")
+                raise BudgetUnavailable(f"{short_wallet(wallet)} has no budget in {self._path}")
             remaining = 0 if why["frozen_at"] is not None else max(why["cap"] - why["counted"], 0)
             if why["code"] is None:
                 return None, remaining
@@ -633,7 +635,7 @@ class Ledger:
                 return {**held, "state": "held", "created": True}
             why = self._one(connection, "refusal", args)
             if why is None:
-                raise BudgetError(f"{short_wallet(wallet)} has no budget in {self._path}")
+                raise BudgetUnavailable(f"{short_wallet(wallet)} has no budget in {self._path}")
             if why["existing"] is not None:
                 existing = json.loads(why["existing"])
                 if existing["wallet"] == wallet and existing["amount"] == args["amount"]:
@@ -644,19 +646,19 @@ class Ledger:
                         "state": existing["state"],
                         "created": False,
                     }
-                raise BudgetError(
+                raise UsageError(
                     f"payment {args['payment']} is already in the ledger, for "
                     f"{format_amount(existing['amount'], why['unit'])} from "
                     f"{short_wallet(existing['wallet'])}"
                 )
             if why["settles_too_soon"]:
                 assert isinstance(args["until"], int)
-                raise BudgetError(
+                raise UsageError(
                     f"settles_by {_iso(args['until'])} is not after now ({_iso(why['now'])}): "
                     "a payment can't settle before it is made"
                 )
             if why["code"] is None:
-                raise BudgetError("walletcap could not hold the payment, and the ledger gives no reason")
+                raise BudgetUnavailable("walletcap could not hold the payment, and the ledger gives no reason")
 
             def open_ids() -> list[str]:
                 rows = self._run(connection, "open_ids", {"wallet": wallet})
@@ -673,11 +675,11 @@ class Ledger:
             moved = self._one(connection, statement, {"payment": key, **args})
             current = self._one(connection, "payment", {"payment": key})
             if current is None:
-                raise BudgetError(f"no payment {key} in {self._path}")
+                raise UsageError(f"no payment {key} in {self._path}")
             if moved is None:
                 reason = why(current)
                 if reason is not None:
-                    raise BudgetError(reason)
+                    raise UsageError(reason)
             return current
 
     def settle(self, payment: str, *, evidence: str | None = None) -> Row:
@@ -703,7 +705,7 @@ class Ledger:
         """held with no until -> held until ``until``, or ``within_ms`` from now. Kept once set."""
 
         if (until is None) == (within_ms is None):
-            raise BudgetError("bound takes until or within_ms")
+            raise UsageError("bound takes until or within_ms")
         args = {
             "until": None if until is None else millis(until, "until"),
             "within_ms": None if within_ms is None else millis(within_ms, "within_ms", low=1),
@@ -720,7 +722,7 @@ class Ledger:
         """Note a held payment's outcome: 'unknown' or 'refused'. It counts the same."""
 
         if outcome not in ("unknown", "refused"):
-            raise BudgetError("outcome is 'unknown' or 'refused'")
+            raise UsageError("outcome is 'unknown' or 'refused'")
         args = {"outcome": outcome, "evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT)}
         return self._move("note", payment, args, lambda _: None)
 
@@ -734,7 +736,7 @@ class Ledger:
         with self._read() as connection:
             row = self._one(connection, "status", {"wallet": wallet})
         if row is None:
-            raise BudgetError(f"{short_wallet(wallet)} has no budget in {self._path}")
+            raise BudgetUnavailable(f"{short_wallet(wallet)} has no budget in {self._path}")
         return row
 
     def history(self, name: str, *, limit: int = 20) -> list[Row]:
@@ -753,7 +755,7 @@ class Ledger:
         name: str,
         older_than_ms: int,
         *,
-        evidence: str = "released by its owner: unknown or refused outcome",
+        evidence: str = "voided by its owner: unknown or refused outcome",
     ) -> list[Row]:
         """The owner's bulk release: void every held payment of unknown or refused outcome.
 
@@ -792,4 +794,4 @@ def _script(connection: sqlite3.Connection, sql: str) -> None:
     if buffer.strip() and not all(
         part.strip().startswith("--") or not part.strip() for part in buffer.splitlines()
     ):
-        raise BudgetError("spec: a section ends inside a statement")
+        raise UsageError("spec: a section ends inside a statement")

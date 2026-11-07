@@ -64,7 +64,7 @@ test("the ledger reads the time once it holds the write lock, so waiting for ano
   const exited = new Promise(resolve => holder.on('exit', resolve));
   await new Promise(resolve => holder.stdout.once('data', resolve));
   const asked = Date.now();
-  const held = await budget.reserve('$1');
+  const held = await budget.hold('$1');
   const [row] = await budget.history();
   assert.equal(row.id, held.id);
   // 0.3.0 read the time before it waited for the lock, so the payment was dated, and stopped

@@ -4,8 +4,8 @@
 // client from @x402/core, through the client's public payment hooks, so it works under
 // @x402/fetch, @x402/axios and Coinbase's CDP spend controls alike: whatever else is configured,
 // every payment the client creates is counted in the shared budget before it is sent.
-import type { Budget, Reservation } from '../core/budget.js';
-import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from '../core/errors.js';
+import type { Budget, Hold } from '../core/budget.js';
+import { BudgetRefused, forAgent, PaymentNotRecorded, UsageError } from '../core/errors.js';
 
 /** The terms an x402 payee offers: one entry of a 402 answer's `accepts`. */
 export interface PaymentRequirements {
@@ -56,7 +56,7 @@ const GUARDED = Symbol.for('walletcap/x402-guard');
 const CDP_APPLIED = '@coinbase/cdp-sdk/x402/spend-controls/applied';
 const hasCdpControls = (client: object): boolean => Object.getOwnPropertySymbols(client)
   .some(symbol => symbol.description === CDP_APPLIED);
-const oneCounter = (): BudgetError => new BudgetError(
+const oneCounter = (): UsageError => new UsageError(
   'this x402 client already has Coinbase CDP spend controls; the CDP store and the budget guard both count the payment. Use one: guard(client, budget), or applySpendControls with cdpStore(budget), not both.',
 );
 const SLOT = Symbol('walletcap/x402-payment');
@@ -143,17 +143,17 @@ const BUILT_IN = new Map(USD_ASSETS.map(({ network, asset, decimals }) => [asset
  * asset, but can't change a built-in one's decimals.
  */
 export function assetTable(extra: unknown): Map<string, number> {
-  if (!Array.isArray(extra)) throw new BudgetError('assets must be a list of { network, asset, decimals }');
+  if (!Array.isArray(extra)) throw new UsageError('assets must be a list of { network, asset, decimals }');
   const table = new Map(BUILT_IN);
   for (const entry of extra as unknown[]) {
     const { network, asset, decimals } = (entry ?? {}) as Partial<AssetEntry>;
     if (typeof network !== 'string' || typeof asset !== 'string' || !Number.isInteger(decimals) || (decimals as number) < 0 || (decimals as number) > 18) {
-      throw new BudgetError('each asset is { network, asset, decimals }: a USD-pegged stablecoin, counted at $1 a token, with decimals from 0 to 18');
+      throw new UsageError('each asset is { network, asset, decimals }: a USD-pegged stablecoin, counted at $1 a token, with decimals from 0 to 18');
     }
     const key = assetKey(network, asset);
     const builtIn = BUILT_IN.get(key);
     if (builtIn !== undefined && builtIn !== decimals) {
-      throw new BudgetError(`${asset} on ${network} is already priced with ${builtIn} decimals; an asset override can't change them`);
+      throw new UsageError(`${asset} on ${network} is already priced with ${builtIn} decimals; an asset override can't change them`);
     }
     table.set(key, decimals as number);
   }
@@ -163,8 +163,8 @@ export function assetTable(extra: unknown): Map<string, number> {
 export const atomicOf = (requirements: PaymentRequirements): bigint => {
   const raw = requirements.amount ?? requirements.maxAmountRequired;
   let atomic: bigint;
-  try { atomic = BigInt(raw as string); } catch { throw new BudgetError(`the x402 amount ${JSON.stringify(raw)} is not an integer`); }
-  if (atomic < 0n) throw new BudgetError('the x402 amount is negative');
+  try { atomic = BigInt(raw as string); } catch { throw new BudgetRefused('terms', `the x402 amount ${JSON.stringify(raw)} is not an integer`); }
+  if (atomic < 0n) throw new BudgetRefused('terms', 'the x402 amount is negative');
   return atomic;
 };
 
@@ -239,28 +239,28 @@ const fingerprint = (payload: unknown): string | null => {
 
 interface Slot {
   amount: bigint;
-  reservation: Reservation | null;
+  hold: Hold | null;
   payload: unknown;
 }
 
 /**
  * Count every payment `client` makes in `budget`. A payment is checked before it is signed,
- * reserved once its payload exists (after every other hook has passed), and stops counting only
+ * held once its payload exists (after every other hook has passed), and stops counting only
  * when the server confirms settlement (it then counts for one window) or when it can no longer
  * settle.
  */
 export function guard<C extends X402HookedClient>(client: C, budget: Budget, { assets = [] }: { assets?: AssetEntry[] } = {}): C {
   for (const hook of ['onBeforePaymentCreation', 'onAfterPaymentCreation', 'onPaymentCreationFailure', 'onPaymentResponse'] as const) {
     if (typeof (client as Partial<X402HookedClient> | undefined)?.[hook] !== 'function') {
-      throw new BudgetError(`guard() takes an x402Client from @x402/core 2.x; this client has no ${hook}()`);
+      throw new UsageError(`guard() takes an x402Client from @x402/core 2.x; this client has no ${hook}()`);
     }
   }
   const marked = client as C & { [GUARDED]?: unknown };
-  if (marked[GUARDED] !== undefined) throw new BudgetError('this x402 client already has a budget guard');
+  if (marked[GUARDED] !== undefined) throw new UsageError('this x402 client already has a budget guard');
   if (hasCdpControls(client)) throw oneCounter();
   const table = assetTable(assets);
-  const byPayload = new WeakMap<object, Reservation>();
-  const byFingerprint = new Map<string, Reservation>();
+  const byPayload = new WeakMap<object, Hold>();
+  const byFingerprint = new Map<string, Hold>();
 
   const priced = (requirements: PaymentRequirements): boolean => table.has(assetKey(requirements.network, requirements.asset));
   const price = (requirements: PaymentRequirements): bigint => {
@@ -271,17 +271,17 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     }
     return toMicros(atomicOf(requirements), decimals);
   };
-  const remember = (payload: unknown, reservation: Reservation): void => {
-    if (payload !== null && typeof payload === 'object') byPayload.set(payload, reservation);
+  const remember = (payload: unknown, hold: Hold): void => {
+    if (payload !== null && typeof payload === 'object') byPayload.set(payload, hold);
     const print = fingerprint(payload);
     if (print === null) return;
-    byFingerprint.set(print, reservation);
+    byFingerprint.set(print, hold);
     if (byFingerprint.size > FINGERPRINTS_KEPT) {
       const oldest = byFingerprint.keys().next().value;
       if (oldest !== undefined) byFingerprint.delete(oldest);
     }
   };
-  const recall = (payload: unknown): Reservation | undefined => {
+  const recall = (payload: unknown): Hold | undefined => {
     if (payload !== null && typeof payload === 'object' && byPayload.has(payload)) return byPayload.get(payload);
     const print = fingerprint(payload);
     return print === null ? undefined : byFingerprint.get(print);
@@ -309,13 +309,13 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
   client.onBeforePaymentCreation(async (context: PaymentContext) => {
     if (hasCdpControls(client)) throw oneCounter();
     const amount = price(context.selectedRequirements);
-    const slot: Slot = { amount, reservation: null, payload: null };
+    const slot: Slot = { amount, hold: null, payload: null };
     context[SLOT] = slot;
     if (amount === 0n) return undefined;
-    // An early refusal, before anything is signed. The reservation that binds comes after. The
-    // agent is told why, not which holds its owner could release: that is for the owner's CLI.
+    // An early refusal, before anything is signed. The hold that binds comes after. The
+    // agent is told why, not which holds its owner could void: that is for the owner's CLI.
     const check = await budget.check(amount);
-    if (!check.ok) throw new BudgetRefused(check.reason ?? 'budget', check.brief ?? check.message ?? 'refused');
+    if (!check.ok) throw new BudgetRefused(check.code ?? 'budget', check.brief ?? check.message ?? 'refused');
     // The policy above has already set aside longer terms; this holds for a client without one.
     const tooLong = timeoutRefusal(context.selectedRequirements);
     if (tooLong !== null) throw tooLong;
@@ -333,7 +333,7 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     const payload = context.paymentPayload as SignedPayload | undefined;
     try {
       const id = identityOf(payload);
-      slot.reservation = await budget.reserve(slot.amount, {
+      slot.hold = await budget.hold(slot.amount, {
         rail: 'x402',
         ...(requirements.payTo === undefined ? {} : { to: requirements.payTo }),
         ...(typeof url === 'string' ? { note: url.slice(0, 1024) } : {}),
@@ -345,30 +345,31 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
       throw forAgent(error);
     }
     slot.payload = context.paymentPayload;
-    remember(context.paymentPayload, slot.reservation);
+    remember(context.paymentPayload, slot.hold);
   });
 
   client.onPaymentCreationFailure(async (context: PaymentContext) => {
-    // A later hook threw after this guard reserved: the payload is never returned, so never sent.
+    // A later hook threw after this guard held the payment: the payload is never returned, so
+    // never sent. A hold this guard found already in the ledger is left as it was.
     const slot = context[SLOT] as Slot | undefined;
-    if (slot?.reservation?.open) {
+    if (slot?.hold?.state === 'held' && slot.hold.created) {
       forget(slot.payload);
-      await slot.reservation.release();
+      await slot.hold.void({ reason: 'not sent: a later x402 hook failed' });
     }
     return undefined;
   });
 
   client.onPaymentResponse(async (context: PaymentContext) => {
-    const reservation = recall(context.paymentPayload);
-    if (reservation === undefined) return undefined;
+    const hold = recall(context.paymentPayload);
+    if (hold === undefined) return undefined;
     forget(context.paymentPayload);
-    if (!reservation.open) return undefined;
+    if (hold.state !== 'held') return undefined;
     if (context.settleResponse?.success === true) {
       try {
-        await reservation.commit({ tx: context.settleResponse.transaction });
+        await hold.settle({ tx: context.settleResponse.transaction });
       } catch (error) {
-        // Settled but not recorded: the reservation stays open and keeps counting.
-        throw new PaymentNotRecorded(reservation.id, { cause: error });
+        // Settled but not recorded: the payment stays held and keeps counting.
+        throw new PaymentNotRecorded(hold.id, { cause: error });
       }
     } else {
       // No settlement confirmed. The payee still holds the signed authorization and could settle
@@ -376,10 +377,10 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
       // settled at the last possible moment.
       const refused = context.settleResponse !== undefined || context.paymentRequired !== undefined;
       try {
-        await reservation.annotate({ outcome: refused ? 'refused' : 'unknown' });
+        await hold.note(refused ? 'refused' : 'unknown');
       } catch (error) {
-        // Not recorded either way: the reservation stays open and keeps counting.
-        throw new PaymentNotRecorded(reservation.id, { cause: error, settled: false });
+        // Not recorded either way: the payment stays held and keeps counting.
+        throw new PaymentNotRecorded(hold.id, { cause: error, settled: false });
       }
     }
     return undefined;
@@ -401,9 +402,9 @@ export function guardAgentKit<P extends object>(provider: P, budget: Budget, opt
   const target = provider as P & { createX402Client?: unknown; [GUARDED_PROVIDER]?: unknown };
   const create = target?.createX402Client;
   if (typeof create !== 'function') {
-    throw new BudgetError("guardAgentKit() takes AgentKit's X402ActionProvider; this provider has no createX402Client(), so walletcap can't count its payments");
+    throw new UsageError("guardAgentKit() takes AgentKit's X402ActionProvider; this provider has no createX402Client(), so walletcap can't count its payments");
   }
-  if (target[GUARDED_PROVIDER] !== undefined) throw new BudgetError('this provider already has a budget guard');
+  if (target[GUARDED_PROVIDER] !== undefined) throw new UsageError('this provider already has a budget guard');
   assetTable(options.assets ?? []); // a bad asset list fails here, not at the first payment
   Object.defineProperty(provider, 'createX402Client', {
     value: async (walletProvider: unknown) => guard(await (create as (wallet: unknown) => Promise<X402HookedClient>).call(provider, walletProvider), budget, options),

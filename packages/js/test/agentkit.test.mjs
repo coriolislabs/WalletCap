@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
-import { BudgetError, BudgetRefused, openBudget } from 'walletcap';
+import { BudgetRefused, openBudget, UsageError } from 'walletcap';
 import { guardAgentKit } from 'walletcap/agentkit';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
@@ -55,10 +55,10 @@ test("every client an AgentKit provider builds is guarded, and the merchant's fi
   // The agent approved a 1¢ test quote; the merchant listed $1.00 of real USDC on Base mainnet first.
   const baitAndSwitch = kit.required(10_000);
   baitAndSwitch.accepts.unshift({ ...baitAndSwitch.accepts[0], network: 'eip155:8453', asset: BASE_USDC, amount: '1000000', payTo: STRANGER });
-  await assert.rejects(provider.pay(wallet, baitAndSwitch), error => error instanceof BudgetRefused && error.reason === 'per_payment');
+  await assert.rejects(provider.pay(wallet, baitAndSwitch), error => error instanceof BudgetRefused && error.code === 'per_payment');
   // Each action builds a new client, and every one of them spends from the same budget.
   for (let i = 0; i < 5; i += 1) await provider.pay(wallet, kit.required(10_000));
-  await assert.rejects(provider.pay(wallet, kit.required(10_000)), error => error instanceof BudgetRefused && error.reason === 'budget');
+  await assert.rejects(provider.pay(wallet, kit.required(10_000)), error => error instanceof BudgetRefused && error.code === 'budget');
   assert.equal((await budget.status()).spent, 50_000n);
   assert.deepEqual((await budget.history()).map(p => p.to), Array(5).fill(PAY_TO));
   budget.close();
@@ -66,9 +66,9 @@ test("every client an AgentKit provider builds is guarded, and the merchant's fi
 
 test('only an AgentKit x402 provider can be guarded, and only once', { skip }, async () => {
   const budget = await openBudget({ wallet: kit.account.address, path: join(DIR, 'once.sqlite'), perDay: '$1', create: true });
-  assert.throws(() => guardAgentKit({}, budget), BudgetError);
+  assert.throws(() => guardAgentKit({}, budget), UsageError);
   const badAssets = await standIn();
-  assert.throws(() => guardAgentKit(badAssets, budget, { assets: [{ network: NETWORK }] }), BudgetError);
+  assert.throws(() => guardAgentKit(badAssets, budget, { assets: [{ network: NETWORK }] }), UsageError);
   const provider = guardAgentKit(await standIn(), budget, { assets: [{ network: NETWORK, asset: USDC, decimals: 6 }] });
   assert.throws(() => guardAgentKit(provider, budget), /already has a budget guard/);
   budget.close();

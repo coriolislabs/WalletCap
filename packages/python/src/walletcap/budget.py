@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""One spend budget per wallet, counted across every process, key, permission and rail.
+"""The payer's handle: one wallet's budget, counted across every process, key, permission and rail.
 
-Agent payment kits count "spent so far" per process, per key, per permission or
-per period, so a restart, a second replica, one more key or the next period
-starts the count again. This budget is counted per wallet, in a file every
-process on the host shares, over a rolling window. Changing a limit never
-resets what has been spent, a restart can lower a limit but never raise one,
-and if the count cannot be read, nothing is paid::
+Agent payment kits count "spent so far" per process, per key, per permission or per period, so
+a restart, a second replica, one more key or the next period starts the count again. This
+budget is counted per wallet, in a file every process on the host shares, over a rolling
+window. Changing a limit never resets what has been spent, the limits a payer passes only
+tighten things for its own process, and if the count cannot be read, nothing is paid::
 
     from walletcap import open_budget
 
     # The owner creates the budget once: walletcap set --wallet <address> --per-day 150
-    budget = open_budget(agent_address, per_payment="$50", per_day="$150")
+    budget = open_budget(agent_address)
     with budget.pay("$12.50", to=payee) as payment:
         payment.tx = send_usdc(payee, "12.50")
+
+Changing limits, freezing and voiding or settling by id are the owner's (``walletcap.owner``).
 """
 
 from __future__ import annotations
@@ -24,18 +25,25 @@ import json
 import shlex
 import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
 
-from walletcap.errors import BudgetError, BudgetWarning, NotSent, PaymentNotRecorded
-from walletcap.ledger import Ledger, Row, merged_note_of
+from walletcap._ledger import Ledger, ProcessLimits, Row, merged_note_of
+from walletcap.errors import (
+    BudgetUnavailable,
+    BudgetWarning,
+    NotSent,
+    PaymentNotRecorded,
+    UsageError,
+)
 from walletcap.money import (
     DAY_MS,
     HOUR_MS,
     WEEK_MS,
+    Micros,
     default_budget_path,
     describe_limits,
     expand_home,
@@ -49,13 +57,13 @@ from walletcap.money import (
 )
 
 __all__ = [
-    "UNSET",
     "Budget",
     "Check",
+    "HeldPayment",
     "Hold",
-    "Payment",
     "Paying",
-    "Reservation",
+    "Payment",
+    "PaymentRecord",
     "Status",
     "open_budget",
 ]
@@ -69,35 +77,34 @@ UNSET: Final = _Unset.UNSET
 """A limit left out: no opinion, as opposed to None (no limit)."""
 
 _OPEN: Final = 2**63 - 1
-
 _TO_LIMIT = 256
 _NOTE_LIMIT = 1024
 
 
 @dataclass(frozen=True)
 class Check:
-    """Whether an amount would be paid right now. Amounts are micro-dollars."""
+    """Whether an amount would be paid right now."""
 
     ok: bool
-    remaining: int
-    reason: str | None = None
+    remaining: Micros
+    code: str | None = None
     message: str | None = None
     brief: str | None = None
 
 
 @dataclass(frozen=True)
 class Status:
-    """What a wallet has spent, has in flight and has left. Amounts are micro-dollars."""
+    """What a wallet has spent, has in flight and has left."""
 
     wallet: str
     path: Path
-    cap: int
+    cap: Micros
     window_ms: int
-    per_payment: int | None
+    per_payment: Micros | None
     max_payments: int | None
-    spent: int
-    in_flight: int
-    remaining: int
+    spent: Micros
+    in_flight: Micros
+    remaining: Micros
     payments: int
     frozen: bool
 
@@ -121,10 +128,10 @@ class Status:
 
 @dataclass(frozen=True)
 class Payment:
-    """One entry of a wallet's history. ``amount`` is micro-dollars."""
+    """One entry of a wallet's history."""
 
     id: str
-    amount: int
+    amount: Micros
     status: str
     counting: bool
     at: datetime
@@ -135,25 +142,39 @@ class Payment:
 
 
 @dataclass(frozen=True)
-class Hold:
-    """An open payment that still counts against the budget. ``amount`` is micro-dollars.
+class PaymentRecord(Payment):
+    """One payment as its owner sees it: also its wallet, state and how long it counts."""
 
-    ``reason`` is ``"in flight"`` (no outcome yet), ``"refused"`` (the payee
-    said it failed, but may still hold the authorization) or ``"unknown"``
-    (the payment call failed after the money may have left). ``until`` is when
-    it stops counting, or None if only a release ends it.
+    wallet: str = ""
+    state: str = "held"
+    settles_by: datetime | None = None
+    counts_until: datetime | None = None
+
+
+@dataclass(frozen=True)
+class HeldPayment:
+    """A held payment that still counts against the budget.
+
+    ``reason`` is ``"in flight"`` (no outcome yet), ``"refused"`` (the payee said it failed,
+    but may still hold the authorization) or ``"unknown"`` (the payment call failed after the
+    money may have left). ``counts_until`` is when it stops counting, or None if only
+    evidence ends it.
     """
 
     id: str
-    amount: int
+    amount: Micros
     reason: str
     at: datetime
     age_ms: int
-    until: datetime | None
+    settles_by: datetime | None
+    counts_until: datetime | None
     rail: str
     to: str | None
     note: str | None
     error: str | None
+
+
+# --- Reading input ---------------------------------------------------------------------------
 
 
 def _limits(
@@ -176,14 +197,14 @@ def _limits(
     }
     explicit = cap is not None or window is not None
     if len(named) + (1 if explicit else 0) > 1:
-        raise BudgetError("give one rolling limit: per_hour, per_day, per_week, or cap with window")
+        raise UsageError("give one rolling limit: per_hour, per_day, per_week, or cap with window")
     if named:
         ((key, value),) = named.items()
         limits["cap"] = to_micros(value, key)
         limits["window_ms"] = {"per_hour": HOUR_MS, "per_day": DAY_MS, "per_week": WEEK_MS}[key]
     elif explicit:
         if cap is None or window is None:
-            raise BudgetError("cap and window go together, like cap='$150', window='24h'")
+            raise UsageError("cap and window go together, like cap='$150', window='24h'")
         limits["cap"] = to_micros(cap, "cap")
         limits["window_ms"] = to_window_ms(window)
     if per_payment is not UNSET:
@@ -191,31 +212,31 @@ def _limits(
             None if per_payment is None else to_micros(per_payment, "per_payment")
         )
         if limits["per_payment"] == 0:
-            raise BudgetError("per_payment must be more than $0; to stop every payment, freeze")
+            raise UsageError("per_payment must be more than $0; to stop every payment, freeze")
     if max_payments is not UNSET:
         if max_payments is None:
             limits["max_payments"] = None
         elif type(max_payments) is int and max_payments >= 0:
             limits["max_payments"] = max_payments
         else:
-            raise BudgetError("max_payments must be a whole number of payments")
+            raise UsageError("max_payments must be a whole number of payments")
     return limits
 
 
 def _describe(to: str | None, note: str | None, details: dict[str, Any] | None) -> dict[str, Any]:
     if to is not None and (not isinstance(to, str) or len(to) > _TO_LIMIT):
-        raise BudgetError(f"to must be a string of at most {_TO_LIMIT} characters")
+        raise UsageError(f"to must be a string of at most {_TO_LIMIT} characters")
     if note is not None and (not isinstance(note, str) or len(note) > _NOTE_LIMIT):
-        raise BudgetError(f"note must be a string of at most {_NOTE_LIMIT} characters")
+        raise UsageError(f"note must be a string of at most {_NOTE_LIMIT} characters")
     if details is not None and not isinstance(details, dict):
-        raise BudgetError("details must be a dict")
+        raise UsageError("details must be a dict")
     info = {**(details or {}), "to": to, "note": note}
     return {key: value for key, value in info.items() if value is not None}
 
 
-def _positive(micros: int) -> int:
+def _positive(micros: Micros) -> Micros:
     if micros == 0:
-        raise BudgetError("the amount must be more than $0")
+        raise UsageError("the amount must be more than $0")
     return micros
 
 
@@ -223,23 +244,48 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _MILLISECOND = timedelta(milliseconds=1)
 
 
-def _settles_by_ms(settles_by: object) -> int:
+def _moment_ms(moment: object, label: str) -> int:
     """A timezone-aware datetime as milliseconds since the epoch, rounded up.
 
-    A naive datetime would be read as this machine's local time, hours from what
-    the caller meant, so it is refused.
+    A naive datetime would be read as this machine's local time, hours from what the caller
+    meant, so it is refused.
     """
 
-    if not isinstance(settles_by, datetime) or settles_by.utcoffset() is None:
-        raise BudgetError(
-            "settles_by must be a timezone-aware datetime, "
+    if not isinstance(moment, datetime) or moment.utcoffset() is None:
+        raise UsageError(
+            f"{label} must be a timezone-aware datetime, "
             "like datetime.now(UTC) + timedelta(minutes=5)"
         )
-    return -((_EPOCH - settles_by) // _MILLISECOND)
+    return -((_EPOCH - moment) // _MILLISECOND)
+
+
+def _duration_ms(duration: object, label: str) -> int:
+    if not isinstance(duration, timedelta):
+        raise UsageError(f"{label} must be a timedelta, like timedelta(minutes=5)")
+    return -(-duration // _MILLISECOND)
+
+
+def _error_text(error: BaseException) -> str:
+    return str(error)[:200]
+
+
+# --- Views of the ledger's rows, shared with the owner's handle -------------------------------
 
 
 def _moment(ms: int) -> datetime:
     return datetime.fromtimestamp(ms / 1000, tz=UTC)
+
+
+def _info(text: str | None) -> dict[str, Any]:
+    try:
+        info = json.loads(text) if text else {}
+    except ValueError:
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def _settles_by(row: Row) -> datetime | None:
+    return None if row["until"] is None else _moment(row["until"])
 
 
 def _counts_until(row: Row) -> datetime | None:
@@ -262,118 +308,248 @@ def _label(row: Row, info: dict[str, Any]) -> str:
     return str(outcome) if outcome in ("refused", "unknown") else "in flight"
 
 
-def _info(reference: str | None) -> dict[str, Any]:
-    try:
-        info = json.loads(reference) if reference else {}
-    except ValueError:
-        return {}
-    return info if isinstance(info, dict) else {}
+def payment_of(row: Row) -> Payment:
+    """Internal: a history row as a Payment."""
+
+    info = _info(row["info"])
+    return Payment(
+        row["payment"],
+        Micros(row["amount"]),
+        _label(row, info),
+        bool(row["counting"]),
+        _moment(row["held_at"]),
+        row["rail"],
+        info.get("to") or info.get("payTo"),
+        info.get("note") or info.get("network"),
+        row["settled_by"] or info.get("tx"),
+    )
 
 
-class Reservation:
-    """An amount taken from the budget for one payment, until committed or released."""
+def record_of(row: Row) -> PaymentRecord:
+    """Internal: a payment row as its owner sees it."""
 
-    def __init__(self, ledger: Ledger, spend_id: str, amount: int, info: dict[str, Any]) -> None:
+    payment = payment_of(row)
+    return PaymentRecord(
+        payment.id,
+        payment.amount,
+        payment.status,
+        payment.counting,
+        payment.at,
+        payment.rail,
+        payment.to,
+        payment.note,
+        payment.tx,
+        row["wallet"],
+        row["state"],
+        _settles_by(row),
+        _counts_until(row),
+    )
+
+
+def held_payment_of(row: Row) -> HeldPayment:
+    """Internal: a counting row of a held payment."""
+
+    info = _info(row["info"])
+    outcome = row["outcome"]
+    return HeldPayment(
+        row["payment"],
+        Micros(row["amount"]),
+        outcome if outcome in ("refused", "unknown") else "in flight",
+        _moment(row["held_at"]),
+        max(row["now"] - row["held_at"], 0),
+        _settles_by(row),
+        _counts_until(row),
+        row["rail"],
+        info.get("to") or info.get("payTo"),
+        info.get("note") or info.get("network"),
+        row["noted"] or info.get("error"),
+    )
+
+
+def status_of(row: Row, path: Path) -> Status:
+    """Internal: a status row as a Status."""
+
+    return Status(
+        row["wallet"],
+        path,
+        Micros(row["cap"]),
+        row["window_ms"],
+        None if row["per_payment"] is None else Micros(row["per_payment"]),
+        row["max_payments"],
+        Micros(row["spent"]),
+        Micros(row["in_flight"]),
+        Micros(row["remaining"]),
+        row["payments"],
+        row["frozen_at"] is not None,
+    )
+
+
+def path_flag(path: Path) -> str:
+    """Internal: `` --path <file>`` unless it is the default file, for commands a message names."""
+
+    default = expand_home(default_budget_path()).absolute()
+    return "" if path == default else f" --path {shlex.quote(str(path))}"
+
+
+# --- The paying process's own limits ---------------------------------------------------------
+
+
+def _process_limits(row: Row, asked: dict[str, Any]) -> tuple[ProcessLimits, bool]:
+    """The limits this process passed that are tighter than the budget's, and whether any was looser.
+
+    A looser limit does nothing. A limit in another window than the budget's binds as its own.
+    """
+
+    per_payment = cap = window_ms = max_payments = None
+    looser = False
+    if "per_payment" in asked:
+        mine, stored = asked["per_payment"], row["per_payment"]
+        if mine is None:
+            looser = looser or stored is not None
+        elif stored is None or mine < stored:
+            per_payment = mine
+        elif mine > stored:
+            looser = True
+    if "cap" in asked:
+        if asked["window_ms"] != row["window_ms"] or asked["cap"] < row["cap"]:
+            cap, window_ms = asked["cap"], asked["window_ms"]
+        elif asked["cap"] > row["cap"]:
+            looser = True
+    if "max_payments" in asked:
+        mine, stored = asked["max_payments"], row["max_payments"]
+        window = asked.get("window_ms", row["window_ms"])
+        if mine is None:
+            looser = looser or stored is not None
+        elif window != row["window_ms"] or stored is None or mine < stored:
+            max_payments, window_ms = mine, window
+        elif mine > stored:
+            looser = True
+    return ProcessLimits(per_payment, cap, window_ms, max_payments), looser
+
+
+# --- The handles -----------------------------------------------------------------------------
+
+
+class Hold:
+    """One payment, held in the budget.
+
+    Settle it when it settles, void it if it never left the wallet, and tell it how long it can
+    still settle once you know. Every move is idempotent and only moves forward: held, then void
+    or settled; void, then settled. Set ``tx`` inside ``with budget.pay(...)`` to keep the
+    transaction hash with the settlement.
+    """
+
+    def __init__(self, ledger: Ledger, payment_id: str, amount: Micros, state: str, created: bool) -> None:
         self._ledger = ledger
-        self._id = spend_id
+        self._id = payment_id
         self._amount = amount
-        self._info = info
-        self._state = "open"
+        self._state = state
+        self._created = created
         self.tx: str | None = None
-        """Set it inside ``with budget.pay(...)`` to keep the transaction hash in the history."""
 
     @property
     def id(self) -> str:
-        """Unique per payment: a good idempotency key for the rail you pay through."""
+        """The payment's identity in the ledger: a good idempotency key for the rail you pay through."""
 
         return self._id
 
     @property
-    def amount(self) -> int:
-        """In micro-dollars."""
-
+    def amount(self) -> Micros:
         return self._amount
 
     @property
-    def open(self) -> bool:
-        return self._state == "open"
+    def state(self) -> str:
+        """The state this handle last saw: ``"held"``, ``"settled"`` or ``"void"``."""
 
-    def commit(
-        self, *, tx: str | None = None, outcome: str | None = None, error: str | None = None
-    ) -> None:
-        """The payment settled. It counts for one rolling window from now.
+        return self._state
 
-        With a ``settles_by``, it counts at least until one window past it: a
-        commit never shortens a hold.
+    @property
+    def created(self) -> bool:
+        """False when the id was already in the ledger, for this wallet and amount."""
+
+        return self._created
+
+    def settle(self, *, tx: str | None = None) -> None:
+        """The payment settled. It counts through one window from now, or from its settle-by time.
+
+        A settlement never shortens a hold. ``tx`` is the evidence, a transaction hash.
         """
 
-        if not self.open:
-            raise BudgetError(f"reservation {self._id} is already {self._state}")
-        tx = tx or self.tx
-        info = {
-            **self._info,
-            **({"tx": tx} if tx else {}),
-            **({"outcome": outcome} if outcome else {}),
-            **({"error": error} if error else {}),
-        }
-        self._ledger.settle(self._id, evidence=tx)
-        self._info = info
-        self._state = "committed"
+        self._state = self._ledger.settle(self._id, evidence=tx or self.tx)["state"]
 
-    def release(self) -> None:
-        """The payment never left the wallet: give its amount back."""
+    def void(self, *, reason: str | None = None) -> None:
+        """The payment never left the wallet, and never will: it stops counting.
 
-        if not self.open:
-            raise BudgetError(f"reservation {self._id} is already {self._state}")
-        self._ledger.void(self._id, evidence="not sent")
-        self._state = "released"
-
-    def annotate(self, **fields: Any) -> None:
-        """Note what is known about an open payment, like ``outcome="unknown"``.
-
-        It keeps counting, as before.
+        A settled payment can't be voided.
         """
 
-        if not self.open:
-            return
-        self._info = {**self._info, **fields}
-        outcome = fields.get("outcome")
-        if outcome is not None:
-            error = fields.get("error")
-            self._ledger.note(self._id, str(outcome), evidence=None if error is None else str(error))
+        self._state = self._ledger.void(self._id, evidence=reason or "not sent")["state"]
+
+    def settles_by(self, moment: datetime) -> None:
+        """The last moment the payment could still settle, after now. A hold learns it once."""
+
+        until = _moment_ms(moment, "settles_by")
+        self._state = self._ledger.bound(self._id, until=until)["state"]
+
+    def settles_within(self, duration: timedelta) -> None:
+        """The same, as a time from now by the ledger's clock."""
+
+        within = _duration_ms(duration, "settles_within")
+        self._state = self._ledger.bound(self._id, within_ms=within)["state"]
+
+    def note(self, outcome: str, detail: str | None = None) -> None:
+        """What is known about a held payment's outcome: ``"unknown"`` or ``"refused"``.
+
+        It counts the same.
+        """
+
+        evidence = None if detail is None else detail[:1024]
+        self._state = self._ledger.note(self._id, outcome, evidence=evidence)["state"]
+
+    async def asettle(self, *, tx: str | None = None) -> None:
+        await asyncio.to_thread(lambda: self.settle(tx=tx))
+
+    async def avoid(self, *, reason: str | None = None) -> None:
+        await asyncio.to_thread(lambda: self.void(reason=reason))
+
+    async def anote(self, outcome: str, detail: str | None = None) -> None:
+        await asyncio.to_thread(self.note, outcome, detail)
+
+
+@dataclass
+class _Request:
+    amount: object
+    info: dict[str, Any]
+    rail: str
+    settles_by: datetime | None
+    settles_within: timedelta | None
+    payment_id: str | None = field(default=None)
 
 
 class Paying:
-    """``with budget.pay(amount):`` reserves on entry and records the payment on exit.
+    """``with budget.pay(amount) as hold:`` holds on entry and records the payment on exit.
 
-    A clean exit commits it; if that fails, it raises ``PaymentNotRecorded``,
-    which is not a ``BudgetError``: don't pay again. An exception never settles
-    it: the payment may have left the wallet, so it stays in flight, marked
-    unknown, and counts until one window past ``settles_by``, or, without one,
-    until its owner releases it. ``NotSent`` gives the amount back. Works with
-    ``async with`` too.
+    A clean exit settles it, with ``hold.tx`` as evidence; if that fails, it raises
+    ``PaymentNotRecorded``: don't pay again. An exception never settles it: the payment may have
+    left the wallet, so it stays held, noted unknown, and counts until one window past its
+    settle-by time, or, without one, until its owner voids it. ``NotSent`` voids it. Works with
+    ``async with`` too, which waits for the ledger in a worker thread.
     """
 
-    def __init__(
-        self,
-        budget: Budget,
-        amount: object,
-        info: dict[str, Any],
-        rail: str,
-        settles_by: datetime | None,
-    ) -> None:
+    def __init__(self, budget: Budget, request: _Request) -> None:
         self._budget = budget
-        self._amount = amount
-        self._info = info
-        self._rail = rail
-        self._settles_by = settles_by
-        self._reservation: Reservation | None = None
+        self._request = request
+        self._hold: Hold | None = None
 
-    def __enter__(self) -> Reservation:
-        self._reservation = self._budget._reserve(
-            self._amount, self._info, self._rail, self._settles_by
-        )
-        return self._reservation
+    def __enter__(self) -> Hold:
+        hold = self._budget._hold(self._request)
+        if not hold.created:
+            raise UsageError(
+                f"payment {hold.id} is already in the ledger ({hold.state}); "
+                "pay() doesn't make it again"
+            )
+        self._hold = hold
+        return hold
 
     def __exit__(
         self,
@@ -381,24 +557,24 @@ class Paying:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        reservation = self._reservation
-        if reservation is None or not reservation.open:
+        hold = self._hold
+        if hold is None or hold.state != "held":
             return
         if exc is None:
             try:
-                reservation.commit()
-            except BudgetError as error:
-                raise PaymentNotRecorded(reservation.id, error) from error
+                hold.settle()
+            except Exception as error:
+                raise PaymentNotRecorded(hold.id, error) from error
             return
         try:
             if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:
-                reservation.release()
+                hold.void(reason=f"not sent: {_error_text(exc)}")
             else:
-                reservation.annotate(outcome="unknown", error=str(exc)[:200])
-        except BudgetError:
-            pass  # recording failed; the reservation stays open, and keeps counting
+                hold.note("unknown", _error_text(exc))
+        except Exception:  # noqa: S110 - recording failed; the payment stays held and keeps counting
+            pass
 
-    async def __aenter__(self) -> Reservation:
+    async def __aenter__(self) -> Hold:
         # The ledger waits for another process's write lock in a worker thread, never on the
         # event loop.
         return await asyncio.to_thread(self.__enter__)
@@ -413,7 +589,7 @@ class Paying:
 
 
 class Budget:
-    """A wallet's budget in the shared file. Open it with ``open_budget``."""
+    """The payer's handle on a wallet's budget. Open it with ``open_budget``."""
 
     def __init__(
         self,
@@ -433,7 +609,7 @@ class Budget:
     ) -> None:
         self._wallet = normalize_wallet(wallet)
         self._path = expand_home(path if path is not None else default_budget_path()).absolute()
-        limits = _limits(
+        asked = _limits(
             per_payment=per_payment,
             per_hour=per_hour,
             per_day=per_day,
@@ -442,14 +618,32 @@ class Budget:
             window=window,
             max_payments=max_payments,
         )
+        # Fail closed: a missing budget file refuses every payment until its owner creates it.
         if not create and not self._path.exists():
-            raise BudgetError(
+            raise BudgetUnavailable(
                 f"no budget file at {self._path}; its owner creates one with: "
-                f"walletcap set --wallet {self._wallet}{self._path_flag()} "
-                "--per-day <dollars>"
+                f"walletcap set --wallet {self._wallet}{path_flag(self._path)} --per-day <dollars>"
             )
         self._ledger = Ledger(self._path, busy_timeout_seconds=busy_timeout_seconds, create=create)
-        self._ensure(limits, create=create, on_warning=on_warning)
+        row = self._ledger.budget(self._wallet)
+        if row is None:
+            if not create:
+                raise BudgetUnavailable(
+                    f"{short_wallet(self._wallet)} has no budget in {self._path}; its owner "
+                    f"creates one with: walletcap set --wallet {self._wallet}"
+                    f"{path_flag(self._path)} --per-day <dollars>"
+                )
+            if "cap" not in asked:
+                raise UsageError(
+                    f"{short_wallet(self._wallet)} has no budget yet: "
+                    "give it a rolling limit, like per_day='$150'"
+                )
+            row = self._ledger.create_budget(self._wallet, **asked)
+        if row["unit"] not in ("usd", "usdc"):
+            raise UsageError(f"{short_wallet(self._wallet)}'s budget counts in {row['unit']}, not usd")
+        self._limits, looser = _process_limits(row, asked)
+        if looser:
+            self._warn_looser(on_warning, row, asked)
 
     @property
     def wallet(self) -> str:
@@ -461,60 +655,7 @@ class Budget:
     def path(self) -> Path:
         return self._path
 
-    def _path_flag(self) -> str:
-        default = expand_home(default_budget_path()).absolute()
-        return "" if self._path == default else f" --path {shlex.quote(str(self._path))}"
-
-    def _ensure(
-        self, limits: dict[str, Any], *, create: bool, on_warning: Callable[[str], None] | None
-    ) -> None:
-        """Create the budget with ``limits``, or move its stored limits toward them.
-
-        A tighter limit is stored; a looser one is reported and left alone. A restart can lower
-        a limit, and only ``set_limits`` raises one.
-        """
-
-        row = self._ledger.budget(self._wallet)
-        if row is None:
-            name = short_wallet(self._wallet)
-            if not create:
-                raise BudgetError(f"{name} has no declared budget in {self._path}")
-            if "cap" not in limits:
-                raise BudgetError(
-                    f"{name} has no budget yet: give it a rolling limit, like per_day='$150'"
-                )
-            self._ledger.create_budget(self._wallet, **limits)
-            return
-        if row["unit"] not in ("usd", "usdc"):
-            raise BudgetError(f"{short_wallet(self._wallet)}'s budget counts in {row['unit']}, not usd")
-        lowered: dict[str, int | None] = {}
-        looser = False
-        same_window = limits.get("window_ms", row["window_ms"]) == row["window_ms"]
-        if "cap" in limits:
-            if not same_window:
-                looser = True
-            elif limits["cap"] < row["cap"]:
-                lowered["cap"] = limits["cap"]
-            elif limits["cap"] > row["cap"]:
-                looser = True
-        if "per_payment" in limits:
-            asked, stored = limits["per_payment"], row["per_payment"]
-            if asked is not None and (stored is None or asked < stored):
-                lowered["per_payment"] = asked
-            elif stored is not None and (asked is None or asked > stored):
-                looser = True
-        if "max_payments" in limits and limits["max_payments"] != row["max_payments"]:
-            asked, stored = limits["max_payments"], row["max_payments"]
-            if same_window and asked is not None and (stored is None or asked < stored):
-                lowered["max_payments"] = asked
-            else:
-                looser = True
-        if lowered:
-            row = self._ledger.set_limits(self._wallet, **lowered)
-        if looser:
-            self._warn_kept(on_warning, row, limits)
-
-    def _warn_kept(
+    def _warn_looser(
         self, on_warning: Callable[[str], None] | None, stored: Row, asked: dict[str, Any]
     ) -> None:
         kept = describe_limits(
@@ -533,9 +674,9 @@ class Budget:
         merged = merged_note_of(stored["merged_from"])
         message = (
             f"walletcap: {short_wallet(self._wallet)} keeps its stored limits ({kept}); "
-            f"your code asks for {wanted_text}. A restart can lower a limit but never raise one. "
-            f"To raise it, its owner runs: walletcap set --wallet {self._wallet}"
-            f"{self._path_flag()} {limit_flags(**wanted)}"
+            f"your code asks for {wanted_text}. A process can tighten the limits for itself, "
+            f"never loosen them. To raise them, its owner runs: walletcap set --wallet "
+            f"{self._wallet}{path_flag(self._path)} {limit_flags(**wanted)}"
         ).rstrip() + ("" if merged is None else f". {merged}")
         if on_warning is not None:
             on_warning(message)
@@ -543,164 +684,92 @@ class Budget:
             warnings.warn(message, BudgetWarning, stacklevel=4)
 
     def check(self, amount: object) -> Check:
-        """Whether ``amount`` would be paid right now, without taking it."""
+        """Whether ``amount`` would be paid right now, without holding it."""
 
-        refusal, remaining = self._ledger.check(self._wallet, _positive(to_micros(amount)))
+        refusal, remaining = self._ledger.check(
+            self._wallet, _positive(to_micros(amount)), limits=self._limits
+        )
         if refusal is None:
-            return Check(True, remaining)
-        return Check(False, remaining, refusal.reason, str(refusal), refusal.brief)
+            return Check(True, Micros(remaining))
+        return Check(False, Micros(remaining), refusal.code, str(refusal), refusal.brief)
 
-    def reserve(
+    def hold(
         self,
         amount: object,
         *,
+        id: str | None = None,  # noqa: A002 - the same name as in JavaScript
         to: str | None = None,
         note: str | None = None,
         details: dict[str, Any] | None = None,
         rail: str = "python",
         settles_by: datetime | None = None,
-    ) -> Reservation:
-        """Take ``amount`` before paying, or raise ``BudgetRefused``.
+        settles_within: timedelta | None = None,
+    ) -> Hold:
+        """Hold ``amount`` before paying, or raise ``BudgetRefused``.
 
-        Commit the reservation when the payment settles; release it only if the
-        payment never left the wallet. ``settles_by`` is the last moment the
-        payment could still settle, if known, as a timezone-aware datetime after
-        now: an open reservation stops counting one window after it.
+        Settle the hold when the payment settles; void it only if the payment never left. An id
+        already in the ledger, for this wallet and amount, returns that payment's hold
+        (``created`` is False). ``settles_by`` (a timezone-aware datetime after now) or
+        ``settles_within`` (a timedelta) bounds how long it can still settle.
         """
 
-        return self._reserve(amount, _describe(to, note, details), rail, settles_by)
+        return self._hold(_Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id))
 
-    def _reserve(
-        self, amount: object, info: dict[str, Any], rail: str, settles_by: datetime | None
-    ) -> Reservation:
-        micros = _positive(to_micros(amount))
-        settles_by_ms = None if settles_by is None else _settles_by_ms(settles_by)
+    def _hold(self, request: _Request) -> Hold:
+        micros = _positive(to_micros(request.amount))
         held = self._ledger.hold(
             self._wallet,
             micros,
-            rail=rail,
-            info=json.dumps(info) if info else None,
-            until=settles_by_ms,
+            rail=request.rail,
+            payment=request.payment_id,
+            info=json.dumps(request.info) if request.info else None,
+            until=None if request.settles_by is None else _moment_ms(request.settles_by, "settles_by"),
+            within_ms=None
+            if request.settles_within is None
+            else _duration_ms(request.settles_within, "settles_within"),
+            limits=self._limits,
         )
-        return Reservation(self._ledger, str(held["payment"]), micros, info)
+        return Hold(self._ledger, str(held["payment"]), micros, str(held["state"]), bool(held["created"]))
 
     def pay(
         self,
         amount: object,
         *,
+        id: str | None = None,  # noqa: A002 - the same name as in JavaScript
         to: str | None = None,
         note: str | None = None,
         details: dict[str, Any] | None = None,
         rail: str = "python",
         settles_by: datetime | None = None,
+        settles_within: timedelta | None = None,
     ) -> Paying:
-        """``with budget.pay("$12.50"):`` reserve, pay inside the block, and record it.
+        """``with budget.pay("$12.50") as hold:`` hold, pay inside the block, and record it.
 
-        Raises ``BudgetRefused`` on entry if the budget would be passed. If the
-        block raises, the payment stays in flight, marked unknown: it counts
-        until one window past ``settles_by``, or, without one, until its owner
-        releases it. ``NotSent`` gives the amount back.
+        Raises ``BudgetRefused`` on entry if the budget would be passed, and ``UsageError`` if
+        ``id`` names a payment already in the ledger, so nothing is paid twice. If the block
+        raises, the payment stays held, noted unknown: it counts until one window past its
+        settle-by time, or, without one, until its owner voids it. ``NotSent`` voids it.
         """
 
-        return Paying(self, amount, _describe(to, note, details), rail, settles_by)
+        return Paying(self, _Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id))
 
     def status(self) -> Status:
-        row = self._ledger.status(self._wallet)
-        return Status(
-            self._wallet,
-            self._path,
-            row["cap"],
-            row["window_ms"],
-            row["per_payment"],
-            row["max_payments"],
-            row["spent"],
-            row["in_flight"],
-            row["remaining"],
-            row["payments"],
-            row["frozen_at"] is not None,
-        )
+        """What has been spent, what is in flight and what is left."""
 
-    def set_limits(
-        self,
-        *,
-        per_payment: object = UNSET,
-        per_hour: object = None,
-        per_day: object = None,
-        per_week: object = None,
-        cap: object = None,
-        window: object = None,
-        max_payments: object = UNSET,
-    ) -> Status:
-        """Change the limits, up or down. What was spent keeps counting: nothing resets."""
-
-        limits = _limits(
-            per_payment=per_payment,
-            per_hour=per_hour,
-            per_day=per_day,
-            per_week=per_week,
-            cap=cap,
-            window=window,
-            max_payments=max_payments,
-        )
-        if not limits:
-            raise BudgetError("set_limits needs a limit, like per_day='$150'")
-        self._ledger.set_limits(self._wallet, **limits)
-        return self.status()
-
-    def freeze(self) -> None:
-        """Refuse every payment from this wallet, on every rail and in every process."""
-
-        self._ledger.freeze(self._wallet)
-
-    def unfreeze(self) -> None:
-        self._ledger.unfreeze(self._wallet)
-
-    def holds(self) -> list[Hold]:
-        """The open payments that still count, oldest first, and why each is open.
-
-        Its owner releases one that never left the wallet: ``walletcap release <id>``.
-        """
-
-        holds = []
-        for row in self._ledger.counting(self._wallet, held_only=True):
-            info = _info(row["info"])
-            outcome = row["outcome"]
-            holds.append(
-                Hold(
-                    row["payment"],
-                    row["amount"],
-                    outcome if outcome in ("refused", "unknown") else "in flight",
-                    _moment(row["held_at"]),
-                    max(row["now"] - row["held_at"], 0),
-                    _counts_until(row),
-                    row["rail"],
-                    info.get("to") or info.get("payTo"),
-                    info.get("note") or info.get("network"),
-                    row["noted"] or info.get("error"),
-                )
-            )
-        return holds
+        return status_of(self._ledger.status(self._wallet), self._path)
 
     def history(self, limit: int = 20) -> list[Payment]:
         """The newest payments first."""
 
-        payments = []
-        for row in self._ledger.history(self._wallet, limit=limit):
-            info = _info(row["info"])
-            payments.append(
-                Payment(
-                    row["payment"],
-                    row["amount"],
-                    _label(row, info),
-                    bool(row["counting"]),
-                    _moment(row["held_at"]),
-                    row["rail"],
-                    info.get("to") or info.get("payTo"),
-                    info.get("note") or info.get("network"),
-                    row["settled_by"] or info.get("tx"),
-                )
-            )
-        return payments
+        return [payment_of(row) for row in self._ledger.history(self._wallet, limit=limit)]
+
+    def holds(self) -> list[HeldPayment]:
+        """The held payments that still count, oldest first, and why each is open.
+
+        Its owner voids one that never left the wallet: ``walletcap void <id>``.
+        """
+
+        return [held_payment_of(row) for row in self._ledger.counting(self._wallet, held_only=True)]
 
     # The same, for async code: each runs in a worker thread (asyncio.to_thread), so a wait for
     # another process's write lock never blocks the event loop. `async with budget.pay(...)`
@@ -709,24 +778,25 @@ class Budget:
     async def acheck(self, amount: object) -> Check:
         return await asyncio.to_thread(self.check, amount)
 
-    async def areserve(
+    async def ahold(
         self,
         amount: object,
         *,
+        id: str | None = None,  # noqa: A002 - the same name as in JavaScript
         to: str | None = None,
         note: str | None = None,
         details: dict[str, Any] | None = None,
         rail: str = "python",
         settles_by: datetime | None = None,
-    ) -> Reservation:
-        return await asyncio.to_thread(
-            self.reserve, amount, to=to, note=note, details=details, rail=rail, settles_by=settles_by
-        )
+        settles_within: timedelta | None = None,
+    ) -> Hold:
+        request = _Request(amount, _describe(to, note, details), rail, settles_by, settles_within, id)
+        return await asyncio.to_thread(self._hold, request)
 
     async def astatus(self) -> Status:
         return await asyncio.to_thread(self.status)
 
-    async def aholds(self) -> list[Hold]:
+    async def aholds(self) -> list[HeldPayment]:
         return await asyncio.to_thread(self.holds)
 
     async def ahistory(self, limit: int = 20) -> list[Payment]:
@@ -743,14 +813,13 @@ class Budget:
 
 
 def open_budget(wallet: str, **options: Any) -> Budget:
-    """Open the wallet's budget. Its owner creates it first with ``walletcap set``.
+    """Open the wallet's budget, to pay from it. Its owner creates it first with ``walletcap set``.
 
-    Pass ``create=True`` only to create it on first use (a demo or a first-run
-    setup); by default a missing file refuses every payment. Limits are dollars:
-    strings (``"$150"``, ``"12.50 USDC"``), ints, floats or Decimals. Give one
-    rolling limit (``per_hour``, ``per_day``, ``per_week``, or ``cap`` with
-    ``window``) and optionally ``per_payment`` and ``max_payments``.
+    Pass ``create=True`` only to create it on first use (a demo or a first-run setup); by
+    default a missing file refuses every payment. Limits are dollars: strings (``"$150"``,
+    ``"12.50 USDC"``), ints, floats, Decimals or ``Micros``. Limits given here only tighten the
+    budget's, for this process: ``per_hour``, ``per_day``, ``per_week``, or ``cap`` with
+    ``window``, and ``per_payment`` and ``max_payments``.
     """
 
     return Budget(wallet, **options)
-
