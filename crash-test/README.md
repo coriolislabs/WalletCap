@@ -86,7 +86,7 @@ Coinbase AgentKit 0.10.4: the agent approves the merchant's 1¢ offer on Base Se
 lists $1.00 on Base mainnet, to another address, first.
 
 AgentKit                         signed $1.00 on Base mainnet to the first-listed address, valid 4 days; reported $0.01 on Base Sepolia
-walletcap, 2¢ a payment          signed $0.01 on Base Sepolia to the merchant
+walletcap, 2¢ a payment          signed $0.01 on Base Sepolia, the offer the agent approved
 ```
 
 The AgentKit row runs AgentKit's own `retry_http_request_with_x402` action against a merchant on `127.0.0.1`. The agent hands it the 1¢ offer it approved, which is how AgentKit's flow works.
@@ -96,7 +96,7 @@ What AgentKit does with it:
 - It then builds a fresh x402 client, which pays whatever the merchant listed first.
 - Its answer reports the approved offer, not the one it signed.
 
-walletcap's `budget.guardAgentKit()`, at 2¢ a payment, passes over the $1.00, which the merchant asks to be valid 4 days: walletcap signs only terms valid an hour or less. It pays the 1¢ offer the agent approved.
+walletcap's `budget.guardAgentKit()`, at 2¢ a payment, limits how much AgentKit pays, not which offer it pays. Here it passes over the $1.00, which the merchant asks to be valid 4 days (walletcap signs only terms valid an hour or less, and at most 2¢), and the offer left is the 1¢ one the agent approved. Had the merchant listed the approved offer valid two hours, and a 2¢ one valid five minutes, walletcap would have let AgentKit sign the 2¢ one. The row passes only if walletcap signs the approved offer or nothing.
 
 AgentKit is opt-in because it installs about 1.3 GB. Its wallet providers also send an analytics event with the wallet's address when they start. The crash test turns that off and blocks every request except the one to the local merchant.
 

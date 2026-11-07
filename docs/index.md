@@ -54,8 +54,9 @@ times. Those runs used `@coinbase/cdp-sdk` 1.61.0, `@x402/core` 2.30.0, SpendPer
 1.0.0 and walletcap 0.2.3.
 
 Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and AgentKit signs
-the merchant's first-listed $1.00 on Base mainnet. walletcap, at 2¢ a payment, passes over the
-$1.00, valid 4 days, and signs the 1¢ the agent approved. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/crash-test)
+the merchant's first-listed $1.00 on Base mainnet. walletcap, at 2¢ a payment, limits the amount,
+not which offer is paid: it passes over the $1.00, valid 4 days, and the offer left is the 1¢ the
+agent approved. [The crash test's README](https://github.com/coriolislabs/WalletCap/tree/main/crash-test)
 says exactly what runs.
 
 ## Install
