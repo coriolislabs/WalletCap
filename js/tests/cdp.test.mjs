@@ -6,9 +6,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, afterEach, test } from 'node:test';
-import { resetClock, setClock } from '../_clock.mjs';
-import { openBudget, SharedBudgetStore } from '../index.mjs';
-import { Ledger } from '../ledger.mjs';
+import { resetClock, setClock } from '../dist/_clock.js';
+import { openBudget, SharedBudgetStore } from '../dist/index.js';
+import { Ledger } from '../dist/ledger.js';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
@@ -22,16 +22,16 @@ const PAY_TO = '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a';
 const NETWORK = 'eip155:84532';
 let files = 0;
 
-const fixture = () => {
+const fixture = async () => {
   const path = join(DIR, `cdp-${files++}.sqlite`);
-  const budget = openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
   return { path, budget, store: budget.cdpStore({ asset: USDC }) };
 };
 
 test('a lowercase 402 asset on the x402 rail does not break cdpStore.load()', async () => {
-  const { budget, store } = fixture();
+  const { budget, store } = await fixture();
   try {
-    budget.reserve('$0.05', {
+    await budget.reserve('$0.05', {
       rail: 'x402',
       details: { network: NETWORK, asset: USDC, scheme: 'exact' },
     });
@@ -48,7 +48,7 @@ test('a lowercase 402 asset on the x402 rail does not break cdpStore.load()', as
 });
 
 test('CDP entries use the cdp rail and load back with their own metadata', async () => {
-  const { budget, store } = fixture();
+  const { budget, store } = await fixture();
   try {
     await store.append({
       atomicAmount: '50000',
@@ -63,7 +63,7 @@ test('CDP entries use the cdp rail and load back with their own metadata', async
       [rows[0].atomicAmount, rows[0].asset, rows[0].network, rows[0].payTo],
       [50_000n, USDC, NETWORK, PAY_TO],
     );
-    assert.equal(budget.status().inFlight, 50_000n);
+    assert.equal((await budget.status()).inFlight, 50_000n);
   } finally {
     store.close();
     budget.close();
@@ -71,7 +71,7 @@ test('CDP entries use the cdp rail and load back with their own metadata', async
 });
 
 test('the store refuses an entry in another asset', async () => {
-  const { budget, store } = fixture();
+  const { budget, store } = await fixture();
   try {
     await assert.rejects(
       store.append({
@@ -83,7 +83,7 @@ test('the store refuses an entry in another asset', async () => {
       }),
       /counts .* not/,
     );
-    assert.equal(budget.status().inFlight, 0n);
+    assert.equal((await budget.status()).inFlight, 0n);
   } finally {
     store.close();
     budget.close();
@@ -91,11 +91,11 @@ test('the store refuses an entry in another asset', async () => {
 });
 
 test('a CDP row on the x402 rail, as 0.2.0 wrote them, still loads after the rail split', async () => {
-  const { path, budget, store } = fixture();
+  const { path, budget, store } = await fixture();
   try {
-    const ledger = new Ledger(path);
+    const ledger = await Ledger.open(path);
     try {
-      ledger.hold(WALLET, 50_000n, {
+      await ledger.hold(WALLET, 50_000n, {
         rail: 'x402',
         info: JSON.stringify({ atomicAmount: '50000', asset: USDC, network: NETWORK, payTo: '0xlegacy', at: Date.now() }),
       });
@@ -114,17 +114,17 @@ test('a CDP row on the x402 rail, as 0.2.0 wrote them, still loads after the rai
 });
 
 test("an entry CDP backdates still counts from the ledger's own time", async () => {
-  const { budget, store } = fixture();
+  const { budget, store } = await fixture();
   try {
     // CDP's entry carries its own `at`. 0.2.x recorded the payment then, so an entry dated
     // 1970 had already aged out, and a second full $1 passed the $1 cap.
     await store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 });
     // CDP's record isn't evidence that the payment settled: it is held, and counts as in flight.
-    assert.equal(budget.status().inFlight, 1_000_000n);
+    assert.equal((await budget.status()).inFlight, 1_000_000n);
     const [row] = await store.load();
     assert.ok(row.at >= Date.now() - 60_000, `the entry is dated ${row.at}, not when CDP said`);
     await assert.rejects(store.append({ atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: 0 }), { reason: 'budget' });
-    assert.equal(budget.status().inFlight, 1_000_000n);
+    assert.equal((await budget.status()).inFlight, 1_000_000n);
   } finally {
     store.close();
     budget.close();
@@ -133,7 +133,7 @@ test("an entry CDP backdates still counts from the ledger's own time", async () 
 
 test('a checksummed or CAIP-10 instrument spends from the one lowercase budget', async () => {
   const path = join(DIR, `cdp-${files++}.sqlite`);
-  const budget = openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: WALLET, path, perDay: '$1', create: true });
   await budget.pay('$1', async () => 'paid');
   // 0.2.x kept SharedBudgetStore's instrument as given: a checksummed address opened a second budget.
   const checksummed = '0xd797ead28C38575FDf4fC523866287372340Ca02';
@@ -141,7 +141,7 @@ test('a checksummed or CAIP-10 instrument spends from the one lowercase budget',
     const store = new SharedBudgetStore({ path, instrument, asset: USDC });
     try {
       assert.equal(store.instrument, WALLET);
-      assert.throws(() => store.declare({ unit: 'usd', cap: 2_000_000n, windowMs: 86_400_000n }), /already declared with other limits/);
+      await assert.rejects(store.declare({ unit: 'usd', cap: 2_000_000n, windowMs: 86_400_000n }), /already declared with other limits/);
       await assert.rejects(store.append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }), { reason: 'budget' });
     } finally {
       store.close();
@@ -149,9 +149,9 @@ test('a checksummed or CAIP-10 instrument spends from the one lowercase budget',
   }
   // A mistyped checksum is refused rather than opening a budget of its own.
   assert.throws(() => new SharedBudgetStore({ path, instrument: '0xD797ead28C38575FDf4fC523866287372340Ca02', asset: USDC }), /EIP-55/);
-  const ledger = new Ledger(path);
+  const ledger = await Ledger.open(path);
   try {
-    assert.deepEqual(ledger.budgets().map(row => row.wallet), [WALLET]);
+    assert.deepEqual((await ledger.budgets()).map(row => row.wallet), [WALLET]);
   } finally {
     ledger.close();
     budget.close();
@@ -159,13 +159,13 @@ test('a checksummed or CAIP-10 instrument spends from the one lowercase budget',
 });
 
 test("a refusal CDP passes on to the agent names no holds and no release instructions", async () => {
-  const { budget, store } = fixture();
-  budget.reserve('$1').annotate({ outcome: 'unknown' });
+  const { budget, store } = await fixture();
+  (await budget.reserve('$1')).annotate({ outcome: 'unknown' });
   try {
     // 0.3.0 passed the owner's message, with the hold's id, through CDP to the agent.
     await assert.rejects(store.append({ atomicAmount: 1n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() }),
       error => error.reason === 'budget' && /\$1\.00 of it is 1 open payment$/.test(error.message));
-    assert.match(budget.check('$0.01').message, /\(wc-\w+; walletcap holds lists them/);
+    assert.match((await budget.check('$0.01')).message, /\(wc-\w+; walletcap holds lists them/);
   } finally {
     store.close();
     budget.close();
@@ -175,7 +175,7 @@ test("a refusal CDP passes on to the agent names no holds and no release instruc
 test('a CDP payment counts until an hour after it is recorded, plus one window: its authorization can be redeemed that long', async () => {
   const clock = { now: Date.now() };
   setClock(() => clock.now);
-  const { budget, store } = fixture();
+  const { budget, store } = await fixture();
   const entry = atomicAmount => ({ atomicAmount, asset: USDC, network: NETWORK, payTo: PAY_TO, at: clock.now });
   try {
     const recorded = clock.now;
@@ -187,9 +187,9 @@ test('a CDP payment counts until an hour after it is recorded, plus one window: 
     const [counted] = await store.load();
     assert.ok(counted.at >= clock.now - DAY, "CDP's own window keeps it too");
     clock.now = recorded + HOUR + 60_000 + DAY;
-    assert.equal(budget.status().inFlight, 1_000_000n);
+    assert.equal((await budget.status()).inFlight, 1_000_000n);
     clock.now += 1;
-    assert.equal(budget.status().inFlight, 0n);
+    assert.equal((await budget.status()).inFlight, 0n);
     await store.append(entry(1_000_000n));
   } finally {
     store.close();

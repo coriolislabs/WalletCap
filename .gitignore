@@ -18,5 +18,4 @@ examples/quickstart/demo.sqlite
 !js/tests/support/fake-awal/dist/**
 
 # Copies of spec/*.sql, made by the build: the files at spec/ are the source.
-js/spec/
 src/walletcap/spec/

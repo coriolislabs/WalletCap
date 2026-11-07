@@ -10,11 +10,11 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { after, afterEach, test } from 'node:test';
-import { resetClock, setClock } from '../_clock.mjs';
-import { Ledger } from '../ledger.mjs';
+import { resetClock, setClock } from '../dist/_clock.js';
+import { Ledger } from '../dist/ledger.js';
 
 const FIXTURES = new URL('../../spec/fixtures/', import.meta.url);
-const LEDGER = fileURLToPath(new URL('../ledger.mjs', import.meta.url));
+const LEDGER = fileURLToPath(new URL('../dist/ledger.js', import.meta.url));
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-upgrade-'));
 after(() => rmSync(DIR, { recursive: true, force: true }));
 afterEach(resetClock);
@@ -31,21 +31,21 @@ const schemaOf = path => {
 };
 
 for (const version of ['1', '2']) {
-  test(`every payment in a schema ${version} file counts as 0.3.0 counted it`, () => {
+  test(`every payment in a schema ${version} file counts as 0.3.0 counted it`, async () => {
     const expect = JSON.parse(readFileSync(new URL(`schema-${version}.expect.json`, FIXTURES), 'utf8'));
     let now = expect.T0 - 3_600_000;
     setClock(() => now);
     const path = copy(`schema-${version}.sqlite`);
-    const ledger = new Ledger(path);
+    const ledger = await Ledger.open(path);
     try {
       assert.equal(schemaOf(path), '3');
       for (const probe of expect.probes) {
         now = probe.at;
         for (const [wallet, counted] of Object.entries(probe.budgets)) {
-          const s = ledger.status(wallet);
+          const s = await ledger.status(wallet);
           const got = {
             cap: s.cap, window: s.window_ms, perPayment: s.per_payment, maxPayments: s.max_payments, spent: s.spent, inFlight: s.in_flight,
-            remaining: s.remaining, payments: s.payments, frozen: s.frozen_at !== null, holds: ledger.counting(wallet, { heldOnly: true }).map(row => row.payment),
+            remaining: s.remaining, payments: s.payments, frozen: s.frozen_at !== null, holds: (await ledger.counting(wallet, { heldOnly: true })).map(row => row.payment),
           };
           const want = Object.fromEntries(Object.entries(counted).map(([key, value]) => [key, typeof value === 'number' ? BigInt(value) : value]));
           assert.deepEqual(got, want, `${wallet} at T0${probe.at >= expect.T0 ? '+' : ''}${probe.at - expect.T0}`);
@@ -65,13 +65,18 @@ test('a crash in the middle of the upgrade leaves the file as it was', { skip: p
     + "'0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', 1, CASE WHEN i % 3 = 0 THEN 'reserved' ELSE 'committed' END, 'js', NULL, 1700000000000 + i, NULL FROM n").run();
   const { payments } = db.prepare('SELECT count(*) AS payments FROM spend').get();
   db.close();
-  const upgrade = path => spawn(process.execPath, ['--input-type=module', '-e', `const { Ledger } = await import(${JSON.stringify(LEDGER)}); new Ledger(process.argv[1]).close();`, path], { stdio: 'ignore' });
-  const exited = child => new Promise(done => child.on('exit', code => done(code)));
+  // Each child opens the file, which upgrades it, and closes it. Its exit is watched from the start.
+  const upgrade = path => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e',
+      `const { Ledger } = await import(${JSON.stringify(LEDGER)}); (await Ledger.open(process.argv[1])).close();`, path], { stdio: 'ignore' });
+    child.done = new Promise(done => child.on('exit', code => done(code)));
+    return child;
+  };
 
   const timed = copy('schema-2.sqlite');
   copyFileSync(source, timed);
   const started = Date.now();
-  assert.equal(await exited(upgrade(timed)), 0);
+  assert.equal(await upgrade(timed).done, 0);
   const took = Date.now() - started;
 
   let interrupted = 0;
@@ -81,11 +86,11 @@ test('a crash in the middle of the upgrade leaves the file as it was', { skip: p
     const child = upgrade(path);
     await new Promise(done => setTimeout(done, (0.2 + 0.7 * ((attempt * 37) % 10) / 10) * took));
     child.kill('SIGKILL');
-    await exited(child);
+    await child.done;
     if (existsSync(`${path}-journal`)) interrupted += 1;
     // SQLite rolls a half-done upgrade back the next time the file is opened: schema 2 as it was,
     // or schema 3 with every payment, never anything between.
-    new Ledger(path).close();
+    (await Ledger.open(path)).close();
     const after = new DatabaseSync(path);
     try {
       assert.equal(after.prepare("SELECT value FROM budget_meta WHERE key = 'schema'").get().value, '3');

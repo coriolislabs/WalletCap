@@ -2,9 +2,9 @@
 // Put the budget in front of Coinbase's Agentic Wallet: the awal CLI and the payments-mcp server.
 //
 // Every send and every x402 payment that goes through here is counted in the wallet's budget,
-// whichever process or session on this host makes it. An x402 payment is priced before the wallet
-// signs it, and the wallet is handed the terms walletcap priced and capped at that amount. Once
-// the wallet answers, the payment counts until one window past the time its authorization
+// whichever process or session on this host makes it. An x402 payment is priced before the
+// wallet signs it, and the wallet is handed the terms walletcap priced and capped at that amount.
+// Once the wallet answers, the payment counts until one window past the time its authorization
 // expires, whatever the payee says; if the wallet never answers, until its owner releases it. A
 // send counts for one window, or, if its outcome is unknown, until its owner releases it.
 import { spawn, spawnSync } from 'node:child_process';
@@ -14,16 +14,29 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
+import type { Readable, Writable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.mjs';
-import { openBudget } from './index.mjs';
-import { SETTLES_BY } from './ledger.mjs';
-import { formatUsd, normalizeWallet, trimAscii } from './money.mjs';
-import { assetKey, assetTable, atomicOf, settlesWithinSeconds, timeoutRefusal, toMicros as atomicToMicros } from './x402.mjs';
+import { BudgetError, BudgetRefused, forAgent, PaymentNotRecorded } from './errors.js';
+import { type Budget, openBudget, type Reservation } from './index.js';
+import { SETTLES_BY } from './ledger.js';
+import { formatUsd, normalizeWallet, trimAscii } from './money.js';
+import {
+  type AssetEntry, assetKey, assetTable, atomicOf, type PaymentRequirements, settlesWithinSeconds, timeoutRefusal, toMicros as atomicToMicros,
+} from './x402.js';
+
+/** The wallet's request channel: awal's sendIpcRequest(channel, data). */
+export type WalletRequest = (channel: string, data: Record<string, unknown>) => Promise<unknown>;
+
+/** The endpoint's 402 answer: the payment requirements it accepts, and any extensions. */
+export interface PaymentRequired {
+  accepts?: unknown;
+  extensions?: unknown;
+  [key: string]: unknown;
+}
 
 /** The wallet's chain names, as CAIP-2 networks. */
-export const AWAL_CHAINS = Object.freeze({
+export const AWAL_CHAINS: Readonly<Record<string, string>> = Object.freeze({
   base: 'eip155:8453',
   'base-sepolia': 'eip155:84532',
   polygon: 'eip155:137',
@@ -43,12 +56,13 @@ const NOT_SIGNED = [
   /^Failed to start wallet/,
   /^(?:UI bridge error: )?(?:Not authenticated|Authentication required|Please sign in)/i,
 ];
-const notSigned = error => NOT_SIGNED.some(pattern => pattern.test(String(error?.message ?? error)));
+const messageOf = (error: unknown): string => String((error as Error | undefined)?.message ?? error);
+const notSigned = (error: unknown): boolean => NOT_SIGNED.some(pattern => pattern.test(messageOf(error)));
 
 // The payment settled; record it, or say it went through but couldn't be recorded (not a BudgetError).
-const settled = (reservation, tx) => {
+const settled = async (reservation: Reservation, tx: string | undefined): Promise<void> => {
   try {
-    reservation.commit({ tx });
+    await reservation.commit({ tx });
   } catch (error) {
     throw new PaymentNotRecorded(reservation.id, { cause: error });
   }
@@ -56,9 +70,9 @@ const settled = (reservation, tx) => {
 
 // Record what the wallet answered. If the ledger can't (a busy timeout, say), the payment still
 // counts as in flight, and the caller gets PaymentNotRecorded, not a BudgetError it might retry on.
-const recorded = (reservation, write) => {
+const recorded = async (reservation: Reservation, write: () => Promise<void>): Promise<void> => {
   try {
-    write();
+    await write();
   } catch (error) {
     throw new PaymentNotRecorded(reservation.id, { cause: error, settled: false });
   }
@@ -66,7 +80,7 @@ const recorded = (reservation, write) => {
 
 // The amount the wallet sends is the amount counted: a whole number of atomic units in ASCII
 // digits, passed on to the wallet as walletcap read it ("0x10" or " 5" could read differently there).
-const sendAmount = value => {
+const sendAmount = (value: unknown): bigint => {
   const text = typeof value === 'bigint' || (typeof value === 'number' && Number.isSafeInteger(value)) ? String(value) : value;
   if (typeof text !== 'string' || !/^[0-9]+$/.test(text)) {
     throw new BudgetError(`the send amount ${String(value)} is not a whole number of atomic units`);
@@ -74,27 +88,43 @@ const sendAmount = value => {
   return BigInt(text);
 };
 
-const decodeHeader = value => {
+const decodeHeader = (value: unknown): Record<string, unknown> | null => {
   try {
-    return JSON.parse(Buffer.from(String(value), 'base64').toString('utf8'));
+    return JSON.parse(Buffer.from(String(value), 'base64').toString('utf8')) as Record<string, unknown>;
   } catch {
     return null;
   }
 };
 
-const headerOf = (headers, name) => {
+const headerOf = (headers: unknown, name: string): unknown => {
   if (headers === null || typeof headers !== 'object') return undefined;
   const key = Object.keys(headers).find(candidate => candidate.toLowerCase() === name);
-  return key === undefined ? undefined : headers[key];
+  return key === undefined ? undefined : (headers as Record<string, unknown>)[key];
 };
 
 /** The PAYMENT-RESPONSE a payee sent back with a wallet result, decoded, or null. */
-const paymentResponseOf = result => {
-  const header = headerOf(result?.headers, 'payment-response') ?? headerOf(result?.headers, 'x-payment-response');
+const paymentResponseOf = (result: unknown): Record<string, unknown> | null => {
+  const headers = (result as { headers?: unknown } | null | undefined)?.headers;
+  const header = headerOf(headers, 'payment-response') ?? headerOf(headers, 'x-payment-response');
   return header === undefined ? null : decodeHeader(header);
 };
 
-const requestUrl = data => {
+interface RequestData {
+  baseURL?: string;
+  path?: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  queryParams?: Record<string, unknown>;
+  paymentRequirements?: unknown;
+  extensions?: unknown;
+  maxAmountPerRequest?: number | string;
+  preferredNetwork?: string;
+  preferredScheme?: string;
+  [key: string]: unknown;
+}
+
+const requestUrl = (data: RequestData): URL => {
   const url = new URL(data.path ?? '', data.baseURL);
   for (const [key, value] of Object.entries(data.queryParams ?? {})) url.searchParams.set(key, String(value));
   return url;
@@ -104,21 +134,28 @@ const requestUrl = data => {
  * Ask the endpoint what it charges: its 402 answer, with the payment requirements it accepts
  * (`accepts`) and any `extensions`, or null if it asks for none.
  */
-export async function discoverRequirements(data, { fetch: fetchImpl = globalThis.fetch } = {}) {
+export async function discoverRequirements(data: RequestData, { fetch: fetchImpl = globalThis.fetch }: { fetch?: typeof fetch } = {}): Promise<PaymentRequired | null> {
   const method = String(data.method ?? 'GET').toUpperCase();
-  const init = { method, headers: { Accept: 'application/json', ...(data.headers ?? {}) }, redirect: 'follow' };
+  const headers: Record<string, string> = { Accept: 'application/json', ...(data.headers ?? {}) };
+  const init: RequestInit = { method, headers, redirect: 'follow' };
   if (data.body !== undefined && method !== 'GET') {
     init.body = typeof data.body === 'string' ? data.body : JSON.stringify(data.body);
-    init.headers['Content-Type'] ??= 'application/json';
+    headers['Content-Type'] ??= 'application/json';
   }
   const response = await fetchImpl(requestUrl(data), init);
   if (response.status !== 402) return null;
   const header = response.headers.get('payment-required');
-  const required = header ? decodeHeader(header) : await response.json().catch(() => null);
+  const required = (header ? decodeHeader(header) : await response.json().catch(() => null)) as PaymentRequired | null;
   if (!Array.isArray(required?.accepts) || required.accepts.length === 0) {
     throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
   }
   return required;
+}
+
+/** What guardAgenticWallet() returns: the budget, and the wallet's request channel with the budget on it. */
+export interface GuardedWallet {
+  budget: Budget;
+  request: WalletRequest;
 }
 
 /**
@@ -128,70 +165,74 @@ export async function discoverRequirements(data, { fetch: fetchImpl = globalThis
  * it returns the 402 answer (`{ accepts, extensions }`) or just its list of payment requirements,
  * or null when the endpoint asks for no payment.
  */
-export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchImpl, discover } = {}) {
+export function guardAgenticWallet(budget: Budget, { request, assets = [], fetch: fetchImpl, discover }: {
+  request?: WalletRequest; assets?: AssetEntry[]; fetch?: typeof fetch; discover?: (data: RequestData) => Promise<unknown>;
+} = {}): GuardedWallet {
   if (typeof request !== 'function') throw new BudgetError('guardAgenticWallet needs request(channel, data): the wallet\'s request channel');
+  const wallet = request;
   const table = assetTable(assets);
-  const findRequirements = discover ?? (data => discoverRequirements(data, { fetch: fetchImpl }));
-  const networkOf = requirement => assetKey(requirement.network, requirement.asset).split(' ')[0];
+  const findRequirements = discover ?? ((data: RequestData) => discoverRequirements(data, fetchImpl === undefined ? {} : { fetch: fetchImpl }));
+  const networkOf = (requirement: PaymentRequirements): string => assetKey(requirement.network, requirement.asset).split(' ')[0] ?? '';
 
-  // A failure the wallet reports before signing gives the amount back. Anything else may come after
-  // the payment left, so it stays in flight, marked unknown, and keeps counting: an error never
-  // settles a payment.
-  const failed = (reservation, error) => {
+  // A failure the wallet reports before signing gives the amount back. Anything else may come
+  // after the payment left, so it stays in flight, marked unknown, and keeps counting: an error
+  // never settles a payment.
+  const failed = async (reservation: Reservation, error: unknown): Promise<void> => {
     if (!reservation.open) return;
-    recorded(reservation, () => {
-      if (notSigned(error)) reservation.release();
-      else reservation.annotate({ outcome: 'unknown', error: String(error?.message ?? error).slice(0, 200) });
+    await recorded(reservation, async () => {
+      if (notSigned(error)) await reservation.release();
+      else await reservation.annotate({ outcome: 'unknown', error: messageOf(error).slice(0, 200) });
     });
   };
 
   // Terms the wallet may be handed: in an asset walletcap can price, valid an hour or less
   // (timeoutRefusal), so walletcap can tell how much it pays and how long it can settle.
-  const isTerm = requirement => requirement !== null && typeof requirement === 'object';
-  const priced = requirement => table.has(assetKey(requirement.network, requirement.asset));
-  const payable = requirement => isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
+  const isTerm = (requirement: unknown): requirement is PaymentRequirements => requirement !== null && typeof requirement === 'object';
+  const priced = (requirement: PaymentRequirements): boolean => table.has(assetKey(requirement.network, requirement.asset));
+  const payable = (requirement: unknown): requirement is PaymentRequirements => isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
 
-  // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay any
-  // of the terms it is handed, whatever walletcap would pick, so the longest of them counts,
+  // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay
+  // any of the terms it is handed, whatever walletcap would pick, so the longest of them counts,
   // whatever the scheme (settlesWithinSeconds), plus a minute of clock skew.
-  const settlesWithinMs = requirements => BigInt(Math.max(...requirements.map(settlesWithinSeconds))) * 1000n + CLOCK_SKEW_MS;
+  const settlesWithinMs = (requirements: PaymentRequirements[]): bigint =>
+    BigInt(Math.max(...requirements.map(requirement => settlesWithinSeconds(requirement) ?? 0))) * 1000n + CLOCK_SKEW_MS;
 
-  async function send(data) {
-    const asset = String(data?.asset ?? 'USDC').toUpperCase();
-    const chain = String(data?.chain ?? 'base');
+  async function send(data: RequestData): Promise<unknown> {
+    const asset = String(data.asset ?? 'USDC').toUpperCase();
+    const chain = String(data.chain ?? 'base');
     const network = AWAL_CHAINS[chain];
     if (asset !== 'USDC' || network === undefined) {
       throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset} on ${chain}, so it refuses this send`);
     }
-    const atomic = sendAmount(data?.amountAtomic);
+    const atomic = sendAmount(data.amountAtomic);
     if (atomic <= 0n) throw new BudgetError('the send amount must be more than $0');
-    const recipient = data?.recipient;
+    const recipient = data.recipient;
     if (typeof recipient !== 'string' || recipient.length === 0) throw new BudgetError('the send needs a recipient');
-    const reservation = budget.reserve(atomic, {
+    const reservation = await budget.reserve(atomic, {
       rail: 'awal', to: recipient, note: `send on ${chain}`, details: { network, asset },
     });
-    let result;
+    let result: { error?: unknown; transactionHash?: unknown } | null;
     try {
       // Only the fields the wallet's send takes, as walletcap read them: nothing else reaches the wallet.
-      result = await request('send-transaction', { recipient, amountAtomic: atomic.toString(), asset, chain });
+      result = await wallet('send-transaction', { recipient, amountAtomic: atomic.toString(), asset, chain }) as typeof result;
     } catch (error) {
-      failed(reservation, error);
+      await failed(reservation, error);
       throw error;
     }
     // A transaction the wallet reports as failed may still be mined: it keeps counting.
-    if (result?.error) failed(reservation, new Error(String(result.error)));
-    else settled(reservation, TX_HASH.test(result?.transactionHash ?? '') ? result.transactionHash : undefined);
+    if (result?.error) await failed(reservation, new Error(String(result.error)));
+    else await settled(reservation, typeof result?.transactionHash === 'string' && TX_HASH.test(result.transactionHash) ? result.transactionHash : undefined);
     return result;
   }
 
-  async function x402(data) {
+  async function x402(data: RequestData): Promise<unknown> {
     // The wallet is handed the terms walletcap checks, the caller's or the ones walletcap
     // discovers, less any it can't price or bound. Handed terms, awal skips its own 402 discovery
     // and signs only a term equal to one of them, maxTimeoutSeconds included, so the payee can't
     // show it others.
     const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
     const found = handed ? null : await findRequirements(data);
-    const required = Array.isArray(found) ? { accepts: found } : found ?? null;
+    const required = (Array.isArray(found) ? { accepts: found } : found ?? null) as PaymentRequired | null;
     const url = requestUrl(data).href.slice(0, 1024);
     if (!handed && required !== null && (!Array.isArray(required.accepts) || required.accepts.length === 0)) {
       throw new BudgetError(`${requestUrl(data).origin} answered 402 without payment requirements walletcap can read`);
@@ -201,28 +242,28 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       // possible payment cap, one atomic unit, counted, in case the payee asks for money after
       // all. Nothing was signed for value, so unless the payee confirms a payment the hold is
       // given back: a free endpoint that fails can't leave holds that use up maxPayments.
-      const reservation = budget.reserve(1n, { rail: 'awal-x402', note: url });
-      let result;
+      const reservation = await budget.reserve(1n, { rail: 'awal-x402', note: url });
+      let result: unknown;
       try {
-        result = await request('make-x402-request', { ...data, maxAmountPerRequest: 1 });
+        result = await wallet('make-x402-request', { ...data, maxAmountPerRequest: 1 });
       } catch (error) {
-        recorded(reservation, () => reservation.release());
+        await recorded(reservation, () => reservation.release());
         throw error;
       }
       const answer = paymentResponseOf(result);
-      if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
-      else recorded(reservation, () => reservation.release());
+      if (answer?.success === true && typeof answer.transaction === 'string' && TX_HASH.test(answer.transaction)) await settled(reservation, answer.transaction);
+      else await recorded(reservation, () => reservation.release());
       return result;
     }
-    const offered = handed ? data.paymentRequirements : required.accepts;
+    const offered = (handed ? data.paymentRequirements : required?.accepts) as unknown[];
     const usable = offered.filter(payable);
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
-    const wanted = requirement => (preferred === undefined || networkOf(requirement) === preferred)
+    const wanted = (requirement: PaymentRequirements): boolean => (preferred === undefined || networkOf(requirement) === preferred)
       && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme);
     const candidates = usable.filter(wanted);
     if (candidates.length === 0) {
       // Nothing left the wallet could pay: say why for the terms it would have picked from.
-      const asked = offered.filter(requirement => isTerm(requirement) && wanted(requirement));
+      const asked = offered.filter((requirement): requirement is PaymentRequirements => isTerm(requirement) && wanted(requirement));
       const countable = asked.find(priced);
       if (countable !== undefined) throw timeoutRefusal(countable);
       const first = asked[0] ?? offered.find(isTerm);
@@ -232,43 +273,45 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     const terms = {
       paymentRequirements: usable,
       // The wallet uses the 402's extensions only when it discovers the terms itself.
-      ...(!handed && data.extensions === undefined && isTerm(extensions) && !Array.isArray(extensions) ? { extensions } : {}),
+      ...(!handed && data.extensions === undefined && extensions !== null && typeof extensions === 'object' && !Array.isArray(extensions) ? { extensions } : {}),
     };
     const settlesWithin = settlesWithinMs(usable);
-    // The wallet picks the terms itself when it pays, so reserve the most any offer asks
-    // and cap the wallet at exactly that: it refuses to sign for more.
+    // The wallet picks the terms itself when it pays, so reserve the most any offer asks and cap
+    // the wallet at exactly that: it refuses to sign for more.
     const choice = candidates.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
-    const micros = atomicToMicros(atomicOf(choice), table.get(assetKey(choice.network, choice.asset)));
+    const micros = atomicToMicros(atomicOf(choice), table.get(assetKey(choice.network, choice.asset)) ?? 6);
     if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
       throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
     }
     // A payment counts until its owner releases it (npx walletcap release), or, once the wallet
     // has answered, until one window past the time it can no longer settle.
-    const reservation = budget.reserve(micros, {
-      rail: 'awal-x402', to: choice.payTo, note: url,
+    const reservation = await budget.reserve(micros, {
+      rail: 'awal-x402',
+      ...(choice.payTo === undefined ? {} : { to: choice.payTo }),
+      note: url,
       details: { network: choice.network, asset: choice.asset, scheme: choice.scheme, maxTimeoutSeconds: choice.maxTimeoutSeconds },
     });
-    let result;
+    let result: { status?: unknown } | null;
     try {
-      result = await request('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) });
+      result = await wallet('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) }) as typeof result;
     } catch (error) {
       // The wallet may not have answered yet, and may still sign: it counts until released.
-      failed(reservation, error);
+      await failed(reservation, error);
       throw error;
     }
     // The wallet has answered, so it has signed if it ever will. The hold learns when that
-    // authorization expires before anything else: a commit never shortens a hold, so the payee's
-    // own word that the payment settled can't free the budget early.
-    recorded(reservation, () => reservation[SETTLES_BY]({ withinMs: settlesWithin }));
+    // authorization expires before anything else: a commit never shortens a hold, so the
+    // payee's own word that the payment settled can't free the budget early.
+    await recorded(reservation, () => reservation[SETTLES_BY]({ withinMs: settlesWithin }));
     const answer = paymentResponseOf(result);
-    if (answer?.success === true && TX_HASH.test(answer.transaction ?? '')) settled(reservation, answer.transaction);
-    else recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));
+    if (answer?.success === true && typeof answer.transaction === 'string' && TX_HASH.test(answer.transaction)) await settled(reservation, answer.transaction);
+    else await recorded(reservation, () => reservation.annotate({ outcome: answer?.success === false || result?.status === 402 ? 'refused' : 'unknown' }));
     return result;
   }
 
   // The agent is told why a payment was refused, not which holds its owner could release: that
   // is for the owner's CLI (walletcap holds) and budget.check().
-  const toAgent = async pay => {
+  const toAgent = async (pay: () => Promise<unknown>): Promise<unknown> => {
     try {
       return await pay();
     } catch (error) {
@@ -279,9 +322,9 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   return {
     budget,
     async request(channel, data) {
-      if (channel === 'send-transaction') return toAgent(() => send(data ?? {}));
-      if (channel === 'make-x402-request') return toAgent(() => x402(data ?? {}));
-      return request(channel, data);
+      if (channel === 'send-transaction') return toAgent(() => send((data ?? {}) as RequestData));
+      if (channel === 'make-x402-request') return toAgent(() => x402((data ?? {}) as RequestData));
+      return wallet(channel, data);
     },
   };
 }
@@ -301,8 +344,8 @@ Environment
   WALLETCAP_AWAL     The awal package directory (default: awal resolved from the current directory)`;
 
 /** The installed awal package's directory. */
-export function locateAwal(env = process.env, from = process.cwd()) {
-  const candidates = [];
+export function locateAwal(env: NodeJS.ProcessEnv = process.env, from: string = process.cwd()): string {
+  const candidates: string[] = [];
   if (env.WALLETCAP_AWAL) candidates.push(resolve(env.WALLETCAP_AWAL));
   try {
     candidates.push(dirname(createRequire(join(from, 'noop.js')).resolve('awal/package.json')));
@@ -312,18 +355,20 @@ export function locateAwal(env = process.env, from = process.cwd()) {
   return found;
 }
 
-const walletRequest = async awalDir => (await import(pathToFileURL(join(awalDir, 'dist', 'ipcClient.js')).href)).sendIpcRequest;
+const walletRequest = async (awalDir: string): Promise<WalletRequest> =>
+  ((await import(pathToFileURL(join(awalDir, 'dist', 'ipcClient.js')).href)) as { sendIpcRequest: WalletRequest }).sendIpcRequest;
 
-const addressOf = value => {
+const addressOf = (value: unknown): string | undefined => {
   const match = JSON.stringify(value ?? null).match(/0x[0-9a-fA-F]{40}/);
   return match === null ? undefined : match[0];
 };
 
-async function openGuard(env, request, options = {}) {
+async function openGuard(env: NodeJS.ProcessEnv, request: WalletRequest, options: { wallet?: string; path?: string } = {}): Promise<GuardedWallet> {
   let wallet = env.WALLETCAP_WALLET ?? options.wallet;
   if (wallet === undefined) wallet = addressOf(await request('get-wallet-address', {}));
   if (wallet === undefined) throw new BudgetError('walletcap could not learn the wallet address; set WALLETCAP_WALLET');
-  const budget = openBudget({ wallet: normalizeWallet(wallet), path: env.WALLETCAP_PATH ?? options.path, create: false });
+  const path = env.WALLETCAP_PATH ?? options.path;
+  const budget = await openBudget({ wallet: normalizeWallet(wallet), ...(path === undefined ? {} : { path }), create: false });
   return guardAgenticWallet(budget, { request });
 }
 
@@ -331,15 +376,15 @@ const AWAL_AMOUNT = /^\$?[ \t\n\v\f\r]*([0-9]+)(?:\.([0-9]+))?$/;
 
 /**
  * awal's own amount rule for USDC, read exactly: "$0.05" and "0.05" are dollars, and a whole
- * number above 100 ("50000", "101.0") is atomic units. Anything else is refused: "100.5abc", "1e3",
- * "1,000", digits other than 0-9, and amounts finer than one atomic unit (0.000001).
+ * number above 100 ("50000", "101.0") is atomic units. Anything else is refused: "100.5abc",
+ * "1e3", "1,000", digits other than 0-9, and amounts finer than one atomic unit (0.000001).
  */
-export function usdcAtomic(amount) {
+export function usdcAtomic(amount: unknown): string {
   const match = AWAL_AMOUNT.exec(trimAscii(String(amount)));
   if (match === null) {
     throw new BudgetError(`Invalid amount: ${amount}. Give USDC like 0.05 or $0.05, or a whole number of atomic units above 100.`);
   }
-  const [, whole, fraction = ''] = match;
+  const [, whole = '0', fraction = ''] = match;
   if (/[^0]/.test(fraction.slice(6))) throw new BudgetError(`Invalid amount: ${amount} is finer than one atomic unit of USDC (0.000001).`);
   const atomic = !/[^0]/.test(fraction) && BigInt(whole) > 100n
     ? BigInt(whole)
@@ -357,67 +402,72 @@ const PAY_OPTIONS = {
   scheme: { type: 'string' },
   'correlation-id': { type: 'string' },
   json: { type: 'boolean' },
-};
-const SEND_OPTIONS = { chain: { type: 'string', default: 'base' }, asset: { type: 'string', default: 'USDC' }, json: { type: 'boolean' } };
+} as const;
+const SEND_OPTIONS = { chain: { type: 'string', default: 'base' }, asset: { type: 'string', default: 'USDC' }, json: { type: 'boolean' } } as const;
 
-function payData(url, values) {
+type Values = Record<string, string | boolean | undefined>;
+
+function payData(url: string, values: Values): RequestData {
   const parsed = new URL(url);
-  const data = { baseURL: `${parsed.protocol}//${parsed.host}`, path: parsed.pathname + parsed.search, method: values.method.toUpperCase() };
-  const jsonOption = (name, key) => {
-    if (values[name] === undefined) return;
-    try { data[key] = JSON.parse(values[name]); } catch { throw new BudgetError(`The --${name} option must be valid JSON`); }
+  const data: RequestData = { baseURL: `${parsed.protocol}//${parsed.host}`, path: parsed.pathname + parsed.search, method: String(values.method ?? 'GET').toUpperCase() };
+  const jsonOption = (name: string, key: string): void => {
+    const value = values[name];
+    if (value === undefined) return;
+    try { data[key] = JSON.parse(String(value)); } catch { throw new BudgetError(`The --${name} option must be valid JSON`); }
   };
   jsonOption('data', 'body');
   jsonOption('query', 'queryParams');
   jsonOption('headers', 'headers');
   if (values['max-amount'] !== undefined) {
-    const max = Number.parseInt(values['max-amount'], 10);
+    const max = Number.parseInt(String(values['max-amount']), 10);
     if (Number.isNaN(max) || max < 0) throw new BudgetError('--max-amount must be a non-negative integer (USDC atomic units)');
     data.maxAmountPerRequest = max;
   }
-  if (values.scheme !== undefined) data.preferredScheme = values.scheme;
+  if (values.scheme !== undefined) data.preferredScheme = String(values.scheme);
   if (values['correlation-id'] !== undefined) data.correlationId = values['correlation-id'];
   return data;
 }
 
 /** Run one awal command; send and x402 pay go through the budget. Returns the exit code. */
-export async function awalMain(argv, { env = process.env, stdout = process.stdout, stderr = process.stderr, request } = {}) {
+export async function awalMain(argv: string[], { env = process.env, stdout = process.stdout, stderr = process.stderr, request }: {
+  env?: NodeJS.ProcessEnv; stdout?: Writable; stderr?: Writable; request?: WalletRequest;
+} = {}): Promise<number> {
   if (argv.length === 0 || argv[0] === '--walletcap-help') {
     stdout.write(`${HELP}\n`);
     return 0;
   }
   const guarded = argv[0] === 'send' || (argv[0] === 'x402' && argv[1] === 'pay');
   const wantsHelp = argv.includes('--help');
-  let awalDir;
+  let awalDir: string | undefined;
   try {
     if (request === undefined || !guarded || wantsHelp) awalDir = locateAwal(env);
   } catch (error) {
-    stderr.write(`${error.message}\n`);
+    stderr.write(`${messageOf(error)}\n`);
     return 1;
   }
   if (!guarded || wantsHelp) {
-    const run = spawnSync(process.execPath, [join(awalDir, 'dist', 'index.js'), ...argv], { stdio: 'inherit', env });
+    const run = spawnSync(process.execPath, [join(awalDir ?? '', 'dist', 'index.js'), ...argv], { stdio: 'inherit', env });
     return run.status ?? 1;
   }
   const args = argv[0] === 'send' ? argv.slice(1) : argv.slice(2);
-  let values;
-  let positionals;
+  let values: Values;
+  let positionals: string[];
   try {
-    ({ values, positionals } = parseArgs({ args, options: argv[0] === 'send' ? SEND_OPTIONS : PAY_OPTIONS, allowPositionals: true, strict: true }));
+    ({ values, positionals } = parseArgs({ args, options: argv[0] === 'send' ? SEND_OPTIONS : PAY_OPTIONS, allowPositionals: true, strict: true }) as { values: Values; positionals: string[] });
   } catch (error) {
-    stderr.write(`${error.message}\n`);
+    stderr.write(`${messageOf(error)}\n`);
     return 2;
   }
-  const fail = (code, message) => {
+  const fail = (code: string, message: string): number => {
     if (values.json) stdout.write(`${JSON.stringify({ success: false, error: { code, message } }, null, 2)}\n`);
     else stderr.write(`${message}\n`);
     return 1;
   };
-  let guard;
+  let guard: GuardedWallet;
   try {
-    guard = await openGuard(env, request ?? await walletRequest(awalDir));
+    guard = await openGuard(env, request ?? await walletRequest(awalDir ?? ''));
   } catch (error) {
-    return fail('BUDGET_UNAVAILABLE', `walletcap: ${error.message}`);
+    return fail('BUDGET_UNAVAILABLE', `walletcap: ${messageOf(error)}`);
   }
   try {
     if (argv[0] === 'send') {
@@ -426,21 +476,21 @@ export async function awalMain(argv, { env = process.env, stdout = process.stdou
       if (!/^0x[0-9a-fA-F]{40}$/.test(recipient) && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient)) {
         return fail('INVALID_RECIPIENT', 'walletcap awal send takes an address (0x… or Solana), not an ENS name');
       }
-      const asset = values.asset.toUpperCase();
+      const asset = String(values.asset).toUpperCase();
       if (asset !== 'USDC') throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset}, so it refuses this send`);
-      const result = await guard.request('send-transaction', { recipient, amountAtomic: usdcAtomic(amount), asset, chain: values.chain });
+      const result = await guard.request('send-transaction', { recipient, amountAtomic: usdcAtomic(amount), asset, chain: values.chain }) as { error?: unknown; transactionHash?: unknown } | null;
       if (result?.error) return fail('TRANSACTION_FAILED', `Transaction failed: ${result.error}`);
       stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `Sent ${formatUsd(BigInt(usdcAtomic(amount)))} to ${recipient}${result?.transactionHash ? ` (${result.transactionHash})` : ''}\n`);
       return 0;
     }
     const [url] = positionals;
     if (url === undefined) return fail('INVALID_ARGUMENTS', 'usage: x402 pay <url> [options]');
-    const result = await guard.request('make-x402-request', payData(url, values));
+    const result = await guard.request('make-x402-request', payData(url, values)) as { status?: unknown; data?: unknown } | null;
     stdout.write(values.json ? `${JSON.stringify(result, null, 2)}\n` : `Request completed (HTTP ${result?.status})\n${typeof result?.data === 'string' ? result.data : JSON.stringify(result?.data ?? null, null, 2)}\n`);
     return 0;
   } catch (error) {
     if (error instanceof BudgetRefused) return fail('BUDGET_REFUSED', `walletcap refused this payment: ${error.message}`);
-    return fail('REQUEST_FAILED', String(error?.message ?? error));
+    return fail('REQUEST_FAILED', messageOf(error));
   } finally {
     guard.budget.close();
   }
@@ -451,14 +501,14 @@ export async function awalMain(argv, { env = process.env, stdout = process.stdou
 // Coinbase's Agentic Wallet MCP server behind a proxy that counts its send and
 // make_http_request_with_x402 calls, and refuses every tool it does not know.
 
-const MCP_PAYMENT_TOOLS = { make_http_request_with_x402: 'make-x402-request', send: 'send-transaction' };
+const MCP_PAYMENT_TOOLS: Readonly<Record<string, string>> = { make_http_request_with_x402: 'make-x402-request', send: 'send-transaction' };
 
 /**
  * The server's tools that move no money (payments-mcp 2.12.2), passed through as they are. Any
  * other tool, `trade` included, is refused unless the wallet's owner names it with --allow-tool:
  * a tool walletcap does not know may move money it cannot count.
  */
-export const MCP_PASS_THROUGH_TOOLS = Object.freeze([
+export const MCP_PASS_THROUGH_TOOLS: readonly string[] = Object.freeze([
   'bazaar_get_resource_details', 'bazaar_list', 'bazaar_search', 'check_session_status',
   'get_wallet_address', 'get_wallet_balance', 'show_wallet_app', 'sign_in_with_email',
   'verify_email_otp', 'x402_discover_payment_requirements',
@@ -468,26 +518,44 @@ export const MCP_PASS_THROUGH_TOOLS = Object.freeze([
  * Where Coinbase's server runs from. `npx @coinbase/payments-mcp` is its installer, not the
  * server: it downloads the server to ~/.payments-mcp, and MCP clients run bundle.js with node.
  */
-export const paymentsMcpServer = (home = homedir()) => [process.execPath, join(home, '.payments-mcp', 'bundle.js')];
+export const paymentsMcpServer = (home: string = homedir()): string[] => [process.execPath, join(home, '.payments-mcp', 'bundle.js')];
 
-const toolResult = raw => {
-  const text = raw?.content?.find(item => item?.type === 'text')?.text;
-  if (raw?.isError) throw new Error(text ?? 'the wallet reported an error');
+interface ToolResult {
+  content?: { type?: string; text?: string }[];
+  isError?: boolean;
+  [key: string]: unknown;
+}
+
+const toolResult = (raw: unknown): unknown => {
+  const result = raw as ToolResult | null | undefined;
+  const text = result?.content?.find(item => item?.type === 'text')?.text;
+  if (result?.isError) throw new Error(text ?? 'the wallet reported an error');
   if (text === undefined) return raw;
   try {
-    const parsed = JSON.parse(text);
-    return parsed !== null && typeof parsed === 'object' && 'result' in parsed ? parsed.result : parsed;
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === 'object' && 'result' in parsed ? (parsed as { result: unknown }).result : parsed;
   } catch {
     return { text };
   }
 };
+
+interface JsonRpc {
+  jsonrpc?: string;
+  id?: unknown;
+  method?: string;
+  params?: { name?: unknown; arguments?: Record<string, unknown> };
+  result?: { tools?: { name?: unknown }[] } & Record<string, unknown>;
+  error?: { message?: string };
+}
 
 /**
  * Proxy an MCP client (stdin/stdout) to Coinbase's Agentic Wallet MCP server. Payments are
  * counted, the tools in MCP_PASS_THROUGH_TOOLS and --allow-tool pass through, and every other
  * tool is refused and left out of tools/list. Resolves with the server's exit code.
  */
-export async function awalMcpMain(argv, { env = process.env, input = process.stdin, output = process.stdout, stderr = process.stderr, home } = {}) {
+export async function awalMcpMain(argv: string[], { env = process.env, input = process.stdin, output = process.stdout, stderr = process.stderr, home }: {
+  env?: NodeJS.ProcessEnv; input?: Readable; output?: Writable; stderr?: Writable; home?: string;
+} = {}): Promise<number> {
   const split = argv.indexOf('--');
   const own = split < 0 ? argv : argv.slice(0, split);
   const { values } = parseArgs({
@@ -496,33 +564,34 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
     strict: true,
   });
   const server = split < 0 ? paymentsMcpServer(home) : argv.slice(split + 1);
-  if (server.length === 0) {
+  const [command, ...commandArgs] = server;
+  if (command === undefined) {
     stderr.write('walletcap: give the MCP server command after --\n');
     return 2;
   }
-  if (split < 0 && !existsSync(server[1])) {
+  if (split < 0 && !existsSync(server[1] ?? '')) {
     stderr.write(`walletcap: Coinbase's Agentic Wallet MCP server is not installed at ${server[1]}. `
       + 'Install it once with: npx @coinbase/payments-mcp install --client other --no-auto-config '
       + '(or give walletcap the server command after --)\n');
     return 1;
   }
   const passed = new Set([...MCP_PASS_THROUGH_TOOLS, ...(values['allow-tool'] ?? [])]);
-  const offered = name => Object.hasOwn(MCP_PAYMENT_TOOLS, name) || passed.has(name);
-  const child = spawn(server[0], server.slice(1), { stdio: ['pipe', 'pipe', 'inherit'], env });
-  const write = (stream, message) => stream.write(`${JSON.stringify(message)}\n`);
-  const pending = new Map();
-  const listing = new Set(); // the client's tools/list requests, whose answers are filtered
-  const callTool = (name, args) => new Promise((resolveCall, rejectCall) => {
+  const offered = (name: unknown): boolean => (typeof name === 'string' && Object.hasOwn(MCP_PAYMENT_TOOLS, name)) || passed.has(String(name));
+  const child = spawn(command, commandArgs, { stdio: ['pipe', 'pipe', 'inherit'], env });
+  const write = (stream: Writable, message: unknown): void => { stream.write(`${JSON.stringify(message)}\n`); };
+  const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  const listing = new Set<string>(); // the client's tools/list requests, whose answers are filtered
+  const callTool = (name: string | undefined, args: Record<string, unknown>): Promise<unknown> => new Promise((resolveCall, rejectCall) => {
     const id = `walletcap-${randomUUID()}`;
     pending.set(id, { resolve: resolveCall, reject: rejectCall });
     write(child.stdin, { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
   });
 
   createInterface({ input: child.stdout }).on('line', line => {
-    let message;
-    try { message = JSON.parse(line); } catch { output.write(`${line}\n`); return; }
-    const waiting = pending.get(message?.id);
-    if (waiting !== undefined) {
+    let message: JsonRpc;
+    try { message = JSON.parse(line) as JsonRpc; } catch { output.write(`${line}\n`); return; }
+    const waiting = typeof message?.id === 'string' ? pending.get(message.id) : undefined;
+    if (waiting !== undefined && typeof message.id === 'string') {
       pending.delete(message.id);
       if (message.error) waiting.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
       else waiting.resolve(message.result);
@@ -536,11 +605,14 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
     output.write(`${line}\n`);
   });
 
-  // The guard talks to the wallet through the server's own tools, one guard per call so concurrent
-  // calls keep their own answers; the agent gets the server's own answer back, or the refusal.
-  const TOOL_OF = { ...Object.fromEntries(Object.entries(MCP_PAYMENT_TOOLS).map(([tool, channel]) => [channel, tool])), 'get-wallet-address': 'get_wallet_address' };
-  let budget;
-  const budgetOf = async () => {
+  // The guard talks to the wallet through the server's own tools, one guard per call so
+  // concurrent calls keep their own answers; the agent gets the server's own answer back, or
+  // the refusal.
+  const TOOL_OF: Readonly<Record<string, string>> = {
+    ...Object.fromEntries(Object.entries(MCP_PAYMENT_TOOLS).map(([tool, channel]) => [channel, tool])), 'get-wallet-address': 'get_wallet_address',
+  };
+  let budget: Budget | undefined;
+  const budgetOf = async (): Promise<Budget> => {
     if (budget === undefined) {
       const opened = await openGuard({
         ...env,
@@ -552,8 +624,8 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
     return budget;
   };
 
-  const handle = async message => {
-    let raw;
+  const handle = async (message: JsonRpc): Promise<void> => {
+    let raw: unknown;
     try {
       const guard = guardAgenticWallet(await budgetOf(), {
         request: async (channel, data) => {
@@ -561,18 +633,18 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
           return toolResult(raw);
         },
       });
-      await guard.request(MCP_PAYMENT_TOOLS[message.params.name], message.params.arguments ?? {});
+      await guard.request(MCP_PAYMENT_TOOLS[String(message.params?.name)] ?? '', message.params?.arguments ?? {});
       write(output, { jsonrpc: '2.0', id: message.id, result: raw });
     } catch (error) {
       const result = raw === undefined
-        ? { content: [{ type: 'text', text: `walletcap refused this payment: ${error.message}` }], isError: true }
+        ? { content: [{ type: 'text', text: `walletcap refused this payment: ${messageOf(error)}` }], isError: true }
         : raw;
       write(output, { jsonrpc: '2.0', id: message.id, result });
     }
   };
 
   createInterface({ input }).on('line', line => {
-    let message;
+    let message: unknown;
     try {
       message = JSON.parse(line);
     } catch {
@@ -584,16 +656,17 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
       write(output, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'walletcap does not forward JSON-RPC batches' } });
       return;
     }
-    if (message?.method === 'tools/call') {
-      const name = String(message.params?.name);
+    const rpc = message as JsonRpc;
+    if (rpc?.method === 'tools/call') {
+      const name = String(rpc.params?.name);
       if (Object.hasOwn(MCP_PAYMENT_TOOLS, name)) {
-        handle(message).catch(error => stderr.write(`walletcap: ${error.message}\n`));
+        handle(rpc).catch(error => stderr.write(`walletcap: ${messageOf(error)}\n`));
         return;
       }
       if (!passed.has(name)) {
         write(output, {
           jsonrpc: '2.0',
-          id: message.id,
+          id: rpc.id,
           result: {
             content: [{ type: 'text', text: `walletcap refused ${name}: it can't tell whether this tool moves money, so it can't count it. `
               + `The wallet's owner can let it through, uncounted, with --allow-tool ${name}` }],
@@ -603,7 +676,7 @@ export async function awalMcpMain(argv, { env = process.env, input = process.std
         return;
       }
     }
-    if (message?.method === 'tools/list' && message.id !== undefined && message.id !== null) listing.add(JSON.stringify(message.id));
+    if (rpc?.method === 'tools/list' && rpc.id !== undefined && rpc.id !== null) listing.add(JSON.stringify(rpc.id));
     child.stdin.write(`${line}\n`);
   }).on('close', () => child.stdin.end());
 

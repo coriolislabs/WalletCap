@@ -4,12 +4,12 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   defaultBudgetPath, formatUsd, formatWindow, normalizeWallet, parseLimits, toMicros, toWindowMs,
-} from '../money.mjs';
+} from '../dist/money.js';
 
 // The cases the Python suite checks too (tests/test_money.py).
 const VECTORS = JSON.parse(readFileSync(new URL('../../spec/vectors/money.json', import.meta.url), 'utf8'));
 
-test('dollars convert as the shared vectors say, the same as in Python', () => {
+test('dollars convert as the shared vectors say, the same as in Python', async () => {
   assert.ok(VECTORS.cases.length > 50);
   for (const { input, micros, error } of VECTORS.cases) {
     const shown = JSON.stringify(input);
@@ -18,7 +18,7 @@ test('dollars convert as the shared vectors say, the same as in Python', () => {
   }
 });
 
-test('trimming takes linear time: a long run of spaces inside an amount is refused at once', () => {
+test('trimming takes linear time: a long run of spaces inside an amount is refused at once', async () => {
   // A regex like /[ \t]+$/ backtracks quadratically here: about 20 s for these 200,000 spaces.
   const text = `1${' '.repeat(200_000)}x`;
   const started = performance.now();
@@ -26,7 +26,7 @@ test('trimming takes linear time: a long run of spaces inside an amount is refus
   assert.ok(performance.now() - started < 1_000, `took ${performance.now() - started} ms`);
 });
 
-test('windows, wallet names and counts read only ASCII digits and trim only ASCII whitespace', () => {
+test('windows, wallet names and counts read only ASCII digits and trim only ASCII whitespace', async () => {
   assert.equal(toWindowMs(' 24h\t'), 86_400_000n);
   assert.equal(normalizeWallet(' 0xd797ead28c38575fdf4fc523866287372340ca02\n'), '0xd797ead28c38575fdf4fc523866287372340ca02');
   assert.deepEqual(parseLimits({ maxPayments: ' 3 ' }), { maxUses: 3n });
@@ -37,7 +37,7 @@ test('windows, wallet names and counts read only ASCII digits and trim only ASCI
   for (const bad of ['\u0661\u0662', '3\u0085']) assert.throws(() => parseLimits({ maxPayments: bad }), { name: 'BudgetError' }, bad);
 });
 
-test('dollars read exactly from strings, rounded from numbers, as-is from bigints', () => {
+test('dollars read exactly from strings, rounded from numbers, as-is from bigints', async () => {
   assert.equal(toMicros('$12.50'), 12_500_000n);
   assert.equal(toMicros('12.50 USDC'), 12_500_000n);
   assert.equal(toMicros('$1,000'), 1_000_000_000n);
@@ -51,7 +51,7 @@ test('dollars read exactly from strings, rounded from numbers, as-is from bigint
   }
 });
 
-test('amounts and windows read back the way people write them', () => {
+test('amounts and windows read back the way people write them', async () => {
   assert.equal(formatUsd(150_000_000n), '$150.00');
   assert.equal(formatUsd(50_000n), '$0.05');
   assert.equal(formatUsd(1n), '$0.000001');
@@ -67,7 +67,7 @@ test('amounts and windows read back the way people write them', () => {
   for (const bad of ['0h', '1y', -5, 0, 'soon']) assert.throws(() => toWindowMs(bad), { name: 'BudgetError' });
 });
 
-test('one wallet is one budget, however its address is written', () => {
+test('one wallet is one budget, however its address is written', async () => {
   const lower = '0xd797ead28c38575fdf4fc523866287372340ca02';
   assert.equal(normalizeWallet('0xd797ead28C38575FDf4fC523866287372340Ca02'), lower);
   assert.equal(normalizeWallet(`eip155:8453:${lower.toUpperCase().replace('0X', '0x')}`), lower);
@@ -79,7 +79,7 @@ test('one wallet is one budget, however its address is written', () => {
 });
 
 
-test('mixed-case EVM addresses are checked against EIP-55, and Solana CAIP-10 is one wallet', () => {
+test('mixed-case EVM addresses are checked against EIP-55, and Solana CAIP-10 is one wallet', async () => {
   const sol = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
   assert.equal(normalizeWallet(sol), sol);
   assert.equal(normalizeWallet(`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:${sol}`), sol);
@@ -87,7 +87,7 @@ test('mixed-case EVM addresses are checked against EIP-55, and Solana CAIP-10 is
   assert.equal(toWindowMs(86_400_000), 86_400_000n);
 });
 
-test('one rolling limit at a time, and nothing left out silently', () => {
+test('one rolling limit at a time, and nothing left out silently', async () => {
   assert.deepEqual(parseLimits({ perDay: '$150', perPayment: '$50' }), { cap: 150_000_000n, windowMs: 86_400_000n, perPayment: 50_000_000n });
   assert.deepEqual(parseLimits({ cap: 10, window: '1h', maxPayments: 3 }), { cap: 10_000_000n, windowMs: 3_600_000n, maxUses: 3n });
   assert.deepEqual(parseLimits({ perPayment: null }), { perPayment: null });
@@ -96,7 +96,7 @@ test('one rolling limit at a time, and nothing left out silently', () => {
   assert.throws(() => parseLimits({ perPayment: 0 }), /freeze/);
 });
 
-test('the default file is per user and the same for every process', () => {
+test('the default file is per user and the same for every process', async () => {
   const home = '/home/agent';
   assert.equal(defaultBudgetPath({}, 'linux', home), '/home/agent/.local/state/walletcap/budget.sqlite');
   assert.equal(defaultBudgetPath({ XDG_STATE_HOME: '/var/state' }, 'linux', home), '/var/state/walletcap/budget.sqlite');

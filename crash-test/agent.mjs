@@ -63,7 +63,7 @@ client.setSpendControls(false);
 
 let close = () => {};
 if (config.control === 'walletcap') {
-  const budget = openBudget({ wallet: account.address, path: config.budgetPath });
+  const budget = await openBudget({ wallet: account.address, path: config.budgetPath });
   budget.guard(client);
   close = () => budget.close();
 } else if (config.control === 'cdp-shared') {
@@ -71,7 +71,7 @@ if (config.control === 'walletcap') {
   applySpendControls(client, { ...cdpControls(), store });
   close = () => store.close();
 } else if (config.control === 'cdp-store') {
-  const budget = openBudget({ wallet: account.address, path: config.budgetPath });
+  const budget = await openBudget({ wallet: account.address, path: config.budgetPath });
   const store = budget.cdpStore({ asset: ASSETS.USDC.address });
   applySpendControls(client, cdpStoreControls(config.storeLatencyMs > 0 ? withLatency(store, config.storeLatencyMs) : store));
   close = () => {

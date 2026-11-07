@@ -1,19 +1,18 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 // npx walletcap: see, set and freeze an agent's spend budget.
-import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { BudgetError } from './errors.mjs';
-import { openBudget } from './index.mjs';
-import { Ledger } from './ledger.mjs';
+import { BudgetError } from './errors.js';
+import { type Budget, openBudget, type Status } from './index.js';
+import { Ledger } from './ledger.js';
 import {
   defaultBudgetPath, describeLimits, expandHome, formatAge, formatUsd, formatWindow, normalizeWallet, parseLimits, shortWallet,
   storedWalletName, toWindowMs, trimAscii,
-} from './money.mjs';
+} from './money.js';
 
-const { version } = createRequire(import.meta.url)('./package.json');
+const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
 
 const HELP = `walletcap ${version}: one spend budget per wallet, for every agent that pays from it.
 
@@ -44,6 +43,7 @@ Options
   --max-payments <n|none>        Most payments in one window
   --limit <n>          How many payments history shows (default 20)
   --json               Machine-readable output
+  --version            The version
 
 Amounts are dollars: --per-day 150. Leave out the $ sign, which your shell would expand.`;
 
@@ -63,16 +63,34 @@ const OPTIONS = {
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
-};
+} as const;
+
+interface Values {
+  wallet?: string;
+  path?: string;
+  'per-payment'?: string;
+  'per-hour'?: string;
+  'per-day'?: string;
+  'per-week'?: string;
+  cap?: string;
+  window?: string;
+  'max-payments'?: string;
+  limit?: string;
+  'all-unknown'?: boolean;
+  'older-than'?: string;
+  json?: boolean;
+  help?: boolean;
+  version?: boolean;
+}
 
 class Usage extends Error {}
 
-const json = value => JSON.stringify(value, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2);
+const json = (value: unknown): string => JSON.stringify(value, (_, v: unknown) => (typeof v === 'bigint' ? v.toString() : v), 2);
 
-const pathOf = values => resolve(expandHome(values.path ?? defaultBudgetPath()));
+const pathOf = (values: Values): string => resolve(expandHome(values.path ?? defaultBudgetPath()));
 
-const limitsOf = values => {
-  const none = value => (value !== undefined && trimAscii(value).toLowerCase() === 'none' ? null : value);
+const limitsOf = (values: Values) => {
+  const none = (value: string | undefined): string | null | undefined => (value !== undefined && trimAscii(value).toLowerCase() === 'none' ? null : value);
   return parseLimits({
     perPayment: none(values['per-payment']),
     perHour: values['per-hour'],
@@ -84,28 +102,39 @@ const limitsOf = values => {
   });
 };
 
-const wallets = path => {
-  if (!existsSync(path)) return [];
-  const ledger = new Ledger(path);
+const withLedger = async <T>(path: string, work: (ledger: Ledger) => Promise<T>, create = false): Promise<T> => {
+  const ledger = await Ledger.open(path, { create });
   try {
-    // A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
-    return [...new Set(ledger.budgets().map(row => storedWalletName(row.wallet)))];
+    return await work(ledger);
   } finally {
     ledger.close();
   }
 };
 
-const walletOf = (values, path) => {
+const wallets = async (path: string): Promise<string[]> => {
+  if (!existsSync(path)) return [];
+  // A budget the 0.3.0 upgrade couldn't merge stays under its 0.2.x name: one wallet, listed once.
+  return withLedger(path, async ledger => [...new Set((await ledger.budgets()).map(row => storedWalletName(row.wallet)))]);
+};
+
+const walletOf = async (values: Values, path: string): Promise<string> => {
   if (values.wallet !== undefined) return normalizeWallet(values.wallet);
-  const known = wallets(path);
-  if (known.length === 1) return known[0];
+  const known = await wallets(path);
+  if (known.length === 1 && known[0] !== undefined) return known[0];
   if (known.length === 0) throw new BudgetError(`no budget in ${path} yet: npx walletcap set --wallet <address> --per-day <dollars>`);
   throw new Usage(`the file holds ${known.length} budgets; pick one with --wallet:\n  ${known.join('\n  ')}`);
 };
 
-const open = (values, path) => openBudget({ wallet: walletOf(values, path), path, create: false });
+const withBudget = async <T>(values: Values, path: string, work: (budget: Budget) => Promise<T>): Promise<T> => {
+  const budget = await openBudget({ wallet: await walletOf(values, path), path, create: false });
+  try {
+    return await work(budget);
+  } finally {
+    budget.close();
+  }
+};
 
-const detail = status => [
+const detail = (status: Status): string => [
   `Wallet       ${status.wallet}`,
   `Limit        ${formatUsd(status.cap)} per ${formatWindow(status.window)}, rolling`,
   `Per payment  ${status.perPayment === null ? 'no limit' : formatUsd(status.perPayment)}`,
@@ -118,98 +147,80 @@ const detail = status => [
 
 // Every payment of unknown or refused outcome older than --older-than that the payee can no longer
 // settle (with no settle-by time, an hour and a minute old), for an owner who has checked the chain.
-function releaseUnknown(values, path, id) {
+async function releaseUnknown(values: Values, path: string, id: string | undefined): Promise<string> {
   if (id !== undefined) throw new Usage('release takes an id or --all-unknown, not both');
   if (values['older-than'] === undefined) throw new Usage('release --all-unknown needs --older-than, like --older-than 24h');
   const olderThan = toWindowMs(values['older-than'], '--older-than');
   if (!existsSync(path)) throw new BudgetError(`no budget file at ${path}`);
-  const wallet = walletOf(values, path);
-  const ledger = new Ledger(path);
-  try {
-    const released = ledger.voidUnknown(wallet, olderThan);
-    if (values.json) return json(released.map(row => ({ id: row.payment, amount: row.amount })));
-    if (released.length === 0) {
-      return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be released yet. One goes once it is older than `
-        + `${formatWindow(olderThan)} and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old.`;
-    }
-    const total = released.reduce((sum, row) => sum + row.amount, 0n);
-    return `Released ${released.length} payment${released.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `
-      + `(${formatUsd(total)} from ${shortWallet(wallet)}): they no longer count. Only do this for payments you know never left the wallet.`;
-  } finally {
-    ledger.close();
+  const wallet = await walletOf(values, path);
+  const released = await withLedger(path, ledger => ledger.voidUnknown(wallet, olderThan));
+  if (values.json) return json(released.map(row => ({ id: row.payment, amount: row.amount })));
+  if (released.length === 0) {
+    return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be released yet. One goes once it is older than `
+      + `${formatWindow(olderThan)} and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old.`;
   }
+  const total = released.reduce((sum, row) => sum + row.amount, 0n);
+  return `Released ${released.length} payment${released.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `
+    + `(${formatUsd(total)} from ${shortWallet(wallet)}): they no longer count. Only do this for payments you know never left the wallet.`;
 }
 
-const commands = {
-  status(values, path) {
+type Command = (values: Values, path: string, rest: string[]) => Promise<string>;
+
+const commands: Record<string, Command> = {
+  async status(values, path) {
     if (values.wallet === undefined) {
-      const statuses = wallets(path).map(wallet => {
-        const budget = openBudget({ wallet, path, create: false });
-        try { return budget.status(); } finally { budget.close(); }
-      });
+      const statuses: Status[] = [];
+      for (const wallet of await wallets(path)) {
+        const budget = await openBudget({ wallet, path, create: false });
+        try { statuses.push(await budget.status()); } finally { budget.close(); }
+      }
       if (values.json) return json({ path, budgets: statuses });
       if (statuses.length === 0) return `No budget in ${path} yet. Create one:\n  npx walletcap set --wallet <address> --per-day 150 --per-payment 50`;
       return [`Budget file ${path}`, '', ...statuses.map(status => status.summary)].join('\n');
     }
-    const budget = open(values, path);
-    try {
-      const status = budget.status();
+    return withBudget(values, path, async budget => {
+      const status = await budget.status();
       return values.json ? json(status) : detail(status);
-    } finally {
-      budget.close();
-    }
+    });
   },
 
-  set(values, path) {
+  async set(values, path) {
     const limits = limitsOf(values);
     if (Object.keys(limits).length === 0) throw new Usage('set needs a limit, like --per-day 150 or --per-payment 50');
-    if (values.wallet === undefined && wallets(path).length !== 1) throw new Usage('set needs --wallet <address>');
-    const wallet = walletOf(values, path);
-    const ledger = new Ledger(path, { create: true });
-    try {
+    if (values.wallet === undefined && (await wallets(path)).length !== 1) throw new Usage('set needs --wallet <address>');
+    const wallet = await walletOf(values, path);
+    await withLedger(path, async ledger => {
       const { maxUses, ...rest } = limits;
       const owned = { ...rest, ...(maxUses === undefined ? {} : { maxPayments: maxUses }) };
-      if (ledger.budget(wallet) !== null) ledger.setLimits(wallet, owned);
-      else if (owned.cap === undefined) throw new BudgetError(`${shortWallet(wallet)} has no budget yet: give it a rolling limit too, like --per-day 150`);
-      else ledger.createBudget(wallet, owned);
-    } finally {
-      ledger.close();
-    }
-    const budget = openBudget({ wallet, path, create: false });
-    try {
-      const status = budget.status();
+      if (await ledger.budget(wallet) !== null) await ledger.setLimits(wallet, owned);
+      else if (owned.cap === undefined || owned.windowMs === undefined) throw new BudgetError(`${shortWallet(wallet)} has no budget yet: give it a rolling limit too, like --per-day 150`);
+      else await ledger.createBudget(wallet, { ...owned, cap: owned.cap, windowMs: owned.windowMs });
+    }, true);
+    return withBudget({ ...values, wallet }, path, async budget => {
+      const status = await budget.status();
       if (values.json) return json(status);
       const now = describeLimits({ cap: status.cap, windowMs: status.window, perPayment: status.perPayment, maxUses: status.maxPayments });
       return `${shortWallet(wallet)}: ${now}.\nWhat was spent still counts: ${formatUsd(status.spent)} spent, ${formatUsd(status.inFlight)} in flight, ${formatUsd(status.remaining)} left.`;
-    } finally {
-      budget.close();
-    }
+    });
   },
 
-  freeze(values, path) {
-    const budget = open(values, path);
-    try {
-      budget.freeze();
-      return values.json ? json(budget.status()) : `Frozen ${shortWallet(budget.wallet)}: every payment from it is refused, on every rail and in every process, until you run unfreeze.`;
-    } finally {
-      budget.close();
-    }
+  async freeze(values, path) {
+    return withBudget(values, path, async budget => {
+      await budget.freeze();
+      return values.json ? json(await budget.status()) : `Frozen ${shortWallet(budget.wallet)}: every payment from it is refused, on every rail and in every process, until you run unfreeze.`;
+    });
   },
 
-  unfreeze(values, path) {
-    const budget = open(values, path);
-    try {
-      budget.unfreeze();
-      return values.json ? json(budget.status()) : `Unfrozen. ${budget.status().summary}`;
-    } finally {
-      budget.close();
-    }
+  async unfreeze(values, path) {
+    return withBudget(values, path, async budget => {
+      await budget.unfreeze();
+      return values.json ? json(await budget.status()) : `Unfrozen. ${(await budget.status()).summary}`;
+    });
   },
 
-  history(values, path) {
-    const budget = open(values, path);
-    try {
-      const rows = budget.history({ limit: values.limit === undefined ? 20 : trimAscii(values.limit) });
+  async history(values, path) {
+    return withBudget(values, path, async budget => {
+      const rows = await budget.history({ limit: values.limit === undefined ? 20 : trimAscii(values.limit) });
       if (values.json) return json(rows);
       if (rows.length === 0) return `No payments from ${shortWallet(budget.wallet)} yet.`;
       return rows.map(row => [
@@ -221,15 +232,12 @@ const commands = {
         row.tx ? `tx ${row.tx}` : row.note ?? '',
         row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown' ? `(${row.id})` : '',
       ].filter(Boolean).join('  ')).join('\n');
-    } finally {
-      budget.close();
-    }
+    });
   },
 
-  holds(values, path) {
-    const budget = open(values, path);
-    try {
-      const holds = budget.holds();
+  async holds(values, path) {
+    return withBudget(values, path, async budget => {
+      const holds = await budget.holds();
       if (values.json) return json(holds);
       if (holds.length === 0) return `No open payments from ${shortWallet(budget.wallet)}.`;
       return holds.map(hold => [
@@ -241,38 +249,33 @@ const commands = {
         hold.to ? `to ${shortWallet(hold.to.toLowerCase())}` : hold.note ?? '',
         hold.until === null ? 'counts until released' : `counts until ${hold.until.toISOString().replace(/\.\d{3}Z$/, 'Z')}`,
       ].filter(Boolean).join('  ')).join('\n');
-    } finally {
-      budget.close();
-    }
+    });
   },
 
-  release(values, path, [id]) {
+  async release(values, path, [id]) {
     if (values['all-unknown']) return releaseUnknown(values, path, id);
     if (id === undefined) throw new Usage('release needs the id of an in-flight payment; history shows it');
     if (!existsSync(path)) throw new BudgetError(`no budget file at ${path}`);
-    const ledger = new Ledger(path);
-    try {
-      const row = ledger.payment(id);
+    return withLedger(path, async ledger => {
+      const row = await ledger.payment(id);
       if (row === null) throw new BudgetError(`no payment ${id} in ${path}`);
       if (values.wallet !== undefined && row.wallet !== normalizeWallet(values.wallet)) {
         throw new BudgetError(`${id} is ${shortWallet(row.wallet)}'s payment, not ${shortWallet(normalizeWallet(values.wallet))}'s`);
       }
       if (row.state !== 'held') throw new BudgetError(`${id} is recorded as ${row.state}; only an in-flight payment can be released`);
-      ledger.void(id, { evidence: 'released by its owner' });
+      await ledger.void(id, { evidence: 'released by its owner' });
       return `Released ${id} (${formatUsd(row.amount)} from ${shortWallet(row.wallet)}): it no longer counts. Only do this for a payment you know never left the wallet.`;
-    } finally {
-      ledger.close();
-    }
+    });
   },
 };
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const hint = 'Run npx walletcap --help for the commands and options.';
-  let parsed;
+  let parsed: { values: Values; positionals: string[] };
   try {
-    parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
+    parsed = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true }) as { values: Values; positionals: string[] };
   } catch (error) {
-    process.stderr.write(`${error.message.split('. To specify')[0]}\n${hint}\n`);
+    process.stderr.write(`${String((error as Error).message).split('. To specify')[0]}\n${hint}\n`);
     return 2;
   }
   const { values, positionals } = parsed;
@@ -285,12 +288,13 @@ export function main(argv = process.argv.slice(2)) {
     process.stdout.write(`${HELP}\n`);
     return 0;
   }
-  if (!Object.hasOwn(commands, command)) {
+  const run = Object.hasOwn(commands, command) ? commands[command] : undefined;
+  if (run === undefined) {
     process.stderr.write(`unknown command ${command}\n${hint}\n`);
     return 2;
   }
   try {
-    process.stdout.write(`${commands[command](values, pathOf(values), rest)}\n`);
+    process.stdout.write(`${await run(values, pathOf(values), rest)}\n`);
     return 0;
   } catch (error) {
     if (error instanceof Usage) {
@@ -308,11 +312,11 @@ export function main(argv = process.argv.slice(2)) {
 // Coinbase's Agentic Wallet: its CLI and its MCP server, with every payment counted.
 const [first, ...after] = process.argv.slice(2);
 if (first === 'awal') {
-  const { awalMain } = await import('./agentic.mjs');
+  const { awalMain } = await import('./agentic.js');
   process.exitCode = await awalMain(after);
 } else if (first === 'awal-mcp') {
-  const { awalMcpMain } = await import('./agentic.mjs');
+  const { awalMcpMain } = await import('./agentic.js');
   process.exitCode = await awalMcpMain(after);
 } else {
-  process.exitCode = main();
+  process.exitCode = await main();
 }

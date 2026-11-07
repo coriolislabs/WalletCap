@@ -3,12 +3,12 @@
 // Payloads are created and signed offline, then settled (or refused) the way a
 // server's answer would report it. Nothing is sent and no chain is involved.
 import { existsSync, writeFileSync } from 'node:fs';
-import { openBudget } from '../../index.mjs';
+import { openBudget } from '../../dist/index.js';
 import { NETWORK, USDC, PAY_TO, x402 } from './x402-kit.mjs';
 
 const config = JSON.parse(process.argv[2]);
 const kit = await x402();
-const budget = openBudget({ wallet: kit.account.address, path: config.path, ...config.limits, onWarning: () => {} });
+const budget = await openBudget({ wallet: kit.account.address, path: config.path, ...config.limits, onWarning: () => {} });
 const client = budget.guard(kit.client());
 if (config.ready) writeFileSync(config.ready, String(process.pid));
 if (config.go) {
@@ -29,5 +29,5 @@ for (const atomic of config.payments) {
     results.push(error.reason);
   }
 }
-process.stdout.write(JSON.stringify({ results, spent: String(budget.status().spent), asset: USDC, payTo: PAY_TO }));
+process.stdout.write(JSON.stringify({ results, spent: String((await budget.status()).spent), asset: USDC, payTo: PAY_TO }));
 budget.close();

@@ -36,7 +36,7 @@ echo "== Solidity (EVM check) =="
 (cd solidity/evm && npm install --no-audit --no-fund --no-package-lock && node check.mjs ..)
 
 echo "== Crash test =="
-node js/scripts/copy-spec.mjs
+(cd js && npm run build)
 (cd crash-test \
   && npm install --no-save --no-audit --no-fund --no-package-lock ../js \
   && node contracts/build.mjs --check \

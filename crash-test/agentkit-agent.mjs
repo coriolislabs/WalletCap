@@ -69,7 +69,7 @@ let provider = new X402ActionProvider();
 let dir;
 if (mode === 'walletcap') {
   dir = mkdtempSync(join(tmpdir(), 'walletcap-crash-agentkit-'));
-  const budget = openBudget({ wallet: account.address, path: join(dir, 'budget.sqlite'), perPayment: '$0.02', perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: account.address, path: join(dir, 'budget.sqlite'), perPayment: '$0.02', perDay: '$1', create: true });
   provider = budget.guardAgentKit(provider);
 }
 

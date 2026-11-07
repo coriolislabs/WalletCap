@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
-import { BudgetError, BudgetRefused, openBudget } from '../index.mjs';
+import { BudgetError, BudgetRefused, openBudget } from '../dist/index.js';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-agentkit-'));
@@ -45,7 +45,7 @@ const standIn = async () => {
 const skip = kit === null && 'the x402 devDependencies are not installed';
 
 test("every client an AgentKit provider builds is guarded, and the merchant's first-listed $1 is refused before signing", { skip }, async () => {
-  const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'agentkit.sqlite'), perPayment: '$0.02', perDay: '$0.05', create: true });
+  const budget = await openBudget({ wallet: kit.account.address, path: join(DIR, 'agentkit.sqlite'), perPayment: '$0.02', perDay: '$0.05', create: true });
   const provider = budget.guardAgentKit(await standIn());
   const wallet = { account: kit.account };
   // The agent approved a 1¢ test quote; the merchant listed $1.00 of real USDC on Base mainnet first.
@@ -55,13 +55,13 @@ test("every client an AgentKit provider builds is guarded, and the merchant's fi
   // Each action builds a new client, and every one of them spends from the same budget.
   for (let i = 0; i < 5; i += 1) await provider.pay(wallet, kit.required(10_000));
   await assert.rejects(provider.pay(wallet, kit.required(10_000)), error => error instanceof BudgetRefused && error.reason === 'budget');
-  assert.equal(budget.status().spent, 50_000n);
-  assert.deepEqual(budget.history().map(p => p.to), Array(5).fill(PAY_TO));
+  assert.equal((await budget.status()).spent, 50_000n);
+  assert.deepEqual((await budget.history()).map(p => p.to), Array(5).fill(PAY_TO));
   budget.close();
 });
 
 test('only an AgentKit x402 provider can be guarded, and only once', { skip }, async () => {
-  const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'once.sqlite'), perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: kit.account.address, path: join(DIR, 'once.sqlite'), perDay: '$1', create: true });
   assert.throws(() => budget.guardAgentKit({}), BudgetError);
   const badAssets = await standIn();
   assert.throws(() => budget.guardAgentKit(badAssets, { assets: [{ network: NETWORK }] }), BudgetError);
@@ -70,7 +70,7 @@ test('only an AgentKit x402 provider can be guarded, and only once', { skip }, a
   budget.close();
 });
 
-test("the README's AgentKit recipe compiles against AgentKit's types; the old subclass doesn't", { skip: !existsSync(TSC) && 'typescript is not installed' }, () => {
+test("the README's AgentKit recipe compiles against AgentKit's types; the old subclass doesn't", { skip: !existsSync(TSC) && 'typescript is not installed' }, async () => {
   const tsc = (...files) => spawnSync(process.execPath, [TSC, '--noEmit', '--strict', '--skipLibCheck', '--module', 'nodenext', '--moduleResolution', 'nodenext', '--target', 'es2022', 'tests/types/agentkit.d.ts', ...files], { cwd: JS, encoding: 'utf8' });
   const recipe = tsc('tests/types/recipe.ts');
   assert.equal(recipe.status, 0, recipe.stdout);

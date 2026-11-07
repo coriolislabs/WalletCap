@@ -18,6 +18,7 @@ and if the count cannot be read, nothing is paid::
 
 from __future__ import annotations
 
+import asyncio
 import enum
 import json
 import shlex
@@ -398,7 +399,9 @@ class Paying:
             pass  # recording failed; the reservation stays open, and keeps counting
 
     async def __aenter__(self) -> Reservation:
-        return self.__enter__()
+        # The ledger waits for another process's write lock in a worker thread, never on the
+        # event loop.
+        return await asyncio.to_thread(self.__enter__)
 
     async def __aexit__(
         self,
@@ -406,7 +409,7 @@ class Paying:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        self.__exit__(exc_type, exc, traceback)
+        await asyncio.to_thread(self.__exit__, exc_type, exc, traceback)
 
 
 class Budget:
@@ -698,6 +701,36 @@ class Budget:
                 )
             )
         return payments
+
+    # The same, for async code: each runs in a worker thread (asyncio.to_thread), so a wait for
+    # another process's write lock never blocks the event loop. `async with budget.pay(...)`
+    # does the same for a payment.
+
+    async def acheck(self, amount: object) -> Check:
+        return await asyncio.to_thread(self.check, amount)
+
+    async def areserve(
+        self,
+        amount: object,
+        *,
+        to: str | None = None,
+        note: str | None = None,
+        details: dict[str, Any] | None = None,
+        rail: str = "python",
+        settles_by: datetime | None = None,
+    ) -> Reservation:
+        return await asyncio.to_thread(
+            self.reserve, amount, to=to, note=note, details=details, rail=rail, settles_by=settles_by
+        )
+
+    async def astatus(self) -> Status:
+        return await asyncio.to_thread(self.status)
+
+    async def aholds(self) -> list[Hold]:
+        return await asyncio.to_thread(self.holds)
+
+    async def ahistory(self, limit: int = 20) -> list[Payment]:
+        return await asyncio.to_thread(self.history, limit)
 
     def close(self) -> None:
         """Nothing to close: the ledger opens a connection per operation."""

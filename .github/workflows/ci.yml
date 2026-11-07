@@ -54,8 +54,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       # One install, so the walletcap the crash test depends on comes from this checkout and is
       # never looked up on npm (a release's walletcap isn't published until the PR merges).
-      - name: Put the ledger's spec in this checkout's walletcap
-        run: node js/scripts/copy-spec.mjs
+      - name: Build this checkout's walletcap
+        run: npm install --no-audit --no-fund && npm run build
+        working-directory: js
       - name: Install the crash test, on this checkout's walletcap
         run: npm install --no-save --no-audit --no-fund --no-package-lock ../js
         working-directory: crash-test
@@ -74,7 +75,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - name: Pack the crash test and this checkout's walletcap
         run: |
-          node ../js/scripts/copy-spec.mjs
+          (cd ../js && npm install --no-audit --no-fund)
           npm pack --pack-destination "$RUNNER_TEMP"
           (cd ../js && npm pack --pack-destination "$RUNNER_TEMP")
         working-directory: crash-test

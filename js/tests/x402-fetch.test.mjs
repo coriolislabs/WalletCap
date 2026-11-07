@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
-import { openBudget } from '../index.mjs';
+import { openBudget } from '../dist/index.js';
 import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const kit = await x402();
@@ -42,7 +42,7 @@ test('a guarded @x402/fetch pays, keeps counting what the payee refused, and sto
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const url = `http://127.0.0.1:${server.address().port}/weather`;
-    const budget = openBudget({ wallet: kit.account.address, path: join(DIR, 'fetch.sqlite'), perPayment: '$0.05', perDay: '$0.15', create: true });
+    const budget = await openBudget({ wallet: kit.account.address, path: join(DIR, 'fetch.sqlite'), perPayment: '$0.05', perDay: '$0.15', create: true });
     const fetchPaid = fetchKit.wrapFetchWithPayment(fetch, budget.guard(kit.client()));
     for (const expected of [200, 200]) assert.equal((await fetchPaid(url)).status, expected);
     answer = 'refuse';
@@ -50,9 +50,9 @@ test('a guarded @x402/fetch pays, keeps counting what the payee refused, and sto
     answer = 'settle';
     // @x402/fetch rewraps errors from payment creation; the budget's reason survives in the message.
     await assert.rejects(fetchPaid(url), /Failed to create payment payload: \$0\.05 would bring .* over its \$0\.15 limit/);
-    const status = budget.status();
+    const status = await budget.status();
     assert.deepEqual([status.spent, status.inFlight], [100_000n, 50_000n]);
-    assert.deepEqual(budget.history().map(entry => entry.status), ['refused', 'settled', 'settled']);
+    assert.deepEqual((await budget.history()).map(entry => entry.status), ['refused', 'settled', 'settled']);
   } finally {
     server.close();
   }

@@ -2,11 +2,11 @@
 // One agent process: open the wallet's budget and try each payment in turn,
 // optionally waiting for a start signal so several processes race.
 import { existsSync, writeFileSync } from 'node:fs';
-import { openBudget } from '../../index.mjs';
+import { openBudget } from '../../dist/index.js';
 
 const config = JSON.parse(process.argv[2]);
 const warnings = [];
-const budget = openBudget({ wallet: config.wallet, path: config.path, ...config.limits, onWarning: message => warnings.push(message) });
+const budget = await openBudget({ wallet: config.wallet, path: config.path, ...config.limits, onWarning: message => warnings.push(message) });
 if (config.ready) writeFileSync(config.ready, String(process.pid));
 if (config.go) {
   const until = Date.now() + 60_000;
@@ -25,5 +25,5 @@ for (const amount of config.payments) {
     results.push(error.reason);
   }
 }
-process.stdout.write(JSON.stringify({ results, warnings, spent: String(budget.status().spent) }));
+process.stdout.write(JSON.stringify({ results, warnings, spent: String((await budget.status()).spent) }));
 budget.close();

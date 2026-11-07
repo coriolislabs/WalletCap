@@ -4,7 +4,7 @@
 import { X402ActionProvider } from '@coinbase/agentkit';
 import { openBudget } from 'walletcap';
 
-const budget = openBudget({ wallet: '0xd797ead28c38575fdf4fc523866287372340ca02', perDay: '$1' });
+const budget = await openBudget({ wallet: '0xd797ead28c38575fdf4fc523866287372340ca02', perDay: '$1' });
 
 export class BudgetedX402ActionProvider extends X402ActionProvider {
   async createX402Client(walletProvider: unknown) {

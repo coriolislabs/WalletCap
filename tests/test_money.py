@@ -49,7 +49,7 @@ def test_both_languages_convert_the_same_floats() -> None:
         "console.log(JSON.stringify(JSON.parse(text).map(value => String(toMicros(value))))));"
     )
     result = subprocess.run(  # noqa: S603 - fixed local Node script
-        [NODE, "--input-type=module", "-e", script, str(ROOT / "js" / "money.mjs")],
+        [NODE, "--input-type=module", "-e", script, str(ROOT / "js" / "dist" / "money.js")],
         input=json.dumps(values),
         capture_output=True,
         text=True,

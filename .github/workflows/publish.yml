@@ -67,7 +67,7 @@ jobs:
         working-directory: js
         run: |
           npm install --no-audit --no-fund --no-package-lock
-          node --test
+          npm test
       - name: Publish to npm with provenance
         working-directory: js
         run: npm publish --provenance

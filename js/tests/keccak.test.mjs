@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { keccak256Hex } from '../_keccak.mjs';
+import { keccak256Hex } from '../dist/_keccak.js';
 
-test('keccak256 matches the Ethereum vectors', () => {
+test('keccak256 matches the Ethereum vectors', async () => {
   assert.equal(
     keccak256Hex(''),
     'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470',

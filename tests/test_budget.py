@@ -328,6 +328,45 @@ def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
     assert "one with no settle-by time, once it is also an hour and a minute old" in nothing.stdout
 
 
+def test_async_paths_wait_for_the_lock_in_a_thread_not_on_the_event_loop(tmp_path: Path) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$150", create=True)
+    script = (
+        "import sqlite3, sys, time\n"
+        "connection = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "connection.execute('BEGIN IMMEDIATE')\n"
+        "print('locked', flush=True)\n"
+        "time.sleep(0.5)\n"
+        "connection.execute('COMMIT')\n"
+    )
+    holder = subprocess.Popen(  # noqa: S603 - this interpreter running a fixed script
+        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, text=True
+    )
+    assert holder.stdout is not None
+    assert holder.stdout.readline().strip() == "locked"
+
+    async def run() -> int:
+        ticks = 0
+
+        async def tick() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        ticker = asyncio.create_task(tick())
+        async with budget.pay("$5") as payment:
+            payment.tx = TX
+        status = await budget.astatus()
+        ticker.cancel()
+        assert status.spent == 5_000_000
+        return ticks
+
+    # While the payment waited half a second for the other process's lock, the loop kept running.
+    assert asyncio.run(run()) >= 20
+    assert holder.wait(timeout=30) == 0
+
+
 def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
     budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$150", create=True)
 
@@ -337,7 +376,7 @@ def test_async_payments_and_history_keep_what_happened(tmp_path: Path) -> None:
             return payment.id
 
     spend_id = asyncio.run(pay())
-    [entry] = budget.history()
+    [entry] = asyncio.run(budget.ahistory())
     assert (entry.id, entry.status, entry.amount, entry.tx, entry.rail) == (
         spend_id,
         "settled",
@@ -514,15 +553,15 @@ def test_python_and_javascript_spend_from_one_budget(tmp_path: Path) -> None:
     _pay(budget, "$50")
     script = (
         "const { openBudget } = await import(process.argv[1]);"
-        "const budget = openBudget({ wallet: process.argv[2], path: process.argv[3] });"
+        "const budget = await openBudget({ wallet: process.argv[2], path: process.argv[3] });"
         "const results = [];"
         "for (const amount of ['$50', '$50']) {"
         "  try { await budget.pay(amount, async () => 'ok'); results.push('paid'); }"
         "  catch (error) { results.push(error.reason); } }"
-        "console.log(JSON.stringify({ results, spent: String(budget.status().spent) }));"
+        "console.log(JSON.stringify({ results, spent: String((await budget.status()).spent) }));"
     )
     result = subprocess.run(  # noqa: S603 - fixed local Node script, owned test file in argv
-        [NODE, "--input-type=module", "-e", script, str(JS / "index.mjs"), WALLET, str(path)],
+        [NODE, "--input-type=module", "-e", script, str(JS / "dist" / "index.js"), WALLET, str(path)],
         capture_output=True,
         text=True,
         check=False,
@@ -556,7 +595,7 @@ def test_both_languages_find_the_same_default_file(env: dict[str, str], platform
         "console.log(defaultBudgetPath(JSON.parse(env), platform, home));"
     )
     result = subprocess.run(  # noqa: S603 - fixed local Node script
-        [NODE, "--input-type=module", "-e", script, str(JS / "money.mjs"), json.dumps(env)]
+        [NODE, "--input-type=module", "-e", script, str(JS / "dist" / "money.js"), json.dumps(env)]
         + [platform, home],
         capture_output=True,
         text=True,

@@ -163,7 +163,7 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
         "const { existsSync } = await import('node:fs');"
         "const { Ledger } = await import(process.argv[1]);"
         "while (!existsSync(process.argv[3])) await new Promise(done => setTimeout(done, 1));"
-        "const status = new Ledger(process.argv[2]).status(process.argv[4]);"
+        "const status = await (await Ledger.open(process.argv[2])).status(process.argv[4]);"
         "console.log(JSON.stringify({ payments: Number(status.payments), in_flight: Number(status.in_flight) }));"
     )
     children = [
@@ -174,7 +174,7 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
             text=True,
         ),
         subprocess.Popen(  # noqa: S603 - the local Node running a fixed script
-            [NODE, "--input-type=module", "-e", javascript, str(JS / "ledger.mjs"), str(path), str(go), wallet],
+            [NODE, "--input-type=module", "-e", javascript, str(JS / "dist" / "ledger.js"), str(path), str(go), wallet],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { applySpendControls } from '@coinbase/cdp-sdk/x402';
-import { openBudget } from '../index.mjs';
+import { openBudget } from '../dist/index.js';
 import { NETWORK, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-sdk-'));
@@ -18,7 +18,7 @@ const skip = kit === null && 'the x402/CDP devDependencies are not installed';
 
 test('the published CDP SDK records a payment through walletcap cdpStore', { skip }, async () => {
   const path = join(DIR, 'sdk.sqlite');
-  const budget = openBudget({ wallet: kit.account.address, path, perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: kit.account.address, path, perDay: '$1', create: true });
   const store = budget.cdpStore({ asset: USDC });
   try {
     const client = kit.client();
@@ -32,7 +32,7 @@ test('the published CDP SDK records a payment through walletcap cdpStore', { ski
     });
     const payload = await client.createPaymentPayload(kit.required(50_000));
     assert.ok(payload);
-    assert.equal(budget.status().inFlight, 50_000n);
+    assert.equal((await budget.status()).inFlight, 50_000n);
     const rows = await store.load();
     assert.equal(rows.length, 1);
     assert.equal(rows[0].atomicAmount, 50_000n);
@@ -52,9 +52,9 @@ const controls = store => ({
   store,
 });
 
-test('the guard refuses a client that already has CDP spend controls', { skip }, () => {
+test('the guard refuses a client that already has CDP spend controls', { skip }, async () => {
   const path = join(DIR, 'conflict.sqlite');
-  const budget = openBudget({ wallet: kit.account.address, path, perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: kit.account.address, path, perDay: '$1', create: true });
   const store = budget.cdpStore({ asset: USDC });
   try {
     const client = kit.client();
@@ -68,7 +68,7 @@ test('the guard refuses a client that already has CDP spend controls', { skip },
 
 test('CDP controls added after the guard are refused before signing', { skip }, async () => {
   const path = join(DIR, 'conflict-late.sqlite');
-  const budget = openBudget({ wallet: kit.account.address, path, perDay: '$1', create: true });
+  const budget = await openBudget({ wallet: kit.account.address, path, perDay: '$1', create: true });
   const store = budget.cdpStore({ asset: USDC });
   try {
     const client = kit.client();
@@ -78,8 +78,8 @@ test('CDP controls added after the guard are refused before signing', { skip }, 
       client.createPaymentPayload(kit.required(50_000)),
       /CDP spend controls|Use one/,
     );
-    assert.equal(budget.status().inFlight, 0n);
-    assert.equal(budget.status().inFlight, 0n);
+    assert.equal((await budget.status()).inFlight, 0n);
+    assert.equal((await budget.status()).inFlight, 0n);
   } finally {
     store.close();
     budget.close();

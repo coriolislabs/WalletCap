@@ -90,7 +90,7 @@ async function runControl(scenario, control, payTo) {
     const budgetPath = join(dir, 'budget.sqlite');
     if (control === 'walletcap' || control === 'cdp-store') {
       // The owner sets the budget once, as `npx walletcap set` does; every agent opens it.
-      openBudget({ wallet: privateKeyToAccount(key).address, path: budgetPath, perPayment: '$50', perDay: '$150', create: true }).close();
+      (await openBudget({ wallet: privateKeyToAccount(key).address, path: budgetPath, perPayment: '$50', perDay: '$150', create: true })).close();
     }
     const base = { control, key, payTo, budgetPath, storePath: join(dir, 'cdp-store.sqlite'), storeLatencyMs: scenario.storeLatencyMs ?? 0, payments: scenario.payments };
     const results = (await runAgents(Array.from({ length: scenario.agents }, () => base), scenario.together, dir)).flat();
