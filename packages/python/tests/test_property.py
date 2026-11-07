@@ -41,6 +41,7 @@ class Payment:
     state: str = "held"
     settled_at: int | None = None
     outcome: str | None = None
+    rail: str = "property"
     holder: str | None = None
 
     def counts_from(self) -> float | None:
@@ -137,6 +138,7 @@ hold = st.fixed_dictionaries(
         "until": st.none() | st.integers(-2, 3000),
         "within": st.none() | st.sampled_from([1, 400, 2000]),
         "limits": st.none() | process_limits,
+        "rail": st.sampled_from(["x402", "python"]),
     }
 )
 moves = st.fixed_dictionaries({"op": st.sampled_from(["settle", "void"]), "pick": picks})
@@ -212,7 +214,7 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
             lambda: ledger.hold(
                 WALLET,
                 step["amount"],
-                rail="property",
+                rail=step["rail"],
                 payment=step["id"],
                 until=until,
                 within_ms=within,
@@ -229,6 +231,7 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
                     model.now,
                     bound,
                     next(model.order),
+                    rail=step["rail"],
                     holder=row["holder"],
                 )
                 known.append(row["payment"])
@@ -306,7 +309,8 @@ def _step(ledger: Ledger, model: Model, known: list[str], step: dict[str, Any]) 
             and (
                 p.until <= model.now
                 if p.until is not None
-                else p.held_at <= model.now - UNBOUNDED_HOLD_MS
+                # With no until, only an x402 hold has a bound: an hour at most once signed.
+                else p.rail == "x402" and p.held_at <= model.now - UNBOUNDED_HOLD_MS
             )
         ),
         key=lambda item: item[1].order,

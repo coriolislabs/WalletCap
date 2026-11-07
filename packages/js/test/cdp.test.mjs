@@ -2,9 +2,11 @@
 // The CDP SpendStore and the x402 guard share one budget file. They must not
 // share a rail, and a 402 asset must not be able to break the store's loader.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
 import { openBudget } from 'walletcap';
@@ -12,6 +14,7 @@ import { cdpStore } from 'walletcap/cdp';
 import { Ledger } from '../dist/core/ledger.js';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-cdp-'));
+const CLI = fileURLToPath(new URL('../dist/cli/main.js', import.meta.url));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
 after(() => { try { rmSync(DIR, { recursive: true, force: true }); } catch { /* open on Windows */ } });
 afterEach(resetClock);
@@ -196,4 +199,26 @@ test('a CDP payment counts until an hour after it is recorded, plus one window: 
     store.close();
     budget.close();
   }
+});
+
+test("a refusal and the owner's holds list say what a CDP payment is: signed, redeemable for an hour and a minute", async () => {
+  const clock = { now: 1_800_000_000_000 };
+  setClock(() => clock.now);
+  const { path, budget, store } = await fixture();
+  const entry = { atomicAmount: 1_000_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: clock.now };
+  await store.append(entry);
+  await store.removeEntry(entry); // CDP rolled it back: refused, and still redeemable
+  // 0.4's first draft told the owner "if one never left the wallet its owner can void it", which
+  // invites voiding a payment CDP signed and a payee can still redeem.
+  const { message, brief } = await budget.check('$0.01');
+  const [held] = await budget.holds();
+  assert.ok(message.endsWith(`walletcap holds lists them, and if one never left the wallet its owner can void it. ${held.id} is a payment CDP signed: `
+    + 'its authorization can be redeemed until 2027-01-15T09:01:00Z, so void it only if the chain shows it was never redeemed)'), message);
+  assert.doesNotMatch(brief, /CDP signed/);
+  const listed = spawnSync(process.execPath, [CLI, 'holds', '--wallet', WALLET, '--path', path], { encoding: 'utf8' });
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /refused .* cdp .*CDP signed it: its authorization can be redeemed until 2027-01-15T09:01:00Z, so void it only if the chain shows it was never redeemed/);
+  const history = spawnSync(process.execPath, [CLI, 'history', '--wallet', WALLET, '--path', path], { encoding: 'utf8' });
+  assert.match(history.stdout, /refused .*CDP signed it: void it only if the chain shows it was never redeemed/);
+  budget.close();
 });

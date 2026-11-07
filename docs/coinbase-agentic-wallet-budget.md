@@ -63,8 +63,10 @@ Then start the server behind walletcap from the MCP client, Claude Desktop for e
 - Any failure the wallet reports, a send included, keeps the payment held, noted unknown, until
   you check the chain and void it: walletcap doesn't read an error's text to decide that nothing
   was signed. `npx walletcap holds` lists them, and `npx walletcap void --all-unknown --older-than 24h`
-  voids the ones you've checked, except one the payee could still settle, and one with no
-  settle-by time that is under an hour and a minute old.
+  voids the ones you've checked, except one the payee could still settle, an x402 payment with
+  no settle-by time that is under an hour and a minute old, and a send: a transaction can still
+  be mined however old it is, so void a send by id once the chain shows it never moved, with
+  `npx walletcap void <id> --evidence <what shows it>`.
 - The agent is told why a payment was refused, not which holds you could void.
 - A free endpoint's one-unit hold is given back unless the payee confirms a payment.
 - Only USDC is counted; a send in any other asset is refused. Amounts are read exactly.

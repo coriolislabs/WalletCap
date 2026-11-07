@@ -1,5 +1,5 @@
 {
-  "about": "Admission sequences both test suites run against the ledger, through the payer and owner handles. Each case starts with a fresh file whose clock reads `start` and one budget. Amounts are micro-dollars; times are milliseconds. A step's `expect` is checked exactly where given. Hold expectations: {held: id or *}, {refused: code, source, brief}, or {error: usage}. Moves act as the process that held the payment, with its token, unless `as` says `other` (another process, with no token) or `owner` (the owner's reconciliation). The expectations were worked out from spec/ledger.md, not from running either package.",
+  "about": "Admission sequences both test suites run against the ledger, through the payer and owner handles. Each case starts with a fresh file whose clock reads `start` and one budget. Amounts are micro-dollars; times are milliseconds. A step's `expect` is checked exactly where given. Hold expectations: {held: id or *}, {refused: code, source, brief}, or {error: usage}. A hold step may name its rail. Moves act as the process that held the payment, with its token, unless `as` says `other` (another process, with no token) or `owner` (the owner's reconciliation). The expectations were worked out from spec/ledger.md, not from running either package.",
   "start": 1800000000000,
   "wallet": "0xd797ead28c38575fdf4fc523866287372340ca02",
   "cases": [
@@ -193,7 +193,7 @@
       "name": "the owner's bulk release voids only what can no longer settle",
       "budget": { "cap": 150000000, "window_ms": 86400000 },
       "steps": [
-        { "op": "hold", "amount": 10000000, "id": "a", "expect": { "held": "a" } },
+        { "op": "hold", "amount": 10000000, "id": "a", "rail": "x402", "expect": { "held": "a" } },
         { "op": "note", "id": "a", "outcome": "unknown", "evidence": "rpc timeout", "expect": { "state": "held" } },
         { "op": "hold", "amount": 20000000, "id": "b", "until_from_now": 7200000, "expect": { "held": "b" } },
         { "op": "note", "id": "b", "outcome": "refused", "expect": { "state": "held" } },
@@ -242,7 +242,7 @@
       "name": "the bulk release takes a payment at exactly its until, or at exactly an hour and a minute",
       "budget": { "cap": 150000000, "window_ms": 86400000 },
       "steps": [
-        { "op": "hold", "amount": 10000000, "id": "open", "expect": { "held": "open" } },
+        { "op": "hold", "amount": 10000000, "id": "open", "rail": "x402", "expect": { "held": "open" } },
         { "op": "note", "id": "open", "outcome": "unknown", "expect": { "state": "held" } },
         { "op": "hold", "amount": 10000000, "id": "bounded", "until_from_now": 1000, "expect": { "held": "bounded" } },
         { "op": "note", "id": "bounded", "outcome": "refused", "expect": { "state": "held" } },
@@ -288,6 +288,25 @@
         { "op": "void", "id": "b", "as": "owner", "expect": { "error": "usage" } },
         { "op": "settle", "id": "a", "as": "owner", "evidence": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "expect": { "state": "settled" } },
         { "op": "status", "expect": { "spent": 100000000, "in_flight": 0, "payments": 2 } }
+      ]
+    },
+    {
+      "name": "with no settle-by time, only an x402 hold is bulk-released after an hour and a minute",
+      "budget": { "cap": 150000000, "window_ms": 86400000 },
+      "steps": [
+        { "op": "hold", "amount": 10000000, "id": "x402", "rail": "x402", "expect": { "held": "x402" } },
+        { "op": "note", "id": "x402", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 20000000, "id": "send", "rail": "awal", "expect": { "held": "send" } },
+        { "op": "note", "id": "send", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "hold", "amount": 30000000, "id": "pay", "rail": "js", "expect": { "held": "pay" } },
+        { "op": "note", "id": "pay", "outcome": "unknown", "expect": { "state": "held" } },
+        { "op": "advance", "ms": 3660001 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": ["x402"] } },
+        { "op": "advance", "ms": 2592000000 },
+        { "op": "void_unknown", "older_than_ms": 0, "expect": { "voided": [] } },
+        { "op": "holds", "expect": { "ids": ["send", "pay"] } },
+        { "op": "void", "id": "send", "as": "owner", "evidence": "the chain shows it was never mined", "expect": { "state": "void" } },
+        { "op": "holds", "expect": { "ids": ["pay"] } }
       ]
     }
   ]

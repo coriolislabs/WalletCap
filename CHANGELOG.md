@@ -15,7 +15,9 @@ The ledger and the budget file:
 - The budget file is schema 3. 0.4 upgrades a file that 0.2 (schema 1) or 0.3 (schema 2) wrote
   the first time it opens it, in one transaction: every payment that counted keeps counting at
   least as long, and a crash during the upgrade leaves the file as it was. 0.2 and 0.3 refuse a
-  schema 3 file, so stop older processes before upgrading.
+  schema 3 file, so stop every 0.2 and 0.3 process before upgrading. One that opens the file
+  anyway adds its own tables, `budgets` and `spend`, empty, before it refuses it; 0.4 drops them
+  the next time it opens the file.
 - Payments are entries appended to a ledger and never deleted. A payment that never left is
   void, and stays in the history with the status `void`; 0.3 deleted it.
 - A payment's id is its rail's own identity where walletcap reads one (`eip3009:<from>:<nonce>`,
@@ -93,6 +95,11 @@ The command line, in both languages:
 
 - `walletcap release <id>` is `walletcap void <id>`, and `release --all-unknown --older-than …`
   is `void --all-unknown --older-than …`. Its messages say "Voided".
+- `void --all-unknown` releases a payment with no settle-by time only if it was held for x402
+  (the rails `x402` and `awal-x402`), once it is an hour and a minute old. 0.3.0 released any
+  such payment then, a transfer included, though a transfer can still be mined later. The owner
+  voids those by id: `walletcap void <id> --evidence <what shows it>`. The same rule holds for
+  the owner's `voidUnknown()` (`void_unknown()`).
 - A payment id that isn't in the file exits 2.
 
 Behaviour:
@@ -103,6 +110,9 @@ Behaviour:
 - The Agentic Wallet wrapper no longer reads the wallet's error text to decide that nothing was
   signed. Any failure the wallet reports keeps the payment held, noted unknown, until its owner
   voids it. A free endpoint's one-unit hold is still given back.
+- A refusal's message, `walletcap holds` and `walletcap history` mark a payment the CDP store
+  holds: CDP signed its authorization, which a payee can redeem until an hour and a minute after
+  CDP recorded it, so its owner voids it only if the chain shows it was never redeemed.
 - An open hold can learn its settle-by time as a time from the ledger's now: `settlesWithin(ms)`
   and `settlesWithinMs`, `settles_within(timedelta)`. The x402 guard and the Agentic Wallet
   wrapper use it, so neither reads the process's clock to date a payment.
@@ -115,7 +125,8 @@ Behaviour:
 - The owner's handle in both languages, `openOwner()` and `open_owner()`: `budgets`, `status`,
   `history`, `holds`, `payment(id)`, `setLimits`, `freeze`, `unfreeze`, `void(id, evidence)`,
   `settle(id, evidence)` and `voidUnknown` (`void_unknown`), the bulk release.
-- `walletcap settle <id> [--tx <hash>]`.
+- `walletcap settle <id> [--tx <hash>] [--evidence <text>]`, and `--evidence` for
+  `walletcap void <id>`: what shows that the payment paid, or never moved.
 - Python's async forms: `acheck`, `ahold`, `astatus`, `aholds` and `ahistory`, and a hold's
   `asettle`, `avoid` and `anote`. `async with budget.pay()` now waits for a lock in a worker
   thread; 0.3 waited on the event loop. If the caller is cancelled while `ahold()` or `async with
@@ -179,10 +190,11 @@ and `packages/python/tests`:
   no holds and no release instructions", and "the agent is told why a payment was refused, not
   which holds its owner could release". walletcap-mcp: "the agent is told why a payment was
   refused, not which holds its owner could void".
-- **The bulk release follows the settle-by and 61-minute rules.** JavaScript: "a bulk release
-  keeps a payment its payee could still settle, and clears refused ones", and "a bulk release
-  keeps a hold with no settle-by time for an hour and a minute, and a CDP roll-back until it can
-  no longer settle". Python: `test_a_bulk_release_keeps_what_the_payee_could_still_settle`,
+- **The bulk release follows the settle-by and 61-minute rules,** the second now for x402
+  holds only (above). JavaScript: "a bulk release keeps a payment its payee could still settle,
+  and clears refused ones", and "a bulk release keeps a hold with no settle-by time for an hour
+  and a minute, and a CDP roll-back until it can no longer settle". Python:
+  `test_a_bulk_release_keeps_what_the_payee_could_still_settle`,
   `test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes`. Vector: "the
   owner's bulk release voids only what can no longer settle".
 - **The schema-2 upgrade.** JavaScript: "a 0.2.x file is upgraded on open: every spelling of a

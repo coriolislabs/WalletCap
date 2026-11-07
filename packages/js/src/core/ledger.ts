@@ -19,7 +19,7 @@ export const SCHEMA_VERSION = '3';
 /** The oldest SQLite the ledger runs on: STRICT tables arrived in 3.37.0. */
 export const MIN_SQLITE_VERSION = '3.37.0';
 /**
- * How old a held payment with no settle-by time must be before the owner's bulk release voids
+ * How old an x402 hold with no settle-by time must be before the owner's bulk release voids
  * it: an hour, the longest an x402 authorization walletcap signs can be redeemed, and a minute.
  * The rule is in spec/schema.sql (void_unknown); this is its value, for messages.
  */
@@ -31,6 +31,8 @@ export const UNBOUNDED_HOLD_MS = 3_660_000n;
 export const SETTLES_BY = Symbol('walletcap/settles-by');
 /** The most a time or a duration can be, in milliseconds: about 31,700 years. */
 export const MAX_TIME = 10n ** 15n;
+/** The tables walletcap 0.2 and 0.3 create, empty, in a newer file before they refuse it: spend first (it references budgets). */
+const LEGACY_TABLES = ['spend', 'budgets'];
 /** counts_from of a held payment with no bound: it counts until evidence ends it. */
 export const OPEN = (1n << 63n) - 1n;
 
@@ -133,6 +135,13 @@ export interface Held {
   state: PaymentState;
   created: boolean;
   holder: string | null;
+}
+
+/** An open payment a refusal names for the owner. */
+export interface OpenHold {
+  payment: string;
+  rail: string;
+  until: bigint | null;
 }
 
 /** Why a process without a payment's token can't move it. */
@@ -325,16 +334,28 @@ const parsedNote = <T>(json: string | null | undefined, word: (value: T) => stri
 /** What an upgrade merged into this budget, or null. */
 export const mergedNoteOf = (json: string | null): string | null => parsedNote(json, mergedNote);
 
-const heldNote = (heldPayments: bigint, ids: string[]): string => {
-  const more = heldPayments > BigInt(ids.length) ? ` and ${heldPayments - BigInt(ids.length)} more` : '';
-  return `${ids.join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can void it`;
+const isoSeconds = (ms: bigint): string => new Date(Number(ms)).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+/**
+ * What a payment the CDP store holds is, for an owner deciding whether to void it: CDP signed its
+ * authorization, which a payee can redeem until an hour and a minute after CDP recorded it.
+ */
+export const cdpHoldNote = (hold: { payment: string; until: bigint | null }): string => `${hold.payment} is a payment CDP signed: `
+  + `its authorization can be redeemed until ${hold.until === null ? 'an hour and a minute after CDP recorded it' : isoSeconds(hold.until)}, `
+  + 'so void it only if the chain shows it was never redeemed';
+
+const heldNote = (heldPayments: bigint, holds: OpenHold[]): string => {
+  const more = heldPayments > BigInt(holds.length) ? ` and ${heldPayments - BigInt(holds.length)} more` : '';
+  const cdp = holds.filter(hold => hold.rail === 'cdp').map(cdpHoldNote);
+  return `${holds.map(hold => hold.payment).join(', ')}${more}; walletcap holds lists them, and if one never left the wallet its owner can void it`
+    + (cdp.length === 0 ? '' : `. ${cdp.join('; ')}`);
 };
 
 /**
  * The refusal for `why` (a row of the refusal statement): the code, a brief an agent is told,
  * and a message that also names, for the owner, the open payments that take up the room.
  */
-export function refusal(why: RefusalRow, amount: bigint, limits: OwnLimits, openIds: () => string[]): BudgetRefused {
+export function refusal(why: RefusalRow, amount: bigint, limits: OwnLimits, openIds: () => OpenHold[]): BudgetRefused {
   const { source } = why;
   const refused = (code: 'frozen' | 'per_payment' | 'budget' | 'max_payments', message: string, brief = message): BudgetRefused =>
     new BudgetRefused(code, message, { brief, source });
@@ -483,15 +504,34 @@ export class Ledger {
 
   // Create the schema, or upgrade an older one, in one write transaction: a crash leaves the
   // file as it was, and two processes that open it at once upgrade it once.
+  // The empty tables walletcap 0.2 and 0.3 create, before they refuse a newer file's schema.
+  #strays(): string[] {
+    const tables = new Set((this.#db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table'").all() as { name: string }[]).map(row => row.name));
+    return LEGACY_TABLES.filter(name => tables.has(name));
+  }
+
   async #prepareFile(): Promise<void> {
-    const current = await this.#attempt(() => {
+    const { current, strays } = await this.#attempt(() => {
       try {
-        return this.#schema();
+        const found = this.#schema();
+        return { current: found, strays: found === SCHEMA_VERSION ? this.#strays() : [] };
       } catch (error) {
         throw isBusy(error) ? new Busy() : error;
       }
     });
-    if (current === SCHEMA_VERSION) return;
+    if (current === SCHEMA_VERSION) {
+      // A 0.2 or 0.3 process that opened this file left its own tables, empty, before it refused
+      // the schema. They hold nothing; drop them so the file holds only schema 3.
+      if (strays.length > 0) {
+        await this.#write(() => {
+          for (const name of this.#strays()) {
+            const { rows } = this.#db.prepare(`SELECT count(*) AS rows FROM "${name}"`).get() as { rows: number | bigint };
+            if (Number(rows) === 0) this.#db.exec(`DROP TABLE "${name}"`);
+          }
+        });
+      }
+      return;
+    }
     const { schema, upgrade } = loadSpec();
     await this.#write(() => {
       const found = this.#schema();
@@ -673,7 +713,7 @@ export class Ledger {
       if (why === null) throw this.#noBudget(wallet);
       const remaining = (why.frozen_at !== null || why.counted > why.cap ? 0n : why.cap - why.counted) as Micros;
       if (why.code === null) return { refusal: null, remaining };
-      return { refusal: refusal(why, spend, own, () => this.#all<{ payment: string }>('open_ids', { wallet }).map(row => row.payment)), remaining };
+      return { refusal: refusal(why, spend, own, () => this.#all<OpenHold>('open_ids', { wallet })), remaining };
     });
   }
 
@@ -718,7 +758,7 @@ export class Ledger {
         throw new UsageError(`settlesBy ${iso(args.until ?? 0n)} is not after now (${iso(why.now)}): a payment can't settle before it is made`);
       }
       if (why.code === null) throw new BudgetUnavailable('walletcap could not hold the payment, and the ledger gives no reason');
-      throw refusal(why, args.amount, own, () => this.#all<{ payment: string }>('open_ids', { wallet }).map(row => row.payment));
+      throw refusal(why, args.amount, own, () => this.#all<OpenHold>('open_ids', { wallet }));
     });
   }
 

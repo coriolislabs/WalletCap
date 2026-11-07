@@ -266,14 +266,14 @@ def test_an_owner_lists_holds_and_voids_the_unknown_ones_in_bulk(
     budget = open_budget(WALLET, path=path, per_day="$10", create=True)
     monkeypatch.setattr(_clock, "source", lambda: time.time() - 7_200)  # two hours ago
     for amount in ("$1", "$2"):
-        with pytest.raises(TimeoutError), budget.pay(amount):
+        with pytest.raises(TimeoutError), budget.pay(amount, rail="x402"):
             raise TimeoutError("rpc timeout")
     monkeypatch.undo()
     recent = budget.hold("$3")
     listed = _cli(path, "holds")
     assert listed.returncode == 0, listed.stderr
     assert re.search(
-        r"wc-\w+ +\$1\.00 +unknown +2h 0m old +python +counts until voided or settled",
+        r"wc-\w+ +\$1\.00 +unknown +2h 0m old +x402 +counts until voided or settled",
         listed.stdout,
     )
     assert re.search(rf"{recent.id} +\$3\.00 +in flight +\d+s old", listed.stdout)
@@ -323,9 +323,9 @@ def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
     budget = open_budget(WALLET, path=path, per_day="$10", create=True)
     now = time.time()
     monkeypatch.setattr(_clock, "source", lambda: now - 62 * 60)  # taken 62 minutes ago
-    old = budget.hold("$1")
+    old = budget.hold("$1", rail="x402")
     monkeypatch.undo()
-    fresh = budget.hold("$2")
+    fresh = budget.hold("$2", rail="x402")
     for hold in (old, fresh):
         hold.note("unknown")  # the payment may have been signed as it failed
     time.sleep(0.02)
@@ -339,7 +339,40 @@ def test_a_bulk_release_keeps_a_hold_without_a_settle_by_time_for_61_minutes(
     assert [hold.id for hold in budget.holds()] == [fresh.id]
     nothing = _cli(path, "void", "--all-unknown", "--older-than", "10ms")
     assert "can be voided yet" in nothing.stdout
-    assert "one with no settle-by time, once it is also an hour and a minute old" in nothing.stdout
+    assert (
+        "an x402 payment with no settle-by time, once it is also an hour and a minute old"
+        in nothing.stdout
+    )
+
+
+def test_a_bulk_release_leaves_a_transfer_with_no_settle_by_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "transfers.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$10", create=True)
+    monkeypatch.setattr(_clock, "source", lambda: time.time() - 30 * DAY)  # a month ago
+    # A transfer whose receipt wait timed out, and one on another rail: an ordinary transaction
+    # has no expiry, so either can still be mined, however long ago it was sent.
+    with pytest.raises(TimeoutError), budget.pay("$1"):
+        raise TimeoutError("receipt timeout")
+    with pytest.raises(TimeoutError), budget.pay("$2", rail="awal"):
+        raise TimeoutError("IPC request timed out")
+    monkeypatch.undo()
+    # 0.3.0's bulk release voided both once they were an hour and a minute old.
+    swept = _cli(path, "void", "--all-unknown", "--older-than", "1h")
+    assert swept.returncode == 0, swept.stderr
+    assert (
+        "Any other payment with no settle-by time, a transfer say, goes only by id" in swept.stdout
+    )
+    holds = budget.holds()
+    assert [(hold.rail, hold.reason) for hold in holds] == [
+        ("python", "unknown"),
+        ("awal", "unknown"),
+    ]
+    voided = _cli(path, "void", holds[0].id, "--evidence", "the chain shows it was never mined")
+    assert voided.returncode == 0, voided.stderr
+    assert [hold.id for hold in budget.holds()] == [holds[1].id]
+    assert budget.status().in_flight == 2_000_000
 
 
 def test_async_paths_wait_for_the_lock_in_a_thread_not_on_the_event_loop(tmp_path: Path) -> None:
@@ -932,3 +965,34 @@ def test_a_cancelled_ahold_voids_the_hold_it_took(tmp_path: Path) -> None:
     assert holder.wait(timeout=30) == 0
     assert (budget.status().in_flight, budget.holds()) == (0, [])
     _pay(budget, "$10")
+
+
+def test_a_refusal_and_the_holds_list_say_what_a_cdp_payment_is(
+    tmp_path: Path, clock: Clock
+) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, per_day="$1", create=True)
+    # A payment the JavaScript CDP store holds in the same file: on the cdp rail, until an hour
+    # and a minute after CDP recorded it, noted refused when CDP rolls it back.
+    held = budget.hold("$1", rail="cdp", settles_within=timedelta(minutes=61))
+    held.note("refused", "removed by CDP")
+    # 0.4's first draft told the owner "if one never left the wallet its owner can void it",
+    # which invites voiding a payment CDP signed and a payee can still redeem.
+    check = budget.check("$0.01")
+    assert check.message is not None
+    assert check.message.endswith(
+        "walletcap holds lists them, and if one never left the wallet its owner can void it. "
+        f"{held.id} is a payment CDP signed: its authorization can be redeemed until "
+        "2027-01-15T09:01:00Z, so void it only if the chain shows it was never redeemed)"
+    )
+    assert check.brief is not None
+    assert "CDP signed" not in check.brief
+    listed = _cli(path, "holds")
+    assert listed.returncode == 0, listed.stderr
+    assert re.search(
+        r"refused .* cdp .*CDP signed it: its authorization can be redeemed until "
+        r"2027-01-15T09:01:00Z, so void it only if the chain shows it was never redeemed",
+        listed.stdout,
+    )
+    history = _cli(path, "history")
+    assert re.search(r"refused .*CDP signed it: void it only if the chain shows", history.stdout)

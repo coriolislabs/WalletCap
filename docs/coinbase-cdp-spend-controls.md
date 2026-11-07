@@ -59,6 +59,9 @@ applySpendControls(client, {
 - A payment CDP removes from its store keeps counting for the same time, noted refused. Once
   you've checked the chain, `npx walletcap void <id>` ends it sooner, and so does
   `npx walletcap void --all-unknown --older-than 24h` once that hour and a minute has passed.
+  `npx walletcap holds` and a refusal's message mark each payment the store holds: CDP signed
+  it, and its payee can redeem it until that hour and a minute has passed, so void it only if
+  the chain shows it was never redeemed.
 - A refusal the store passes to CDP, and so to the agent, is a `BudgetRefused` whose message is
   its `brief`: why, without which payments are open. An entry in another asset is refused with
   the code `asset`.

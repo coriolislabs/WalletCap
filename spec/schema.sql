@@ -295,9 +295,9 @@ FROM wc_room r, {{process}} p
 WHERE r.wallet = :wallet
 
 -- @statement open_ids
--- The oldest open payments that count: a refusal names them for the owner.
-SELECT c.payment
-FROM wc_current c, wc_budget b, wc_clock k
+-- The oldest open payments that count: a refusal names them for the owner, and what each is.
+SELECT c.payment, h.rail, c.until
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_budget b, wc_clock k
 WHERE c.wallet = :wallet AND b.wallet = c.wallet AND c.state = 'held'
   AND c.counts_from >= k.now - b.window_ms
 ORDER BY c.held_seq
@@ -363,14 +363,17 @@ RETURNING seq
 
 -- @statement void_unknown
 -- The owner's bulk release: every held payment of unknown or refused outcome taken at least
--- :older_than_ms ago that can no longer settle: its until has passed, or, with no until, it is
--- an hour and a minute old (an x402 authorization lasts at most an hour once signed).
+-- :older_than_ms ago that can no longer settle: its until has passed, or, with no until, it was
+-- held for an x402 payment and is an hour and a minute old (an x402 authorization lasts at most
+-- an hour once signed). Any other payment with no until, a transfer say, has no such bound: the
+-- owner voids it by id, with evidence.
 INSERT INTO wc_entry (payment, kind, at, wallet, amount, evidence)
 SELECT c.payment, 'void', k.now, c.wallet, c.amount, :evidence
-FROM wc_current c, wc_clock k
+FROM wc_current c JOIN wc_entry h ON h.seq = c.held_seq, wc_clock k
 WHERE c.wallet = :wallet AND c.state = 'held' AND c.outcome IN ('unknown', 'refused')
   AND c.held_at <= k.now - :older_than_ms
-  AND (c.until <= k.now OR (c.until IS NULL AND c.held_at <= k.now - 3660000))
+  AND (c.until <= k.now
+       OR (c.until IS NULL AND h.rail IN ('x402', 'awal-x402') AND c.held_at <= k.now - 3660000))
 ORDER BY c.held_seq
 RETURNING payment, amount
 

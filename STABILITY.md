@@ -71,11 +71,12 @@ other message's, may change in any release.
 ### Command lines
 
 - `walletcap` (npm), and `walletcap` or `python -m walletcap` (PyPI): the commands `status`,
-  `set`, `freeze`, `unfreeze`, `history`, `holds`, `void <id>`, `void --all-unknown --older-than
-  <duration>` and `settle <id> [--tx <hash>]`, with the flags `--wallet`, `--path`,
+  `set`, `freeze`, `unfreeze`, `history`, `holds`, `void <id> [--evidence <text>]`,
+  `void --all-unknown --older-than <duration>` and
+  `settle <id> [--tx <hash>] [--evidence <text>]`, with the flags `--wallet`, `--path`,
   `--per-payment`, `--per-hour`, `--per-day`, `--per-week`, `--cap`, `--window`,
-  `--max-payments`, `--limit`, `--older-than`, `--all-unknown`, `--tx` and `--json`. The npm CLI
-  also has `awal <command>`.
+  `--max-payments`, `--limit`, `--older-than`, `--all-unknown`, `--tx`, `--evidence` and
+  `--json`. The npm CLI also has `awal <command>`.
 - Exit codes: 0 when the command worked; 1 when walletcap refused or couldn't use the budget;
   2 when the command line is wrong.
 - The fields of `--json` output are public: a release may add fields, and removing or renaming

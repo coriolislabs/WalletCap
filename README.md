@@ -313,9 +313,10 @@ hour and a minute after CDP records it, and it counts for one window after that:
 payment after recording it, and lets a payee ask for an authorization it can redeem for up to an
 hour. CDP's record isn't evidence that the payment settled, so it shows as in flight. When CDP
 removes a payment from its store, the store can't tell why: the payment keeps counting for the
-same time, noted refused, unless its owner voids it sooner. Use CDP 1.60.0 or later: its
-published source refuses a `maxTimeoutSeconds` over 3600, which the store's hour relies on. The
-store is tested against 1.60.0, and the crash test runs 1.61.0.
+same time, noted refused, unless its owner voids it sooner. `walletcap holds` and a refusal's
+message mark each one: CDP signed it, so void it only if the chain shows it was never redeemed.
+Use CDP 1.60.0 or later: its published source refuses a `maxTimeoutSeconds` over 3600, which
+the store's hour relies on. The store is tested against 1.60.0, and the crash test runs 1.61.0.
 
 ### Coinbase Agentic Wallet (awal CLI and MCP server)
 
@@ -355,7 +356,8 @@ another server, put its command after `--`.
   answer, plus one window, whatever the payee says about it.
 - Any failure the wallet reports keeps the payment held, noted unknown, until you check the chain
   and void it: walletcap doesn't read an error's text to decide that nothing was signed. A free
-  endpoint's one-unit hold is given back unless the payee confirms a payment.
+  endpoint's one-unit hold is given back unless the payee confirms a payment. The bulk release
+  leaves a `send`: void it by id once the chain shows it never moved.
 - A refusal tells the agent why, not which holds its owner could void: `walletcap holds` and
   `budget.check().message` name them.
 - Only USDC is counted; a send in any other asset is refused. Amounts are read exactly: `100.5abc`
@@ -412,7 +414,7 @@ $ npx walletcap freeze                 # every process, every rail, now
 $ npx walletcap unfreeze
 $ npx walletcap history
 $ npx walletcap holds                  # held payments that still count, and why
-$ npx walletcap void <id>              # a held payment you know never left the wallet
+$ npx walletcap void <id> --evidence "never mined"   # a held payment you know never left the wallet
 $ npx walletcap void --all-unknown --older-than 24h   # every unknown or refused one older than that
 $ npx walletcap settle <id> --tx 0x…   # a payment you know paid
 ```
@@ -423,8 +425,11 @@ when the command line is wrong (an unknown command or flag, a missing argument, 
 in the file); 1 for anything walletcap refused or couldn't do.
 
 `void --all-unknown` leaves a payment the payee could still settle: it counts until one window
-past the time it can't. A payment with no such time, one the wallet may have signed as it
-failed, stays until it is an hour and a minute old.
+past the time it can't. An x402 payment with no such time, one the wallet may have signed as it
+failed, stays until it is an hour and a minute old: an authorization walletcap lets be signed is
+valid for an hour at most. Any other payment with no such time, a transfer say, can still be
+mined however old it is, so the bulk release leaves it: void it by id once the chain shows it
+never moved.
 
 In code, the same handle is `openOwner()` in JavaScript and `open_owner()` in Python:
 
@@ -454,7 +459,9 @@ put it elsewhere. Both languages compute the same default.
   the container, or a redeploy starts a new file. A missing file refuses every payment.
 - walletcap 0.4 upgrades a file that 0.2 or 0.3 wrote the first time it opens it, in one
   transaction: every payment that counted keeps counting at least as long. 0.2 and 0.3 can't
-  open the file afterwards, so stop every older process before upgrading.
+  open the file afterwards, so stop every 0.2 and 0.3 process before upgrading. One that opens
+  the file anyway adds two empty tables of its own, `budgets` and `spend`, before it refuses it;
+  0.4 drops them the next time it opens the file.
 
 ## What it doesn't do
 

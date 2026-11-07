@@ -211,3 +211,46 @@ def test_javascript_and_python_open_one_old_file_at_once(tmp_path: Path) -> None
         ).fetchone() == (payments,)
     if os.name == "posix":
         assert not Path(f"{path}-journal").exists()
+
+
+# What walletcap 0.3.0 (and 0.2.x) run when they open a file, before they read its schema and
+# refuse it: their own tables, created empty if missing.
+_OLD_OPEN = """
+CREATE TABLE IF NOT EXISTS budget_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS budgets (instrument TEXT PRIMARY KEY, unit TEXT NOT NULL,
+  cap INTEGER NOT NULL CHECK (cap >= 0), window_ms INTEGER NOT NULL CHECK (window_ms > 0),
+  per_payment INTEGER CHECK (per_payment IS NULL OR per_payment > 0),
+  max_uses INTEGER CHECK (max_uses IS NULL OR max_uses >= 0), revoked_at_ms INTEGER);
+CREATE TABLE IF NOT EXISTS spend (spend_id TEXT PRIMARY KEY,
+  instrument TEXT NOT NULL REFERENCES budgets(instrument),
+  amount INTEGER NOT NULL CHECK (amount > 0),
+  status TEXT NOT NULL CHECK (status IN ('reserved', 'committed')), rail TEXT NOT NULL,
+  reference TEXT, at_ms INTEGER NOT NULL, expires_at_ms INTEGER);
+CREATE INDEX IF NOT EXISTS spend_by_instrument ON spend (instrument, at_ms);
+INSERT OR IGNORE INTO budget_meta VALUES ('schema', '2');
+"""
+
+
+def test_the_empty_tables_an_old_process_leaves_in_a_schema_3_file_are_dropped(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "strays.sqlite"
+    wallet = "0xd797ead28c38575fdf4fc523866287372340ca02"
+    Ledger(path, create=True).create_budget(wallet, cap=10_000_000, window_ms=86_400_000)
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(_OLD_OPEN)  # 0.3.0 then reads schema '3' and refuses the file
+
+    def strays() -> list[str]:
+        with closing(sqlite3.connect(path)) as connection:
+            rows = connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                " AND name IN ('budgets', 'spend') ORDER BY name"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    assert strays() == ["budgets", "spend"]
+    ledger = Ledger(path)
+    assert strays() == []
+    assert _schema(path) == "3"
+    held = ledger.hold(wallet, 10_000_000, rail="test")
+    assert ledger.settle(held["payment"], holder=held["holder"])["state"] == "settled"

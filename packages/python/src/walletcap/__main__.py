@@ -77,10 +77,12 @@ def _parser() -> argparse.ArgumentParser:
         "--all-unknown",
         action="store_true",
         help="with void: every payment of unknown or refused outcome older than --older-than "
-        "that its payee can no longer settle; with no settle-by time, an hour and a minute old",
+        "that its payee can no longer settle; an x402 payment with no settle-by time, once an "
+        "hour and a minute old; any other with none, a transfer say, only by id",
     )
     parser.add_argument("--older-than", help="with void --all-unknown: 24h, 7d, 30m")
     parser.add_argument("--tx", help="with settle: the transaction that shows it paid")
+    parser.add_argument("--evidence", help="with void or settle: what shows it")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
@@ -258,9 +260,25 @@ def _history(args: argparse.Namespace, path: Path) -> str:
             f"to {short_wallet(payment.to.lower())}" if payment.to else "",
             f"tx {payment.tx}" if payment.tx else (payment.note or ""),
             f"({payment.id})" if payment.status in ("in flight", "refused", "unknown") else "",
+            _CDP_HISTORY
+            if payment.rail == "cdp" and payment.status in ("in flight", "refused", "unknown")
+            else "",
         ]
         lines.append("  ".join(field for field in fields if field))
     return "\n".join(lines)
+
+
+# A payment the CDP store holds isn't one that never left: CDP signed it, and its payee can redeem
+# the authorization until an hour and a minute after CDP recorded it.
+_CDP_HISTORY = "CDP signed it: void it only if the chain shows it was never redeemed"
+
+
+def _cdp_signed(until: datetime | None) -> str:
+    when = "an hour and a minute after CDP recorded it" if until is None else _iso(until)
+    return (
+        f"CDP signed it: its authorization can be redeemed until {when}, "
+        "so void it only if the chain shows it was never redeemed"
+    )
 
 
 def _holds(args: argparse.Namespace, path: Path) -> str:
@@ -285,6 +303,7 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
             hold.rail.ljust(6),
             f"to {short_wallet(hold.to.lower())}" if hold.to else (hold.note or ""),
             until,
+            _cdp_signed(hold.settles_by) if hold.rail == "cdp" else "",
         ]
         lines.append("  ".join(field for field in fields if field))
     return "\n".join(lines)
@@ -293,8 +312,8 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
 def _void_unknown(args: argparse.Namespace, path: Path) -> str:
     """Every payment of unknown or refused outcome older than --older-than that can't settle.
 
-    With no settle-by time, once it is an hour and a minute old. For an owner who has checked
-    the chain.
+    An x402 payment with no settle-by time, once it is an hour and a minute old. For an owner
+    who has checked the chain.
     """
 
     if args.id is not None:
@@ -311,7 +330,9 @@ def _void_unknown(args: argparse.Namespace, path: Path) -> str:
         return (
             f"No payment of unknown or refused outcome from {short_wallet(wallet)} can be voided "
             f"yet. One goes once it is older than {window} and its payee can no longer settle it; "
-            "one with no settle-by time, once it is also an hour and a minute old."
+            "an x402 payment with no settle-by time, once it is also an hour and a minute old. "
+            "Any other payment with no settle-by time, a transfer say, goes only by id, once the "
+            "chain shows it never moved: walletcap void <id> --evidence <what shows it>."
         )
     plural = "" if len(voided) == 1 else "s"
     total = sum(payment.amount for payment in voided)
@@ -347,7 +368,7 @@ def _void(args: argparse.Namespace, path: Path) -> str:
     payment = _payment(args, path, owner)
     if payment.state == "void":
         return _json(payment) if args.json else f"{args.id} is void already: it counts nothing."
-    voided = owner.void(args.id, evidence="voided by its owner")
+    voided = owner.void(args.id, evidence=args.evidence or "voided by its owner")
     if args.json:
         return _json(voided)
     return (
@@ -364,7 +385,7 @@ def _settle(args: argparse.Namespace, path: Path) -> str:
         raise _ArgumentError(f"no budget file at {path}")
     owner = _owner(path)
     payment = _payment(args, path, owner)
-    settled = owner.settle(args.id, evidence=args.tx or "settled by its owner")
+    settled = owner.settle(args.id, evidence=args.tx or args.evidence or "settled by its owner")
     if args.json:
         return _json(settled)
     until = (

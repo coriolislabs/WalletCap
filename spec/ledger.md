@@ -57,6 +57,13 @@ the client refuses the move, except settling a payment that is already settled, 
 for anyone. The owner's, `owner_settle` and `owner_void`, need no token: they reconcile a
 payment, whoever held it, from evidence such as the chain's record.
 
+The owner's bulk release, `void_unknown`, voids every `HELD` payment of `unknown` or `refused`
+outcome, held at least a given time ago, that can no longer settle: its `until` has passed, or
+it has none, was held on an x402 rail (`x402`, `awal-x402`) and is an hour and a minute old. An
+x402 authorization walletcap lets be signed lasts an hour at most. Any other payment with no
+`until`, a transfer say, can still be mined however old it is: the owner voids it by id, with
+evidence ([ADR 0014](../docs/adr/0014-the-61-minute-release-is-for-x402-holds.md)).
+
 ### Rows
 
 `wc_entry` is the ledger: one row per state a payment enters, appended in order (`seq`), dated
@@ -190,6 +197,10 @@ with what 0.3.0 counted in them. Each old row becomes entries that count at leas
 A schema 1 file first gets 0.3.0's renaming: every spelling of a wallet merges into its
 canonical name, with the tighter of every limit, or, in another unit, stays aside and freezes
 the wallet. `budget_meta` keeps its name so that 0.2 and 0.3 refuse a schema 3 file.
+
+Before they refuse it, 0.2 and 0.3 create their own tables in it, `budgets` and `spend`, empty.
+A client that opens a schema 3 file drops those two, in one write transaction, if they hold no
+rows. Stop every 0.2 and 0.3 process before upgrading, so none of them opens the file after.
 
 ## The file
 

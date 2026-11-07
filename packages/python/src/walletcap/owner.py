@@ -193,8 +193,10 @@ class Owner:
         """The bulk release: void every held payment of unknown or refused outcome.
 
         Only those held at least ``older_than`` ago (``"24h"``, or milliseconds) that can no
-        longer settle: their settle-by time has passed, or, with none, they are an hour and a
-        minute old. Only for payments its owner knows never left the wallet.
+        longer settle: their settle-by time has passed, or, with none, they were held for an
+        x402 payment and are an hour and a minute old. Any other payment with no settle-by time,
+        a transfer say, has no such bound: void it by id, with evidence. Only for payments its
+        owner knows never left the wallet.
         """
 
         age = to_window_ms(older_than, "older_than")

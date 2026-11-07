@@ -68,14 +68,14 @@ class Model {
     return null;
   }
 
-  hold({ id, amount, until, within, limits }) {
+  hold({ id, amount, until, within, limits, rail }) {
     const existing = id === null ? undefined : this.payments.get(id);
     // A voided id is spent; any other existing id, same amount, is that payment.
     if (existing !== undefined) return existing.state !== 'void' && existing.amount === amount ? { ok: true, created: false } : { usage: true };
     if (until !== null && until <= this.now) return { usage: true };
     const refused = this.verdict(amount, limits);
     if (refused !== null) return { refused };
-    const payment = { amount, state: 'held', heldAt: this.now, until: until ?? (within === null ? null : this.now + within), settledAt: null, outcome: null, order: this.order++ };
+    const payment = { amount, rail, state: 'held', heldAt: this.now, until: until ?? (within === null ? null : this.now + within), settledAt: null, outcome: null, order: this.order++ };
     return { ok: true, created: true, payment };
   }
 
@@ -118,7 +118,8 @@ class Model {
   voidUnknown(olderThan) {
     const voided = [...this.payments.entries()]
       .filter(([, p]) => p.state === 'held' && (p.outcome === 'unknown' || p.outcome === 'refused') && p.heldAt <= this.now - olderThan
-        && (p.until !== null ? p.until <= this.now : p.heldAt <= this.now - UNBOUNDED_HOLD_MS))
+        // With no until, only an x402 hold has a bound: its authorization lasts an hour at most.
+        && (p.until !== null ? p.until <= this.now : p.rail === 'x402' && p.heldAt <= this.now - UNBOUNDED_HOLD_MS))
       .sort(([, a], [, b]) => a.order - b.order);
     for (const [, p] of voided) p.state = 'void';
     return voided.map(([id]) => id);
@@ -147,7 +148,7 @@ const limits = fc.record({
   maxPayments: fc.option(fc.constantFrom(1, 2, 3), { nil: null }),
 });
 const op = fc.oneof(
-  { weight: 6, arbitrary: fc.record({ op: fc.constant('hold'), id: fc.option(fc.constantFrom('a', 'b', 'c', 'd'), { nil: null }), amount, until: fc.option(fc.integer({ min: -2, max: 3000 }), { nil: null }), within: fc.option(fc.constantFrom(1, 400, 2000), { nil: null }), limits: fc.option(limits, { nil: null }) }) },
+  { weight: 6, arbitrary: fc.record({ op: fc.constant('hold'), id: fc.option(fc.constantFrom('a', 'b', 'c', 'd'), { nil: null }), amount, until: fc.option(fc.integer({ min: -2, max: 3000 }), { nil: null }), within: fc.option(fc.constantFrom(1, 400, 2000), { nil: null }), limits: fc.option(limits, { nil: null }), rail: fc.constantFrom('x402', 'js') }) },
   { weight: 3, arbitrary: fc.record({ op: fc.constant('settle'), pick }) },
   { weight: 2, arbitrary: fc.record({ op: fc.constant('void'), pick }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('bound'), pick, until: fc.option(fc.integer({ min: -2, max: 3000 }), { nil: null }), within: fc.constantFrom(1, 700, 4000) }) },
@@ -196,9 +197,9 @@ test('the ledger and the model of spec/ledger.md agree on every step of random h
           const until = step.until === null ? null : model.now + step.until;
           const within = until === null ? step.within : null;
           const own = step.limits ?? {};
-          expected = model.hold({ id: step.id, amount: step.amount, until, within, limits: own });
+          expected = model.hold({ id: step.id, amount: step.amount, until, within, limits: own, rail: step.rail });
           actual = await outcomeOf(() => ledger.hold(WALLET, BigInt(step.amount), {
-            payment: step.id, rail: 'property', until: big(until), withinMs: big(within),
+            payment: step.id, rail: step.rail, until: big(until), withinMs: big(within),
             limits: { perPayment: big(own.perPayment), cap: big(own.cap), windowMs: big(own.windowMs), maxPayments: big(own.maxPayments) },
           }));
           if (expected.created && actual.ok) {

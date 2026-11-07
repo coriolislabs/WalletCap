@@ -155,7 +155,9 @@ export class Owner {
   /**
    * The bulk release: void every held payment of `wallet` whose outcome is unknown or refused,
    * held at least `olderThan` ago, that can no longer settle: its settle-by time has passed, or,
-   * with none, it is an hour and a minute old. Only for payments its owner knows never left.
+   * with none, it was held for an x402 payment and is an hour and a minute old. Any other payment
+   * with no settle-by time, a transfer say, has no such bound: void it by id, with evidence. Only
+   * for payments its owner knows never left.
    */
   async voidUnknown(wallet: string, { olderThan }: { olderThan: Window }): Promise<{ id: string; amount: Micros }[]> {
     const age = toWindowMs(olderThan, 'olderThan');

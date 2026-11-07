@@ -25,12 +25,14 @@ Commands
   unfreeze             Allow payments again
   history              The newest payments first
   holds                The held payments that still count, and why: in flight, refused or unknown
-  void <id>            A held payment you know never left the wallet: it stops counting
+  void <id> [--evidence <what shows it>]
+                       A held payment you know never left the wallet: it stops counting
   void --all-unknown --older-than <24h|7d|30m>
                        Every payment of unknown or refused outcome older than that, once you know
-                       none of them left the wallet. One the payee could still settle stays, and
-                       one with no settle-by time stays until it is an hour and a minute old
-  settle <id> [--tx <hash>]
+                       none of them left the wallet. One the payee could still settle stays; an
+                       x402 payment with no settle-by time stays until it is an hour and a minute
+                       old; any other with none, a transfer say, only goes by id
+  settle <id> [--tx <hash>] [--evidence <what shows it>]
                        A payment you know paid: it counts through one window from now
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget.
                        For its MCP server, use the walletcap-mcp package: npx walletcap-mcp --wallet <address>
@@ -62,6 +64,7 @@ const OPTIONS = {
   'all-unknown': { type: 'boolean' },
   'older-than': { type: 'string' },
   tx: { type: 'string' },
+  evidence: { type: 'string' },
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -81,6 +84,7 @@ interface Values {
   'all-unknown'?: boolean;
   'older-than'?: string;
   tx?: string;
+  evidence?: string;
   json?: boolean;
   help?: boolean;
   version?: boolean;
@@ -152,7 +156,8 @@ const detail = (status: Status): string => [
 ].join('\n');
 
 // Every payment of unknown or refused outcome older than --older-than that the payee can no longer
-// settle (with no settle-by time, an hour and a minute old), for an owner who has checked the chain.
+// settle (an x402 payment with no settle-by time, once an hour and a minute old), for an owner
+// who has checked the chain.
 async function voidUnknown(values: Values, path: string, id: string | undefined): Promise<string> {
   if (id !== undefined) throw new Usage('void takes an id or --all-unknown, not both');
   if (values['older-than'] === undefined) throw new Usage('void --all-unknown needs --older-than, like --older-than 24h');
@@ -162,7 +167,8 @@ async function voidUnknown(values: Values, path: string, id: string | undefined)
     if (values.json) return json(voided);
     if (voided.length === 0) {
       return `No payment of unknown or refused outcome from ${shortWallet(wallet)} can be voided yet. One goes once it is older than `
-        + `${formatWindow(olderThan)} and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old.`;
+        + `${formatWindow(olderThan)} and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old. `
+        + 'Any other payment with no settle-by time, a transfer say, goes only by id, once the chain shows it never moved: walletcap void <id> --evidence <what shows it>.';
     }
     const total = voided.reduce((sum, row) => sum + row.amount, 0n);
     return `Voided ${voided.length} payment${voided.length === 1 ? '' : 's'} of unknown or refused outcome older than ${formatWindow(olderThan)} `
@@ -240,6 +246,7 @@ const commands: Record<string, Command> = {
         row.to ? `to ${shortWallet(row.to.toLowerCase())}` : '',
         row.tx ? `tx ${row.tx}` : row.note ?? '',
         row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown' ? `(${row.id})` : '',
+        row.rail === 'cdp' && (row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown') ? CDP_HISTORY : '',
       ].filter(Boolean).join('  ')).join('\n');
     });
   },
@@ -257,6 +264,7 @@ const commands: Record<string, Command> = {
         hold.rail.padEnd(6),
         hold.to ? `to ${shortWallet(hold.to.toLowerCase())}` : hold.note ?? '',
         hold.countsUntil === null ? 'counts until voided or settled' : `counts until ${iso(hold.countsUntil)}`,
+        hold.rail === 'cdp' ? cdpSigned(hold.settlesBy) : '',
       ].filter(Boolean).join('  ')).join('\n');
     });
   },
@@ -268,7 +276,7 @@ const commands: Record<string, Command> = {
     return withOwner(path, async owner => {
       const row = await paymentFor(owner, values, id, path);
       if (row.state === 'void') return values.json ? json(row) : `${id} is void already: it counts nothing.`;
-      const voided = await owner.void(id, { evidence: 'voided by its owner' });
+      const voided = await owner.void(id, { evidence: values.evidence ?? 'voided by its owner' });
       if (values.json) return json(voided);
       return `Voided ${id} (${formatUsd(row.amount)} from ${shortWallet(row.wallet)}): it no longer counts. Only do this for a payment you know never left the wallet.`;
     });
@@ -279,13 +287,19 @@ const commands: Record<string, Command> = {
     if (!existsSync(path)) throw new Usage(`no budget file at ${path}`);
     return withOwner(path, async owner => {
       const row = await paymentFor(owner, values, id, path);
-      const settled = await owner.settle(id, { evidence: values.tx ?? 'settled by its owner' });
+      const settled = await owner.settle(id, { evidence: values.tx ?? values.evidence ?? 'settled by its owner' });
       if (values.json) return json(settled);
       const until = settled.countsUntil === null ? '' : `; it counts until ${iso(settled.countsUntil)}`;
       return `Settled ${id} (${formatUsd(row.amount)} from ${shortWallet(row.wallet)})${until}.`;
     });
   },
 };
+
+// A payment the CDP store holds isn't one that never left: CDP signed it, and its payee can
+// redeem the authorization until an hour and a minute after CDP recorded it.
+const cdpSigned = (until: Date | null): string => `CDP signed it: its authorization can be redeemed until ${until === null ? 'an hour and a minute after CDP recorded it' : iso(until)}, `
+  + 'so void it only if the chain shows it was never redeemed';
+const CDP_HISTORY = 'CDP signed it: void it only if the chain shows it was never redeemed';
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const hint = 'Run npx walletcap --help for the commands and options.';

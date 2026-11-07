@@ -96,7 +96,7 @@ def test_vector(vector: dict[str, Any], tmp_path: Path, monkeypatch: pytest.Monk
                     ledger.hold,
                     wallet,
                     step["amount"],
-                    rail="vector",
+                    rail=step.get("rail", "vector"),
                     payment=step.get("id"),
                     until=until,
                     within_ms=step.get("within_ms"),

@@ -60,7 +60,7 @@ for (const [index, vector] of VECTORS.cases.entries()) {
           case 'hold': {
             const limits = step.limits ?? {};
             await outcome(() => ledger.hold(wallet, BigInt(step.amount), {
-              payment: step.id ?? null, until, withinMs: big(step.within_ms), rail: 'vector',
+              payment: step.id ?? null, until, withinMs: big(step.within_ms), rail: step.rail ?? 'vector',
               limits: { perPayment: big(limits.per_payment), cap: big(limits.cap), windowMs: big(limits.window_ms), maxPayments: big(limits.max_payments) },
             }), expect, held => {
               if (expect.held !== '*') assert.equal(held.payment, expect.held, at);

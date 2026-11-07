@@ -93,13 +93,13 @@ test('an owner can void a payment whose outcome is unknown, once the chain shows
 test('an owner lists the open holds and voids the unknown ones in bulk', async () => {
   const path = join(DIR, 'holds.sqlite');
   const budget = await openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
-  setClock(() => Date.now() - 2 * 3_600_000); // these two payments failed two hours ago
-  for (const amount of ['$1', '$2']) await assert.rejects(budget.pay(amount, async () => { throw new Error('rpc timeout'); }), /rpc timeout/);
+  setClock(() => Date.now() - 2 * 3_600_000); // these two x402 payments failed two hours ago
+  for (const amount of ['$1', '$2']) await assert.rejects(budget.pay(amount, async () => { throw new Error('rpc timeout'); }, { rail: 'x402' }), /rpc timeout/);
   resetClock();
   const recent = await budget.hold('$3');
   const listed = cli(path, 'holds');
   assert.equal(listed.code, 0, listed.err);
-  assert.match(listed.out, /wc-\w+ +\$1\.00 +unknown +2h 0m old +js +counts until voided or settled/);
+  assert.match(listed.out, /wc-\w+ +\$1\.00 +unknown +2h 0m old +x402 +counts until voided or settled/);
   assert.match(listed.out, new RegExp(`${recent.id} +\\$3\\.00 +in flight +\\d+s old`));
   assert.equal(JSON.parse(cli(path, 'holds', '--json').out).length, 3);
   assert.equal(cli(path, 'void', '--all-unknown').code, 2);
@@ -108,6 +108,29 @@ test('an owner lists the open holds and voids the unknown ones in bulk', async (
   assert.match(released.out, /Voided 2 payments of unknown or refused outcome older than 1h \(\$3\.00 from 0xd797…ca02\)/);
   assert.deepEqual((await budget.holds()).map(hold => hold.id), [recent.id]);
   assert.match(cli(path, 'void', '--all-unknown', '--older-than', '1h').out, /No payment of unknown or refused outcome/);
+  budget.close();
+});
+
+test('a bulk release leaves a transfer with no settle-by time: its owner voids it by id, with evidence', async () => {
+  const path = join(DIR, 'transfers.sqlite');
+  const budget = await openBudget({ wallet: WALLET, path, perDay: '$10', create: true });
+  setClock(() => Date.now() - 30 * 86_400_000); // a month ago
+  // A transfer whose receipt wait timed out, and an Agentic Wallet send that failed: an ordinary
+  // transaction has no expiry, so either can still be mined, however long ago it was sent.
+  await assert.rejects(budget.pay('$1', async () => { throw new Error('receipt timeout'); }), /receipt timeout/);
+  const sender = guardAgenticWallet(budget, { request: async () => { throw new Error('IPC request timed out'); } });
+  await assert.rejects(sender.request('send-transaction', { recipient: '0x0773a0a3ec5f88162ea52470b7973b2cfaaa846a', amountAtomic: '2000000', chain: 'base-sepolia' }), /timed out/);
+  resetClock();
+  // 0.3.0's bulk release voided both once they were an hour and a minute old.
+  const swept = cli(path, 'void', '--all-unknown', '--older-than', '1h');
+  assert.equal(swept.code, 0, swept.err);
+  assert.match(swept.out, /No payment of unknown or refused outcome .*Any other payment with no settle-by time, a transfer say, goes only by id/);
+  const holds = await budget.holds();
+  assert.deepEqual(holds.map(hold => [hold.rail, hold.reason]), [['js', 'unknown'], ['awal', 'unknown']]);
+  const voided = cli(path, 'void', holds[0].id, '--evidence', 'the chain shows it was never mined');
+  assert.equal(voided.code, 0, voided.err);
+  assert.deepEqual((await budget.holds()).map(hold => hold.id), [holds[1].id]);
+  assert.equal((await budget.status()).inFlight, 2_000_000n);
   budget.close();
 });
 
@@ -164,7 +187,7 @@ test('a bulk release keeps a hold with no settle-by time for an hour and a minut
   assert.deepEqual(holds.map(hold => [hold.reason, hold.countsUntil === null]), [['unknown', true], ['refused', false]]);
   assert.equal((await budget.status()).inFlight, 100_000n);
   assert.match(cli(path, 'void', '--all-unknown', '--older-than', '10ms').out,
-    /can be voided yet\. One goes once it is older than 10ms and its payee can no longer settle it; one with no settle-by time, once it is also an hour and a minute old\./);
+    /can be voided yet\. One goes once it is older than 10ms and its payee can no longer settle it; an x402 payment with no settle-by time, once it is also an hour and a minute old\./);
   budget.close();
 });
 

@@ -103,3 +103,41 @@ test('a crash in the middle of the upgrade leaves the file as it was', { skip: p
   }
   assert.ok(interrupted > 0, 'no kill landed inside the upgrade; the file upgrades too fast to test');
 });
+
+// What walletcap 0.3.0 (and 0.2.x) run when they open a file, before they read its schema and
+// refuse it: their own tables, created empty if missing.
+const OLD_OPEN = `
+CREATE TABLE IF NOT EXISTS budget_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS budgets (instrument TEXT PRIMARY KEY, unit TEXT NOT NULL, cap INTEGER NOT NULL CHECK (cap >= 0),
+  window_ms INTEGER NOT NULL CHECK (window_ms > 0), per_payment INTEGER CHECK (per_payment IS NULL OR per_payment > 0),
+  max_uses INTEGER CHECK (max_uses IS NULL OR max_uses >= 0), revoked_at_ms INTEGER);
+CREATE TABLE IF NOT EXISTS spend (spend_id TEXT PRIMARY KEY, instrument TEXT NOT NULL REFERENCES budgets(instrument),
+  amount INTEGER NOT NULL CHECK (amount > 0), status TEXT NOT NULL CHECK (status IN ('reserved', 'committed')), rail TEXT NOT NULL,
+  reference TEXT, at_ms INTEGER NOT NULL, expires_at_ms INTEGER);
+CREATE INDEX IF NOT EXISTS spend_by_instrument ON spend (instrument, at_ms);
+INSERT OR IGNORE INTO budget_meta VALUES ('schema', '2');
+`;
+
+test('the empty tables a 0.2 or 0.3 process leaves in a schema 3 file are dropped on open', async () => {
+  const path = join(DIR, `${files++}-strays.sqlite`);
+  const ledger = await Ledger.open(path, { create: true });
+  await ledger.createBudget('0xd797ead28c38575fdf4fc523866287372340ca02', { cap: 10_000_000n, windowMs: 86_400_000n });
+  ledger.close();
+  const old = new DatabaseSync(path);
+  old.exec(OLD_OPEN); // 0.3.0 then reads schema '3' and refuses the file
+  old.close();
+  const tables = () => {
+    const db = new DatabaseSync(path);
+    try { return db.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all().map(row => row.name); } finally { db.close(); }
+  };
+  assert.deepEqual(tables().filter(name => ['budgets', 'spend'].includes(name)), ['budgets', 'spend']);
+  const reopened = await Ledger.open(path);
+  try {
+    assert.deepEqual(tables().filter(name => ['budgets', 'spend'].includes(name)), []);
+    assert.equal(schemaOf(path), '3');
+    const held = await reopened.hold('0xd797ead28c38575fdf4fc523866287372340ca02', 10_000_000n, { rail: 'test' });
+    assert.equal((await reopened.settle(held.payment, { holder: held.holder })).state, 'settled');
+  } finally {
+    reopened.close();
+  }
+});

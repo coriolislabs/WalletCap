@@ -44,7 +44,7 @@ MIN_SQLITE_VERSION: Final = "3.37.0"
 """The oldest SQLite the ledger runs on: STRICT tables arrived in 3.37.0."""
 
 UNBOUNDED_HOLD_MS: Final = 3_660_000
-"""How old a held payment with no settle-by time must be before a bulk release voids it.
+"""How old an x402 hold with no settle-by time must be before a bulk release voids it.
 
 An hour, the longest an x402 authorization walletcap signs can be redeemed, and a minute. The
 rule is in spec/schema.sql (void_unknown); this is its value, for messages.
@@ -244,12 +244,36 @@ def _holder(value: str | None) -> str | None:
     return value
 
 
-def _held_note(held_payments: int, ids: list[str]) -> str:
+def cdp_hold_note(payment: str, until: int | None) -> str:
+    """What a payment the CDP store holds is, for an owner deciding whether to void it.
+
+    CDP signed its authorization, which a payee can redeem until an hour and a minute after
+    CDP recorded it.
+    """
+
+    when = "an hour and a minute after CDP recorded it" if until is None else _iso_seconds(until)
+    return (
+        f"{payment} is a payment CDP signed: its authorization can be redeemed until {when}, "
+        "so void it only if the chain shows it was never redeemed"
+    )
+
+
+def _iso_seconds(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _held_note(held_payments: int, holds: list[Row]) -> str:
+    ids = [str(hold["payment"]) for hold in holds]
     more = f" and {held_payments - len(ids)} more" if held_payments > len(ids) else ""
+    cdp = [
+        cdp_hold_note(str(hold["payment"]), hold["until"])
+        for hold in holds
+        if hold["rail"] == "cdp"
+    ]
     return (
         f"{', '.join(ids)}{more}; walletcap holds lists them, "
         "and if one never left the wallet its owner can void it"
-    )
+    ) + ("" if not cdp else f". {'; '.join(cdp)}")
 
 
 def _given(limit: int | None) -> int:
@@ -261,7 +285,7 @@ def _given(limit: int | None) -> int:
 
 
 def refusal(
-    why: Mapping[str, Any], amount: int, limits: ProcessLimits, open_ids: Callable[[], list[str]]
+    why: Mapping[str, Any], amount: int, limits: ProcessLimits, open_ids: Callable[[], list[Row]]
 ) -> BudgetRefused:
     """The refusal for ``why``, a row of the refusal statement, worded as JavaScript words it."""
 
@@ -466,8 +490,18 @@ class Ledger:
         """Create the schema, or upgrade an older one, in one write transaction."""
 
         with self._read() as connection:
-            if self._schema(connection) == SCHEMA_VERSION:
-                return
+            current = self._schema(connection)
+            strays = _strays(connection) if current == SCHEMA_VERSION else []
+        if current == SCHEMA_VERSION:
+            # A 0.2 or 0.3 process that opened this file left its own tables, empty, before it
+            # refused the schema. They hold nothing; drop them so the file holds only schema 3.
+            if strays:
+                with self._transaction() as connection:
+                    for name in _strays(connection):
+                        (rows,) = connection.execute(f'SELECT count(*) FROM "{name}"').fetchone()  # noqa: S608
+                        if rows == 0:
+                            connection.execute(f'DROP TABLE "{name}"')
+            return
         schema, upgrade = _spec("schema.sql"), _spec("upgrade.sql")
         with self._transaction() as connection:
             found = self._schema(connection)
@@ -635,9 +669,8 @@ class Ledger:
             if why["code"] is None:
                 return None, remaining
 
-            def open_ids() -> list[str]:
-                rows = self._run(connection, "open_ids", {"wallet": wallet})
-                return [str(row["payment"]) for row in rows]
+            def open_ids() -> list[Row]:
+                return self._run(connection, "open_ids", {"wallet": wallet})
 
             return refusal(why, units(amount, "amount"), own, open_ids), remaining
 
@@ -714,9 +747,8 @@ class Ledger:
                     "walletcap could not hold the payment, and the ledger gives no reason"
                 )
 
-            def open_ids() -> list[str]:
-                rows = self._run(connection, "open_ids", {"wallet": wallet})
-                return [str(row["payment"]) for row in rows]
+            def open_ids() -> list[Row]:
+                return self._run(connection, "open_ids", {"wallet": wallet})
 
             raise refusal(why, spend, own, open_ids)
 
@@ -891,6 +923,17 @@ class Ledger:
                     "evidence": _text(evidence, "evidence", _EVIDENCE_LIMIT),
                 },
             )
+
+
+_LEGACY_TABLES = ("spend", "budgets")
+"""The tables walletcap 0.2 and 0.3 create, empty, in a newer file before they refuse it."""
+
+
+def _strays(connection: sqlite3.Connection) -> list[str]:
+    tables = {
+        row[0] for row in connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")
+    }
+    return [name for name in _LEGACY_TABLES if name in tables]
 
 
 def _script(connection: sqlite3.Connection, sql: str) -> None:
