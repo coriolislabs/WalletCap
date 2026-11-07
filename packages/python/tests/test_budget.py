@@ -15,11 +15,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import warnings
+from collections.abc import Callable
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,6 +49,7 @@ from walletcap import (  # noqa: E402
     open_owner,
     to_micros,
 )
+from walletcap.budget import Hold, _hold_in_thread  # noqa: E402
 
 WALLET = "0xd797ead28c38575fdf4fc523866287372340ca02"
 CHECKSUMMED = "0xd797ead28C38575FDf4fC523866287372340Ca02"
@@ -1027,6 +1031,73 @@ def test_a_cancelled_ahold_voids_the_hold_it_took(tmp_path: Path) -> None:
     assert holder.wait(timeout=30) == 0
     assert (budget.status().in_flight, budget.holds()) == (Micros(0), [])
     _pay(budget, "$10")
+
+
+def _one_iteration(loop: asyncio.AbstractEventLoop) -> None:
+    loop.call_soon(loop.stop)
+    loop.run_forever()
+
+
+def _within(seconds: float, condition: Callable[[], bool]) -> bool:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def _finish(loop: asyncio.AbstractEventLoop, task: asyncio.Task[Any]) -> None:
+    loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+    loop.run_until_complete(loop.shutdown_default_executor())
+    loop.close()
+
+
+def test_a_cancelled_hold_is_voided_even_if_the_loop_stops_right_after(tmp_path: Path) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$10", create=True)
+    taken, release = threading.Event(), threading.Event()
+
+    def take() -> Hold:
+        hold = budget.hold("$10")
+        taken.set()
+        release.wait(30)
+        return hold
+
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(_hold_in_thread(take))
+    try:
+        while not taken.is_set():
+            _one_iteration(loop)  # until the worker thread has the hold
+        release.set()
+        time.sleep(0.2)  # the worker returns the hold; the loop hasn't seen it yet
+        task.cancel()
+        # One step: the caller sees the cancellation and voids the hold the worker took. The
+        # 0.4 draft scheduled the void in a task of its own, which a loop that stops here never
+        # ran: the hold counted for good, with no outcome.
+        _one_iteration(loop)
+        assert _within(10, lambda: budget.status().in_flight == Micros(0))
+        assert [row.status for row in budget.history()] == ["void"]
+    finally:
+        release.set()
+        _finish(loop, task)
+
+
+def test_an_async_pay_records_its_outcome_even_if_the_loop_stops_right_after(
+    tmp_path: Path,
+) -> None:
+    budget = open_budget(WALLET, path=tmp_path / "b.sqlite", per_day="$10", create=True)
+    paying = budget.pay("$10")
+    paying.__enter__()
+    loop = asyncio.new_event_loop()
+    error = TimeoutError("receipt timeout")
+    task = loop.create_task(paying.__aexit__(TimeoutError, error, None))
+    try:
+        # One step: __aexit__ hands the record to a thread. The 0.4 draft scheduled it in a task
+        # of its own, which a loop that stops here never ran: no outcome was noted.
+        _one_iteration(loop)
+        assert _within(10, lambda: [hold.reason for hold in budget.holds()] == ["unknown"])
+    finally:
+        _finish(loop, task)
 
 
 def test_a_refusal_and_the_holds_list_say_what_a_cdp_payment_is(

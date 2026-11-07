@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import enum
+import functools
 import json
 import os
 import shlex
@@ -33,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, TypeVar, cast
 
 from walletcap._ledger import Ledger, ProcessLimits, Row, held_elsewhere, merged_note_of
 from walletcap.errors import (
@@ -586,6 +588,21 @@ def _void_cancelled(hold: Hold) -> None:
             hold.void(evidence=_CANCELLED)
 
 
+_T = TypeVar("_T")
+
+
+def _in_thread(function: Callable[..., _T], *args: object) -> asyncio.Future[_T]:
+    """Start ``function(*args)`` in the loop's default executor now, as asyncio.to_thread would.
+
+    ``ensure_future(to_thread(...))`` hands the call to a thread only once its task first runs:
+    a loop that stops before then never makes the call. This hands it over before it returns.
+    """
+
+    loop = asyncio.get_running_loop()
+    call = functools.partial(contextvars.copy_context().run, function, *args)
+    return loop.run_in_executor(None, call)
+
+
 async def _hold_in_thread(take: Callable[[], Hold]) -> Hold:
     """Hold in a worker thread, so a wait for the write lock never blocks the event loop.
 
@@ -607,17 +624,16 @@ async def _hold_in_thread(take: Callable[[], Hold]) -> Hold:
             _void_cancelled(hold)
         return hold
 
-    task = asyncio.ensure_future(asyncio.to_thread(worker))
+    task = _in_thread(worker)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
         with taken.lock:
             taken.cancelled = True
             finished = taken.hold
+        # The void is in a thread before this returns: a loop that stops next still sends it.
         cleanup: asyncio.Future[Any] = (
-            task
-            if finished is None
-            else asyncio.ensure_future(asyncio.to_thread(_void_cancelled, finished))
+            task if finished is None else _in_thread(_void_cancelled, finished)
         )
         with contextlib.suppress(BaseException):
             await asyncio.shield(cleanup)
@@ -687,8 +703,9 @@ class Paying:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        # The record can't be stopped once its thread runs: a cancellation waits for it.
-        task = asyncio.ensure_future(asyncio.to_thread(self.__exit__, exc_type, exc, traceback))
+        # The record is in a thread before the first await, and can't be stopped once there: a
+        # cancellation waits for it.
+        task = _in_thread(self.__exit__, exc_type, exc, traceback)
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
