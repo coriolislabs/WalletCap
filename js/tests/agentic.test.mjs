@@ -227,7 +227,7 @@ test("the wallet is handed the terms walletcap discovered, so the payee's word c
   assert.deepEqual(w.calls[1].data.extensions, { mine: {} });
 });
 
-test("a term walletcap can't read doesn't switch off the hold's expiry, and terms it can't bound are refused", async () => {
+test("a term walletcap can't read doesn't switch off the hold's expiry, and terms it can't bound aren't paid", async () => {
   const clock = { now: Date.now() };
   const { budget } = newBudget(clock);
   const w = wallet(); // the payee answers "settled" with a made-up hash and keeps the authorization
@@ -248,14 +248,39 @@ test("a term walletcap can't read doesn't switch off the hold's expiry, and term
   assert.equal(budget.status().spent, 50_000n);
   clock.now += 1;
   assert.equal(budget.status().spent, 0n);
-  // Any term over an hour, or one that doesn't say, and the wallet is never asked.
+  // Terms over an hour, or that don't say, are never paid: with nothing else, the wallet isn't asked.
   for (const seconds of [3601, 0, 1.5, '300', null, undefined]) {
-    const terms = [requirement('50000', 300), { ...requirement('50000', 300), maxTimeoutSeconds: seconds }];
+    const terms = [{ ...requirement('50000', 300), maxTimeoutSeconds: seconds }];
     await assert.rejects(guard.request('make-x402-request', { ...x402(), paymentRequirements: terms }), refused('timeout'), String(seconds));
   }
   await assert.rejects(guard.request('make-x402-request', x402('?ttl=604800')), refused('timeout'));
   assert.equal(w.calls.length, 2);
   assert.equal(budget.history().length, 2);
+});
+
+test('the wallet is handed only the terms walletcap can price and bound; the rest are left out, not refused', async () => {
+  const clock = { now: Date.now() };
+  const { budget } = newBudget(clock);
+  const w = wallet(); // the payee answers "settled" with a made-up hash and keeps the authorization
+  const WETH = '0x4200000000000000000000000000000000000006';
+  const offered = [requirement('50000', 7200), { ...requirement('50000', 300), asset: WETH }, requirement('40000', 600)];
+  const guard = guardAgenticWallet(budget, { request: w.request, discover: async () => ({ accepts: offered, extensions: EXTENSIONS }) });
+  // 0.3.0 refused the payment for the two-hour terms, and would have handed the wallet the WETH
+  // terms, which walletcap can't price.
+  await guard.request('make-x402-request', x402());
+  assert.deepEqual(w.calls[0].data.paymentRequirements, [requirement('40000', 600)]);
+  assert.deepEqual([w.calls[0].data.maxAmountPerRequest, w.calls[0].data.extensions], [40_000, EXTENSIONS]);
+  clock.now += 600_000 + 60_000 + DAY; // the longest terms handed over, a minute, a window
+  assert.equal(budget.status().spent, 40_000n);
+  clock.now += 1;
+  assert.equal(budget.status().spent, 0n);
+  // Terms the caller hands over are left out the same way.
+  await guard.request('make-x402-request', { ...x402(), paymentRequirements: [requirement('50000', 3601), requirement('30000', 300)] });
+  assert.deepEqual(w.calls[1].data.paymentRequirements, [requirement('30000', 300)]);
+  // With nothing priced and bounded left, the payment is refused and the wallet isn't asked.
+  await assert.rejects(guard.request('make-x402-request', { ...x402(), paymentRequirements: [{ ...requirement('50000', 300), asset: WETH }] }), refused('asset'));
+  await assert.rejects(guard.request('make-x402-request', { ...x402(), paymentRequirements: [requirement('50000', 7200)] }), refused('timeout'));
+  assert.equal(w.calls.length, 2);
 });
 
 test('the hold lasts as long as the longest terms the wallet was handed, not only the ones walletcap would pick', async () => {

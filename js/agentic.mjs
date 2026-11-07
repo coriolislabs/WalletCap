@@ -143,20 +143,16 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
     });
   };
 
+  // Terms the wallet may be handed: in an asset walletcap can price, valid an hour or less
+  // (timeoutRefusal), so walletcap can tell how much it pays and how long it can settle.
+  const isTerm = requirement => requirement !== null && typeof requirement === 'object';
+  const priced = requirement => table.has(assetKey(requirement.network, requirement.asset));
+  const payable = requirement => isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
+
   // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay any
-  // of the terms, whatever walletcap would pick, so the longest of them counts, whatever the
-  // scheme (settlesWithinSeconds), plus a minute of clock skew. If any term doesn't say, or asks
-  // for more than an hour, the payment is refused before the wallet is asked: walletcap would
-  // otherwise have only the payee's word that it settled.
-  const settlesWithinMs = requirements => {
-    let longest = 0;
-    for (const requirement of requirements) {
-      const refusal = timeoutRefusal(requirement);
-      if (refusal !== null) throw refusal;
-      longest = Math.max(longest, settlesWithinSeconds(requirement));
-    }
-    return BigInt(longest) * 1000n + CLOCK_SKEW_MS;
-  };
+  // of the terms it is handed, whatever walletcap would pick, so the longest of them counts,
+  // whatever the scheme (settlesWithinSeconds), plus a minute of clock skew.
+  const settlesWithinMs = requirements => BigInt(Math.max(...requirements.map(settlesWithinSeconds))) * 1000n + CLOCK_SKEW_MS;
 
   async function send(data) {
     const asset = String(data?.asset ?? 'USDC').toUpperCase();
@@ -187,9 +183,10 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
   }
 
   async function x402(data) {
-    // The wallet is handed the terms walletcap checks: the caller's, as they are, or the ones
-    // walletcap discovers. Handed terms, awal skips its own 402 discovery and signs only a term
-    // equal to one of them, maxTimeoutSeconds included, so the payee can't show it others.
+    // The wallet is handed the terms walletcap checks, the caller's or the ones walletcap
+    // discovers, less any it can't price or bound. Handed terms, awal skips its own 402 discovery
+    // and signs only a term equal to one of them, maxTimeoutSeconds included, so the payee can't
+    // show it others.
     const handed = Array.isArray(data.paymentRequirements) && data.paymentRequirements.length > 0;
     const required = handed ? null : await findRequirements(data);
     const url = requestUrl(data).href.slice(0, 1024);
@@ -212,24 +209,29 @@ export function guardAgenticWallet(budget, { request, assets = [], fetch: fetchI
       return result;
     }
     const offered = handed ? data.paymentRequirements : required.accepts;
-    const extensions = required?.extensions;
-    const terms = handed ? {} : {
-      paymentRequirements: offered,
-      // The wallet uses the 402's extensions only when it discovers the terms itself.
-      ...(data.extensions === undefined && extensions !== null && typeof extensions === 'object' && !Array.isArray(extensions) ? { extensions } : {}),
-    };
-    const settlesWithin = settlesWithinMs(offered);
+    const usable = offered.filter(payable);
     const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
-    const candidates = offered.filter(requirement => (preferred === undefined || networkOf(requirement) === preferred)
-      && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme));
-    const priced = candidates.filter(requirement => table.has(assetKey(requirement.network, requirement.asset)));
-    if (priced.length === 0) {
-      const first = candidates[0] ?? offered[0];
+    const wanted = requirement => (preferred === undefined || networkOf(requirement) === preferred)
+      && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme);
+    const candidates = usable.filter(wanted);
+    if (candidates.length === 0) {
+      // Nothing left the wallet could pay: say why for the terms it would have picked from.
+      const asked = offered.filter(requirement => isTerm(requirement) && wanted(requirement));
+      const countable = asked.find(priced);
+      if (countable !== undefined) throw timeoutRefusal(countable);
+      const first = asked[0] ?? offered.find(isTerm);
       throw new BudgetRefused('asset', `walletcap cannot price ${first?.asset} on ${first?.network}; it pays only in the USD stablecoins it knows`);
     }
+    const extensions = required?.extensions;
+    const terms = {
+      paymentRequirements: usable,
+      // The wallet uses the 402's extensions only when it discovers the terms itself.
+      ...(!handed && data.extensions === undefined && isTerm(extensions) && !Array.isArray(extensions) ? { extensions } : {}),
+    };
+    const settlesWithin = settlesWithinMs(usable);
     // The wallet picks the terms itself when it pays, so reserve the most any offer asks
     // and cap the wallet at exactly that: it refuses to sign for more.
-    const choice = priced.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
+    const choice = candidates.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
     const micros = atomicToMicros(atomicOf(choice), table.get(assetKey(choice.network, choice.asset)));
     if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
       throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
