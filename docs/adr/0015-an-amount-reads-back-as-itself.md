@@ -28,8 +28,10 @@ fails with `TypeError`.
   - a bare `int`, `float`, `Decimal` or `str` added or subtracted (it could be dollars), a
     `float` or `Decimal` factor, true division, `Micros // Micros`, `Micros % Micros`, powers,
     bit operations and `float()` raise.
-  It compares and hashes like the int of micro-dollars. `int(amount)` gives the micro-dollars
-  as a plain int, for code that leaves walletcap.
+  `<`, `<=`, `>` and `>=` take another `Micros`, or zero, as `+` and `-` do: against a bare
+  number, `min(status.cap, 150)` would keep the 150 as micro-dollars, and `set_limits` would read
+  it as $150. `==` and hashing work like the int of micro-dollars, which can't raise an amount.
+  `int(amount)` gives the micro-dollars as a plain int, for code that leaves walletcap.
 - A bare Python `int` stays whole dollars on input, as a JavaScript `number` is.
 - JavaScript needs no change: bigint arithmetic always gives a bigint, and walletcap reads a
   bigint as micro-dollars. `Number(amount)` is an explicit conversion, like `int(amount)`.

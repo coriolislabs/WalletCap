@@ -106,21 +106,20 @@ class Micros:
         value = self._comparable(other)
         return NotImplemented if value is None else self._value == value
 
+    # Ordering takes another Micros, or zero, as + and - do. A bare number would be read as
+    # micro-dollars here and as dollars by every call that takes an amount, so min(cap, 150)
+    # would hand set_limits $150 where the cap was $100: it is refused instead.
     def __lt__(self, other: object) -> bool:
-        value = self._comparable(other)
-        return NotImplemented if value is None else self._value < value
+        return self._value < self._amount(other, "comparing a Micros with a number")
 
     def __le__(self, other: object) -> bool:
-        value = self._comparable(other)
-        return NotImplemented if value is None else self._value <= value
+        return self._value <= self._amount(other, "comparing a Micros with a number")
 
     def __gt__(self, other: object) -> bool:
-        value = self._comparable(other)
-        return NotImplemented if value is None else self._value > value
+        return self._value > self._amount(other, "comparing a Micros with a number")
 
     def __ge__(self, other: object) -> bool:
-        value = self._comparable(other)
-        return NotImplemented if value is None else self._value >= value
+        return self._value >= self._amount(other, "comparing a Micros with a number")
 
     def __add__(self, other: object) -> Micros:
         return Micros(self._value + self._amount(other, "adding a number to a Micros"))
@@ -373,9 +372,9 @@ def to_micros(value: object, label: str = "amount") -> Micros:
             micros = int(whole) * MICROS + int(fraction[:6].ljust(6, "0"))
     else:
         raise UsageError(f"{label} must be {_EXAMPLES}")
-    if micros < 0:
+    if int(micros) < 0:
         raise UsageError(f"{label} must be a nonnegative amount")
-    if micros > MAX_AMOUNT:
+    if int(micros) > int(MAX_AMOUNT):
         raise UsageError(
             f"{label} is more than {format_usd(MAX_AMOUNT)}, the most a budget can hold"
         )

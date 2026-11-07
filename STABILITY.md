@@ -84,6 +84,7 @@ The two packages read numbers the same way, and every amount they return reads b
 | Micro-dollars | `bigint` (`Micros`, a branded bigint) | `Micros` |
 | Dollars | `number`, a string like `"$12.50"` | `int`, `float`, `Decimal`, a string |
 | Arithmetic on an amount | bigint arithmetic, which stays bigint, so stays micro-dollars | a `Micros`, or `TypeError`; never a bare number |
+| Ordering an amount (`<`, `>`, `min`, `max`) | bigint against bigint | against another `Micros` or zero; a bare number raises `TypeError` |
 
 So `check(status().remaining)`, `check(remaining / 2n)` and `check(remaining // 2)` read
 micro-dollars in both. Converting an amount to a plain number yourself, `Number(remaining)` or

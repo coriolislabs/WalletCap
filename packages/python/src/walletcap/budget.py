@@ -432,14 +432,14 @@ def _process_limits(row: Row, asked: dict[str, Any]) -> tuple[ProcessLimits, boo
         mine, stored = asked["per_payment"], row["per_payment"]
         if mine is None:
             looser = looser or stored is not None
-        elif stored is None or mine < stored:
+        elif stored is None or int(mine) < stored:
             per_payment = mine
-        elif mine > stored:
+        elif int(mine) > stored:
             looser = True
     if "cap" in asked:
-        if asked["window_ms"] != row["window_ms"] or asked["cap"] < row["cap"]:
+        if asked["window_ms"] != row["window_ms"] or int(asked["cap"]) < row["cap"]:
             cap, window_ms = asked["cap"], asked["window_ms"]
-        elif asked["cap"] > row["cap"]:
+        elif int(asked["cap"]) > row["cap"]:
             looser = True
     if "max_payments" in asked:
         mine, stored = asked["max_payments"], row["max_payments"]

@@ -260,3 +260,26 @@ def test_zero_adds_as_itself_so_sums_work() -> None:
         Micros(1.5)
     with pytest.raises(TypeError):
         Micros(True)
+
+
+def test_ordering_against_a_bare_number_is_refused(tmp_path: Path) -> None:
+    from walletcap import open_owner
+
+    wallet = "0xd797ead28c38575fdf4fc523866287372340ca02"
+    owner = open_owner(tmp_path / "b.sqlite", create=True)
+    owner.set_limits(wallet, per_day="$100")
+    cap = owner.status(wallet).cap
+    # 0.4's draft read the 150 as micro-dollars here, so min() kept 150, and set_limits read that
+    # as $150: the cap went up.
+    with pytest.raises(TypeError, match="comparing a Micros with a number is refused"):
+        min(cap, 150)
+    for compare in (operator.lt, operator.le, operator.gt, operator.ge):
+        for number in (150, 1.5, Decimal("1.5"), "150"):
+            with pytest.raises(TypeError):
+                compare(cap, number)
+            with pytest.raises(TypeError):
+                compare(number, cap)
+    assert min(cap, to_micros("$150")) == cap
+    assert cap > 0
+    assert cap >= Micros(100_000_000)
+    assert owner.status(wallet).cap == Micros(100_000_000)
