@@ -552,8 +552,6 @@ the upgrade counts what 0.3.0 counted.
 - [Threat model](docs/threat-model.md): what the library stops, what it does not, and the
   deployment patterns that hold.
 - [What is public API](STABILITY.md), and how versions change it.
-- [Vendor benchmark disclosure](docs/vendor-disclosure.md): the separate 7-day
-  pre-publication notice for vendor findings in the Agent Payment Benchmark.
 - `AccountCapSpender` is **unaudited**. Read [contracts/README.md](contracts/README.md)
   before deploying it; testnet only until an independent audit.
 

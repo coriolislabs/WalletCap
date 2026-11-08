@@ -48,8 +48,7 @@ Please include:
 - editing the SQLite file by someone who can write it;
 - private-key custody and the wallet or chain itself;
 - vulnerabilities in Coinbase, Safe, MetaMask, Tempo, Google or other vendor
-  products. Those are handled under the separate benchmark disclosure policy
-  in [docs/vendor-disclosure.md](docs/vendor-disclosure.md).
+  products. Report those to the vendor.
 
 ## Known limitations
 

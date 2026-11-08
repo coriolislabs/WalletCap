@@ -96,4 +96,4 @@ explains the rule.
 - [Threat model](threat-model.md): what the library stops, what it doesn't, and the deployment patterns that hold
 - [Design records](adr/): why the ledger is built the way it is
 - [What is public API](https://github.com/coriolislabs/WalletCap/blob/main/STABILITY.md), and how versions change it
-- [Security policy](https://github.com/coriolislabs/WalletCap/blob/main/SECURITY.md) and [vendor benchmark disclosure](vendor-disclosure.md)
+- [Security policy](https://github.com/coriolislabs/WalletCap/blob/main/SECURITY.md)
