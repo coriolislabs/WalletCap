@@ -15,7 +15,7 @@ Usage: npx walletcap-mcp --wallet <address> [--path <file>] [--allow-tool <name>
 
 send and make_http_request_with_x402 are checked against the budget before the wallet signs, and
 counted. Tools that move no money pass through. Every other tool is refused and left out of
-tools/list.`;
+tools/list, and a request whose method isn't one of MCP's own never reaches the server.`;
 
 const argv = process.argv.slice(2);
 const own = argv.includes('--') ? argv.slice(0, argv.indexOf('--')) : argv;

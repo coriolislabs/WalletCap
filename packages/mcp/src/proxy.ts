@@ -52,6 +52,27 @@ export const MCP_PASS_THROUGH_TOOLS: readonly string[] = Object.freeze([
 ]);
 
 /**
+ * The MCP methods a client's requests may name. `tools/call` is checked tool by tool; the rest
+ * read. A request with any other method is answered "method not found" here and never reaches
+ * the server: tools are refused unless known, and so are methods.
+ */
+export const MCP_METHODS: readonly string[] = Object.freeze([
+  'initialize',
+  'ping',
+  'tools/list',
+  'tools/call',
+  'resources/list',
+  'resources/read',
+  'resources/templates/list',
+  'resources/subscribe',
+  'resources/unsubscribe',
+  'prompts/list',
+  'prompts/get',
+  'logging/setLevel',
+  'completion/complete',
+]);
+
+/**
  * Where Coinbase's server runs from. `npx @coinbase/payments-mcp` is its installer, not the
  * server: it downloads the server to ~/.payments-mcp, and MCP clients run bundle.js with node.
  */
@@ -134,7 +155,6 @@ export async function proxy(
     stream.write(`${JSON.stringify(message)}\n`);
   };
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  const listing = new Set<string>(); // the client's tools/list requests, whose answers are filtered
   const callTool = (name: string | undefined, args: Record<string, unknown>): Promise<unknown> =>
     new Promise((resolveCall, rejectCall) => {
       const id = `walletcap-${randomUUID()}`;
@@ -157,8 +177,9 @@ export async function proxy(
       else waiting.resolve(message.result);
       return;
     }
-    const key = message?.id === undefined ? undefined : JSON.stringify(message.id);
-    if (key !== undefined && listing.delete(key) && Array.isArray(message.result?.tools)) {
+    // Any answer that lists tools is filtered, whatever id it answers: matching a tools/list by
+    // its id let a second request with the same id, or one with a null id, show every tool.
+    if (Array.isArray(message?.result?.tools)) {
       write(output, { ...message, result: { ...message.result, tools: message.result.tools.filter(tool => offered(tool?.name)) } });
       return;
     }
@@ -245,8 +266,21 @@ export async function proxy(
           return;
         }
       }
-      if (rpc?.method === 'tools/list' && rpc.id !== undefined && rpc.id !== null) listing.add(JSON.stringify(rpc.id));
-      child.stdin.write(`${line}\n`);
+      if (rpc === null || typeof rpc !== 'object') {
+        write(output, { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'walletcap forwards JSON-RPC objects only' } });
+        return;
+      }
+      // A request names a method walletcap knows, or it stops here. A notification, or the
+      // client's answer to a request of the server's own, has nothing of the client's to refuse.
+      if (typeof rpc.method === 'string' && !rpc.method.startsWith('notifications/') && !MCP_METHODS.includes(rpc.method)) {
+        if (rpc.id !== undefined) {
+          write(output, { jsonrpc: '2.0', id: rpc.id, error: { code: -32601, message: 'walletcap does not forward that method to the wallet' } });
+        }
+        return;
+      }
+      // What was parsed and checked is what is sent, not the client's own line: a second "method"
+      // or "name" key in it would be read here one way and, by another parser, another.
+      write(child.stdin, rpc);
     })
     .on('close', () => child.stdin.end());
 

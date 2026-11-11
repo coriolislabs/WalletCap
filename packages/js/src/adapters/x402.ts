@@ -7,9 +7,10 @@
 // Each payment is checked before it is signed and held once its payload exists, under the
 // signed authorization's own identity. It counts until one window past the moment it can no
 // longer settle, whatever the payee answers. Terms valid longer than an hour are passed over.
-export { guard, MAX_PAYMENT_TIMEOUT_SECONDS, USD_ASSETS } from './_x402.js';
+export { COUNTED_SCHEMES, guard, MAX_PAYMENT_TIMEOUT_SECONDS, USD_ASSETS } from './_x402.js';
 export type {
   AssetEntry,
+  GuardOptions,
   PaymentCreatedContext,
   PaymentCreationContext,
   PaymentCreationFailureContext,

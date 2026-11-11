@@ -15,13 +15,49 @@ import { formatUsd, normalizeWallet } from '../core/money.js';
 
 const messageOf = (error: unknown): string => String((error as Error | undefined)?.message ?? error);
 
+/**
+ * awal's commands that move no money, passed through as they are: the command-line forms of the
+ * MCP server's tools walletcap-mcp passes through. Any other command, `trade` or one awal adds
+ * later, is refused unless the wallet's owner names it in WALLETCAP_AWAL_ALLOW: a command
+ * walletcap does not know may move money it cannot count.
+ */
+export const AWAL_PASS_THROUGH_COMMANDS: readonly string[] = Object.freeze([
+  'status',
+  'address',
+  'balance',
+  'show',
+  'auth login',
+  'auth verify',
+  'x402 bazaar list',
+  'x402 bazaar search',
+  'x402 details',
+]);
+const COUNTED_COMMANDS = ['send', 'x402 pay'];
+// What awal itself answers with no command at all.
+const TOP_LEVEL = new Set(['--help', '-h', 'help', '--version', '-V']);
+
+// The command an argv starts with: the longest of `known` whose words are its first words. An
+// option before the command, another spelling of it ("Send"), or a command not in the list is
+// none of them.
+const commandOf = (argv: string[], known: string[]): string | undefined =>
+  known
+    .filter(command => {
+      const words = command.split(' ');
+      return words.every((word, index) => argv[index] === word);
+    })
+    .sort((a, b) => b.length - a.length)[0];
+
 const HELP = `walletcap awal: Coinbase's Agentic Wallet CLI (awal), with every payment counted in the wallet's budget.
 
 Usage: npx walletcap awal <awal command> [awal options]
 
-  send and x402 pay are checked and counted by walletcap; every other command is awal's own.
+  send and x402 pay are checked and counted by walletcap. The commands that move no money pass
+  through to awal: ${AWAL_PASS_THROUGH_COMMANDS.join(', ')}.
+  Any other command, trade included, is refused: walletcap can't count it.
 
 Environment
+  WALLETCAP_AWAL_ALLOW   More awal commands to pass through, uncounted, separated by commas:
+                         set by the wallet's owner, like WALLETCAP_AWAL_ALLOW="trade,auth logout"
   WALLETCAP_WALLET   The wallet's EVM address (default: asked from the wallet)
   WALLETCAP_PATH     The budget file; create it first: npx walletcap set --wallet <address> --per-day <dollars>
   WALLETCAP_AWAL     The awal package directory (default: awal resolved from the current directory)`;
@@ -119,7 +155,26 @@ export async function awalMain(
     stdout.write(`${HELP}\n`);
     return 0;
   }
-  const guarded = argv[0] === 'send' || (argv[0] === 'x402' && argv[1] === 'pay');
+  const allowed = (env.WALLETCAP_AWAL_ALLOW ?? '')
+    .split(',')
+    .map(command => command.trim().split(/\s+/).join(' '))
+    .filter(Boolean);
+  const command = commandOf(argv, [...COUNTED_COMMANDS, ...AWAL_PASS_THROUGH_COMMANDS, ...allowed]);
+  const topLevel = argv.length === 1 && TOP_LEVEL.has(argv[0] ?? '');
+  if (command === undefined && !topLevel) {
+    // 0.4 handed awal every command but send and x402 pay, with all its arguments: trade, and a
+    // send behind an option ("--json send …") or with --help as some option's value.
+    const asked = argv
+      .filter(word => /^[A-Za-z0-9-]{1,32}$/.test(word))
+      .slice(0, 2)
+      .join(' ');
+    stderr.write(
+      `walletcap refused awal ${asked || 'that command'}: it can't tell whether the command moves money, so it can't count it. ` +
+        `Put the command first, before any option. The wallet's owner can let a command through, uncounted, with WALLETCAP_AWAL_ALLOW\n`,
+    );
+    return 1;
+  }
+  const guarded = command !== undefined && COUNTED_COMMANDS.includes(command);
   const wantsHelp = argv.includes('--help');
   let awalDir: string | undefined;
   try {
@@ -129,7 +184,10 @@ export async function awalMain(
     return 1;
   }
   if (!guarded || wantsHelp) {
-    const run = spawnSync(process.execPath, [join(awalDir ?? '', 'dist', 'index.js'), ...argv], { stdio: 'inherit', env });
+    // Help for a counted command is that command's words and --help, nothing else: awal never
+    // gets a payment's arguments from here, whatever option --help was passed as the value of.
+    const forwarded = guarded && command !== undefined ? [...command.split(' '), '--help'] : argv;
+    const run = spawnSync(process.execPath, [join(awalDir ?? '', 'dist', 'index.js'), ...forwarded], { stdio: 'inherit', env });
     return run.status ?? 1;
   }
   const args = argv[0] === 'send' ? argv.slice(1) : argv.slice(2);

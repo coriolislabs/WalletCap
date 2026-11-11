@@ -636,3 +636,117 @@ test('the agent is told why a payment was refused, not which holds its owner cou
       'over its $0.15 limit ($0.00 left); $0.15 of it is 3 open payments',
   );
 });
+
+// --- The November 2026 review ----------------------------------------------------------------
+
+test('npx walletcap awal: a command walletcap cannot count never reaches awal', async () => {
+  const path = join(DIR, 'cli-deny.sqlite');
+  const log = join(DIR, 'cli-deny.log');
+  writeFileSync(log, '');
+  const set = spawnSync(process.execPath, [CLI, 'set', '--wallet', WALLET, '--per-day', '0.15', '--per-payment', '0.05'], {
+    env: { ...process.env, WALLETCAP_PATH: path },
+    encoding: 'utf8',
+  });
+  assert.equal(set.status, 0, set.stderr);
+  const run = (env, ...args) =>
+    new Promise(done =>
+      execFile(
+        process.execPath,
+        [CLI, 'awal', ...args],
+        { env: { ...process.env, WALLETCAP_PATH: path, WALLETCAP_AWAL: FAKE_AWAL, FAKE_AWAL_LOG: log, FAKE_AWAL_MODE: 'settle', ...env }, encoding: 'utf8' },
+        (error, stdout, stderr) => done({ status: error ? error.code : 0, stdout, stderr }),
+      ),
+    );
+  const url = `${base}/pay?ttl=300`;
+  // 0.4 handed awal every command but `send` and `x402 pay`, with all its arguments: trade, a
+  // send behind an option, and another spelling of either.
+  for (const args of [
+    ['trade', '1000', 'usdc', 'eth'],
+    ['--json', 'send', '25', PAY_TO],
+    ['Send', '25', PAY_TO],
+    ['X402', 'pay', url],
+    ['x402', '--json', 'pay', url],
+    ['auth', 'logout'],
+    ['x402'],
+  ]) {
+    const refusedRun = await run({}, ...args);
+    assert.equal(refusedRun.status, 1, args.join(' '));
+    assert.match(refusedRun.stderr, /walletcap refused awal .*can't count it/, args.join(' '));
+    assert.equal(refusedRun.stdout, '', `awal never ran: ${args.join(' ')}`);
+  }
+  // --help as some option's value passed the whole payment to awal. Now awal gets the command's
+  // own words and --help.
+  assert.equal((await run({}, 'send', '25', PAY_TO, '--chain', '--help')).stdout.trim(), 'awal send --help');
+  assert.equal((await run({}, 'x402', 'pay', url, '--correlation-id', '--help')).stdout.trim(), 'awal x402 pay --help');
+  // The commands that move no money pass as they are, and so does awal's own help.
+  assert.equal((await run({}, 'balance', '--chain', 'base', '--json')).stdout.trim(), 'awal balance --chain base --json');
+  assert.equal((await run({}, 'x402', 'bazaar', 'search', 'weather')).stdout.trim(), 'awal x402 bazaar search weather');
+  assert.equal((await run({}, '--help')).stdout.trim(), 'awal --help');
+  // The owner names a command to let through, uncounted.
+  const allowed = await run({ WALLETCAP_AWAL_ALLOW: 'trade, auth  logout' }, 'trade', '1', 'usdc', 'eth');
+  assert.deepEqual([allowed.status, allowed.stdout.trim()], [0, 'awal trade 1 usdc eth']);
+  assert.equal((await run({ WALLETCAP_AWAL_ALLOW: 'trade, auth  logout' }, 'auth', 'logout')).stdout.trim(), 'awal auth logout');
+  assert.equal(readFileSync(log, 'utf8'), '', 'the wallet was asked for nothing');
+});
+
+test("an x402 request reaches the wallet with its own fields only, on walletcap's terms", async () => {
+  const { budget } = await newBudget();
+  const w = wallet();
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  // 0.4 spread everything the caller sent into the wallet's request: a field walletcap doesn't
+  // know could be another name for the cap or the terms.
+  await guard.request('make-x402-request', {
+    ...x402('?ttl=300'),
+    correlationId: 'c-1',
+    maxAmount: 1e9,
+    max_amount_per_request: 1e9,
+    someFutureWalletOption: true,
+  });
+  assert.deepEqual(Object.keys(w.calls[0].data).sort(), [
+    'baseURL',
+    'correlationId',
+    'extensions',
+    'maxAmountPerRequest',
+    'method',
+    'path',
+    'paymentRequirements',
+  ]);
+  assert.equal(w.calls[0].data.maxAmountPerRequest, 50_000);
+
+  // A path that names another host is refused: walletcap would price that host's terms.
+  await assert.rejects(guard.request('make-x402-request', { baseURL: 'https://good.example', path: '//evil.example/x', method: 'GET' }), UsageError);
+  // A chain name is looked up among the wallet's chains, not on Object.prototype.
+  for (const chain of ['constructor', '__proto__', 'toString']) {
+    await assert.rejects(guard.request('send-transaction', { recipient: PAY_TO, amountAtomic: '1', chain }), refused('asset'));
+  }
+  assert.equal(w.calls.length, 1);
+});
+
+test('the wallet is handed terms under schemes walletcap counts, priced at the larger of two amount fields', async () => {
+  const { budget } = await newBudget();
+  const w = wallet();
+  const guard = guardAgenticWallet(budget, { request: w.request });
+  const terms = requirement('10000');
+  // A channel's deposit is not its request's amount: the terms are left out, and with none
+  // left the payment is refused before the wallet is asked.
+  await assert.rejects(guard.request('make-x402-request', { ...x402(), paymentRequirements: [{ ...terms, scheme: 'batch-settlement' }] }), BudgetRefused);
+  // Both of x402's amount fields: the cap handed to the wallet, and the hold, are the larger.
+  await assert.rejects(
+    guard.request('make-x402-request', { ...x402(), paymentRequirements: [{ ...terms, maxAmountRequired: '1000000000' }] }),
+    refused('per_payment'),
+  );
+  assert.equal(w.calls.length, 0);
+  await guard.request('make-x402-request', {
+    ...x402(),
+    paymentRequirements: [
+      { ...terms, maxAmountRequired: '40000' },
+      { ...terms, scheme: 'batch-settlement' },
+    ],
+  });
+  assert.equal(w.calls[0].data.maxAmountPerRequest, 40_000);
+  assert.deepEqual(
+    w.calls[0].data.paymentRequirements.map(term => term.scheme),
+    ['exact'],
+  );
+  assert.equal((await budget.status()).spent, 40_000n);
+});

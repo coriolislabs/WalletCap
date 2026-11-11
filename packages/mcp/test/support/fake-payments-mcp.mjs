@@ -10,6 +10,8 @@ const text = value => ({ content: [{ type: 'text', text: JSON.stringify(value, n
 const reply = (id, result) => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
 
 createInterface({ input: process.stdin }).on('line', line => {
+  // Every line as it arrived, for the tests that check what the proxy lets reach the server.
+  if (process.env.FAKE_MCP_LINES) appendFileSync(process.env.FAKE_MCP_LINES, `${line}\n`);
   const message = JSON.parse(line);
   if (message.method === 'initialize')
     return reply(message.id, { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'payments-mcp', version: 'test' } });

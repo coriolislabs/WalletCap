@@ -16,6 +16,7 @@ import {
   assetKey,
   assetTable,
   atomicOf,
+  COUNTED_SCHEMES,
   type PaymentRequirements,
   settlesWithinSeconds,
   timeoutRefusal,
@@ -42,6 +43,8 @@ export const AWAL_CHAINS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
+// What a make-x402-request names besides the terms and the cap, which walletcap sets itself.
+const REQUEST_FIELDS = ['baseURL', 'path', 'method', 'headers', 'body', 'queryParams', 'extensions', 'preferredNetwork', 'preferredScheme', 'correlationId'];
 // Room for the wallet's clock, or the chain's, to run ahead of this one.
 const CLOCK_SKEW_MS = 60_000n;
 
@@ -127,6 +130,9 @@ export type FetchLike = (
 
 const requestUrl = (data: RequestData): URL => {
   const url = new URL(data.path ?? '', data.baseURL);
+  // A path of "//other.example/x" resolves to another host: walletcap would price that host's
+  // terms, and hand them to the wallet for a request to this one.
+  if (url.origin !== new URL(String(data.baseURL)).origin) throw new UsageError('the request path names another host than its baseURL');
   for (const [key, value] of Object.entries(data.queryParams ?? {})) url.searchParams.set(key, String(value));
   return url;
 };
@@ -202,8 +208,16 @@ export function guardAgenticWallet(
   // (timeoutRefusal), so walletcap can tell how much it pays and how long it can settle.
   const isTerm = (requirement: unknown): requirement is PaymentRequirements => requirement !== null && typeof requirement === 'object';
   const priced = (requirement: PaymentRequirements): boolean => table.has(assetKey(requirement.network, requirement.asset));
+  // Terms under a scheme walletcap counts (the wallet signs for at most their amount), in an
+  // asset it prices, valid an hour or less.
   const payable = (requirement: unknown): requirement is PaymentRequirements =>
-    isTerm(requirement) && priced(requirement) && timeoutRefusal(requirement) === null;
+    isTerm(requirement) && COUNTED_SCHEMES.includes(requirement.scheme ?? 'exact') && priced(requirement) && timeoutRefusal(requirement) === null;
+
+  // The request's own fields, as the wallet's channel takes them. Nothing else the caller put
+  // beside them reaches the wallet: walletcap sets the terms and the cap, and a field it doesn't
+  // know could be another name for either.
+  const requestFields = (data: RequestData): RequestData =>
+    Object.fromEntries(REQUEST_FIELDS.filter(key => data[key] !== undefined).map(key => [key, data[key]]));
 
   // How long after the wallet signs its payment can settle, in milliseconds. The wallet may pay
   // any of the terms it is handed, whatever walletcap would pick, so the longest of them counts,
@@ -214,7 +228,7 @@ export function guardAgenticWallet(
   async function send(data: RequestData): Promise<unknown> {
     const asset = String(data.asset ?? 'USDC').toUpperCase();
     const chain = String(data.chain ?? 'base');
-    const network = AWAL_CHAINS[chain];
+    const network = Object.hasOwn(AWAL_CHAINS, chain) ? AWAL_CHAINS[chain] : undefined;
     if (asset !== 'USDC' || network === undefined) {
       throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset} on ${chain}, so it refuses this send`);
     }
@@ -262,7 +276,7 @@ export function guardAgenticWallet(
       const hold = await budget.hold(1n, { rail: 'awal-x402', note: url });
       let result: unknown;
       try {
-        result = await wallet('make-x402-request', { ...data, maxAmountPerRequest: 1 });
+        result = await wallet('make-x402-request', { ...requestFields(data), maxAmountPerRequest: 1 });
       } catch (error) {
         await recorded(hold, () => hold.void({ evidence: 'nothing was signed for value' }));
         throw error;
@@ -274,7 +288,12 @@ export function guardAgenticWallet(
     }
     const offered = (handed ? data.paymentRequirements : required?.accepts) as unknown[];
     const usable = offered.filter(payable);
-    const preferred = data.preferredNetwork === undefined ? undefined : AWAL_CHAINS[data.preferredNetwork];
+    const preferred =
+      data.preferredNetwork === undefined
+        ? undefined
+        : Object.hasOwn(AWAL_CHAINS, String(data.preferredNetwork))
+          ? AWAL_CHAINS[String(data.preferredNetwork)]
+          : 'none';
     const wanted = (requirement: PaymentRequirements): boolean =>
       (preferred === undefined || networkOf(requirement) === preferred) && (data.preferredScheme === undefined || requirement.scheme === data.preferredScheme);
     const candidates = usable.filter(wanted);
@@ -282,7 +301,15 @@ export function guardAgenticWallet(
       // Nothing left the wallet could pay: say why for the terms it would have picked from.
       const asked = offered.filter((requirement): requirement is PaymentRequirements => isTerm(requirement) && wanted(requirement));
       const countable = asked.find(priced);
-      if (countable !== undefined) throw timeoutRefusal(countable);
+      if (countable !== undefined) {
+        throw (
+          timeoutRefusal(countable) ??
+          new BudgetRefused(
+            'terms',
+            "walletcap doesn't count the x402 scheme the endpoint asks for: under it the wallet may sign for more than the terms' amount",
+          )
+        );
+      }
       const first = asked[0] ?? offered.find(isTerm);
       throw new BudgetRefused('asset', `walletcap cannot price ${first?.asset} on ${first?.network}; it pays only in the USD stablecoins it knows`);
     }
@@ -312,7 +339,7 @@ export function guardAgenticWallet(
     });
     let result: { status?: unknown } | null;
     try {
-      result = (await wallet('make-x402-request', { ...data, ...terms, maxAmountPerRequest: Number(atomicOf(choice)) })) as typeof result;
+      result = (await wallet('make-x402-request', { ...requestFields(data), ...terms, maxAmountPerRequest: Number(atomicOf(choice)) })) as typeof result;
     } catch (error) {
       // The wallet may not have answered yet, and may still sign: it counts until voided.
       await failed(hold, error);

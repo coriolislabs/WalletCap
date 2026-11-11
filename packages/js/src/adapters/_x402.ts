@@ -70,6 +70,35 @@ export interface AssetEntry {
   decimals: number;
 }
 
+/**
+ * The x402 schemes the guard counts by default: under each, the wallet signs for at most the
+ * terms' amount, good for at most the terms' maxTimeoutSeconds. Another scheme is refused, with
+ * the code `terms`, unless `schemes` lists it: under batch-settlement, say, the wallet signs a
+ * deposit into a payment channel, several times the request's amount or whatever minimum the
+ * payee announces.
+ */
+export const COUNTED_SCHEMES: readonly string[] = Object.freeze(['exact', 'upto', 'auth-capture']);
+
+/** What guard() and guardAgentKit() take besides the client and the budget. */
+export interface GuardOptions {
+  /** More USD-pegged stablecoins to count at $1 a token. */
+  assets?: AssetEntry[];
+  /**
+   * More x402 schemes to count, by name. List one only if a payment under it moves at most its
+   * terms' amount out of the wallet, or walletcap reads what it moves from the signed payload: on
+   * EVM it reads a batch-settlement deposit, and counts that.
+   */
+  schemes?: string[];
+}
+
+/** The schemes a guard counts: the built-in ones plus `extra`. */
+export function schemeSet(extra: unknown): Set<string> {
+  if (!Array.isArray(extra) || extra.some(name => typeof name !== 'string' || name.length === 0)) {
+    throw new UsageError("schemes must be a list of x402 scheme names, like ['batch-settlement']");
+  }
+  return new Set([...COUNTED_SCHEMES, ...(extra as string[])]);
+}
+
 const GUARDED = Symbol.for('walletcap/x402-guard');
 // Set by @coinbase/cdp-sdk/x402's applySpendControls. The CDP store and this guard both count
 // one payment, so a client may have one counter, not both.
@@ -135,8 +164,7 @@ export const settlesWithinSeconds = (requirements: PaymentRequirements): number 
   if (timeoutRefusal(requirements) !== null) return null;
   const { network, maxTimeoutSeconds } = requirements;
   const seconds = maxTimeoutSeconds as number;
-  const caip2 = Object.hasOwn(V1_NETWORKS, network) ? (V1_NETWORKS[network] ?? network) : String(network);
-  return caip2.startsWith('solana:') ? Math.max(seconds, SOLANA_TRANSACTION_SECONDS) : seconds;
+  return caip2Of(network).startsWith('solana:') ? Math.max(seconds, SOLANA_TRANSACTION_SECONDS) : seconds;
 };
 
 /**
@@ -159,8 +187,15 @@ export const USD_ASSETS: readonly Readonly<AssetEntry>[] = Object.freeze(
   ].map(entry => Object.freeze(entry)),
 );
 
+// A network as CAIP-2: x402 v1's names are mapped, anything else is taken as it is.
+const caip2Of = (network: unknown): string =>
+  typeof network === 'string' && Object.hasOwn(V1_NETWORKS, network) ? (V1_NETWORKS[network] as string) : String(network);
+
+// A payee's string as a message may repeat it: an address or a network id, never a sentence.
+const named = (value: unknown): string => (typeof value === 'string' && /^[A-Za-z0-9:_.-]{1,80}$/.test(value) ? value : 'one walletcap cannot read');
+
 export const assetKey = (network: string, asset: string): string => {
-  const caip2 = V1_NETWORKS[network] ?? network;
+  const caip2 = caip2Of(network);
   const id = /^0x[0-9a-fA-F]{40}$/.test(asset) ? asset.toLowerCase() : asset;
   return `${caip2} ${id}`;
 };
@@ -190,16 +225,34 @@ export function assetTable(extra: unknown): Map<string, number> {
   return table;
 }
 
+// An amount as x402 writes one: a string of decimal digits. A whole number or a bigint is read
+// too. Nothing else is: every parser a signer might use agrees on these, and on little besides
+// ("0x10" is 16 to BigInt and 0 to parseInt(…, 10)).
+const wholeAtomic = (raw: unknown): bigint | null => {
+  if (typeof raw === 'string' && /^[0-9]+$/.test(raw)) return BigInt(raw);
+  if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) return BigInt(raw);
+  if (typeof raw === 'bigint' && raw >= 0n) return raw;
+  return null;
+};
+
+/**
+ * The most a payment on these terms asks the wallet to sign for, in the asset's atomic units.
+ * x402 v2 names it `amount` and v1 `maxAmountRequired`, and a client signs whichever its protocol
+ * version reads, whatever else the payee put beside it. So terms that carry both are priced at
+ * the larger: a payee can't have a small `amount` counted while a v1 scheme signs a large
+ * `maxAmountRequired`.
+ */
 export const atomicOf = (requirements: PaymentRequirements): bigint => {
-  const raw = requirements.amount ?? requirements.maxAmountRequired;
-  let atomic: bigint;
-  try {
-    atomic = BigInt(raw as string);
-  } catch {
-    throw new BudgetRefused('terms', `the x402 amount ${JSON.stringify(raw)} is not an integer`);
+  let most: bigint | null = null;
+  for (const field of ['amount', 'maxAmountRequired'] as const) {
+    const raw: unknown = requirements[field];
+    if (raw === undefined || raw === null) continue;
+    const atomic = wholeAtomic(raw);
+    if (atomic === null) throw new BudgetRefused('terms', `the x402 ${field} ${JSON.stringify(String(raw))} is not a whole number of the asset's units`);
+    if (most === null || atomic > most) most = atomic;
   }
-  if (atomic < 0n) throw new BudgetRefused('terms', 'the x402 amount is negative');
-  return atomic;
+  if (most === null) throw new BudgetRefused('terms', 'the x402 terms name no amount');
+  return most;
 };
 
 // Atomic units of a token with `decimals` as micro-dollars, rounded up: a budget may
@@ -224,11 +277,32 @@ const unixMs = (value: unknown): bigint | null => {
 
 interface SignedPayload {
   payload?: {
-    authorization?: { validBefore?: unknown; from?: unknown; nonce?: unknown };
-    permit2Authorization?: { deadline?: unknown; from?: unknown; nonce?: unknown };
+    authorization?: { validBefore?: unknown; from?: unknown; nonce?: unknown; value?: unknown };
+    permit2Authorization?: { deadline?: unknown; from?: unknown; nonce?: unknown; permitted?: { amount?: unknown } };
+    deposit?: { amount?: unknown };
   };
   accepted?: PaymentRequirements;
 }
+
+// What the signed payload itself moves out of the wallet, where walletcap can read it: an
+// EIP-3009 authorization's value, a Permit2 transfer's amount, a batch-settlement channel's
+// deposit (which is several times the request's amount, or whatever minimum the payee announces).
+// The larger of them, or null when the payload names none walletcap reads.
+const signedAtomic = (payload: SignedPayload | undefined): bigint | null => {
+  const signed = payload?.payload;
+  let most: bigint | null = null;
+  for (const raw of [signed?.authorization?.value, signed?.permit2Authorization?.permitted?.amount, signed?.deposit?.amount]) {
+    let atomic: bigint | null = null;
+    try {
+      // Read as loosely as a signer would: whatever this parses to is what was signed for.
+      if (typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'bigint') atomic = BigInt(raw);
+    } catch {
+      atomic = null;
+    }
+    if (atomic !== null && (most === null || atomic > most)) most = atomic;
+  }
+  return most;
+};
 
 // When a payment just signed can no longer settle: the expiry it carries, an EIP-3009
 // authorization's validBefore or a Permit2 deadline (x402's exact and upto schemes, and the
@@ -288,7 +362,7 @@ interface Slot {
  * when the server confirms settlement (it then counts for one window) or when it can no longer
  * settle.
  */
-export function guard<C extends X402HookedClient>(client: C, budget: Budget, { assets = [] }: { assets?: AssetEntry[] } = {}): C {
+export function guard<C extends X402HookedClient>(client: C, budget: Budget, { assets = [], schemes = [] }: GuardOptions = {}): C {
   for (const hook of ['onBeforePaymentCreation', 'onAfterPaymentCreation', 'onPaymentCreationFailure', 'onPaymentResponse'] as const) {
     if (typeof (client as Partial<X402HookedClient> | undefined)?.[hook] !== 'function') {
       throw new UsageError(`guard() takes an x402Client from @x402/core 2.x; this client has no ${hook}()`);
@@ -298,17 +372,37 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
   if (marked[GUARDED] !== undefined) throw new UsageError('this x402 client already has a budget guard');
   if (hasCdpControls(client)) throw oneCounter();
   const table = assetTable(assets);
+  const counted = schemeSet(schemes);
   const byPayload = new WeakMap<object, Hold>();
   const byFingerprint = new Map<string, Hold>();
 
   const priced = (requirements: PaymentRequirements): boolean => table.has(assetKey(requirements.network, requirements.asset));
+  const schemeRefusal = (requirements: PaymentRequirements): BudgetRefused | null => {
+    const scheme = requirements.scheme ?? 'exact';
+    if (typeof scheme === 'string' && counted.has(scheme)) {
+      // A channel's deposit is read from an EVM payload. On another chain it is inside a signed
+      // transaction walletcap doesn't decode, so the scheme can't be counted there, listed or not.
+      if (scheme !== 'batch-settlement' || caip2Of(requirements.network).startsWith('eip155:')) return null;
+      return new BudgetRefused(
+        'terms',
+        `the budget can't count a batch-settlement payment on ${named(requirements.network)}: it can't read the deposit the wallet signs there`,
+      );
+    }
+    return new BudgetRefused(
+      'terms',
+      `the budget doesn't count the x402 scheme ${named(scheme)}: under it the wallet may sign for more than the terms' amount. ` +
+        `If its payments move at most that amount, add it: guard(client, budget, { schemes: ['${named(scheme)}'] })`,
+    );
+  };
   const price = (requirements: PaymentRequirements): bigint => {
+    const unknown = schemeRefusal(requirements);
+    if (unknown !== null) throw unknown;
     const decimals = table.get(assetKey(requirements.network, requirements.asset));
     if (decimals === undefined) {
       throw new BudgetRefused(
         'asset',
-        `the budget cannot price ${requirements.asset} on ${requirements.network}. ` +
-          `If it is a USD stablecoin, add it: guard(client, budget, { assets: [{ network: '${requirements.network}', asset: '${requirements.asset}', decimals: 6 }] })`,
+        `the budget cannot price ${named(requirements.asset)} on ${named(requirements.network)}. ` +
+          `If it is a USD stablecoin, add it: guard(client, budget, { assets: [{ network: '${named(requirements.network)}', asset: '${named(requirements.asset)}', decimals: 6 }] })`,
       );
     }
     return toMicros(atomicOf(requirements), decimals);
@@ -339,11 +433,13 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
   const registerPolicy = (client as { registerPolicy?: unknown }).registerPolicy;
   if (typeof registerPolicy === 'function') {
     (registerPolicy as (policy: PaymentPolicy) => unknown).call(client, (_version: number, requirements: PaymentRequirements[]) => {
-      const kept = requirements.filter(requirement => priced(requirement) && timeoutRefusal(requirement) === null);
+      const countable = requirements.filter(requirement => schemeRefusal(requirement) === null && priced(requirement));
+      const kept = countable.filter(requirement => timeoutRefusal(requirement) === null);
       if (kept.length === 0 && requirements.length > 0) {
-        const countable = requirements.find(priced);
-        if (countable === undefined) price(requirements[0] as PaymentRequirements); // throws the explanation
-        throw timeoutRefusal(countable);
+        // Say why the first of the terms that came closest was passed over.
+        const [close] = countable;
+        if (close !== undefined) throw timeoutRefusal(close);
+        price(requirements.find(requirement => schemeRefusal(requirement) === null) ?? (requirements[0] as PaymentRequirements)); // throws the explanation
       }
       return kept;
     });
@@ -365,31 +461,82 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     return undefined;
   });
 
+  // Every payload the guard has held, or priced as free: the ones the client may hand out.
+  const seen = new WeakSet<object>();
+
+  // Hold a signed payload, or throw: the one place a payment enters the budget. `slot.amount` is
+  // what its terms were priced at before signing.
+  const holdSigned = async (slot: Slot, requirements: PaymentRequirements, paymentPayload: unknown, url: unknown): Promise<void> => {
+    const payload = paymentPayload as SignedPayload | undefined;
+    // Count what the wallet signed, when that is more than its terms' amount: a deposit, or a
+    // scheme that read another field than the one priced.
+    const signed = signedAtomic(payload);
+    if (signed !== null) {
+      const moved = toMicros(signed, table.get(assetKey(requirements.network, requirements.asset)) ?? 6);
+      if (moved > slot.amount) slot.amount = moved;
+    }
+    if (slot.amount > 0n) {
+      // If another process spent the budget since the check, or the wallet signed for more than
+      // the budget admits, this throws; the client then discards the signed payload and nothing
+      // is sent.
+      try {
+        const id = identityOf(payload);
+        slot.hold = await budget.hold(slot.amount, {
+          rail: 'x402',
+          ...(typeof requirements.payTo === 'string' ? { to: requirements.payTo.slice(0, 256) } : {}),
+          ...(typeof url === 'string' ? { note: url.slice(0, 1024) } : {}),
+          details: { network: named(requirements.network), asset: named(requirements.asset), scheme: named(requirements.scheme ?? 'exact') },
+          ...settlesBy(payload, requirements),
+          ...(id === undefined ? {} : { id }),
+        });
+      } catch (error) {
+        throw forAgent(error);
+      }
+      slot.payload = paymentPayload;
+      remember(paymentPayload, slot.hold);
+    }
+    if (paymentPayload !== null && typeof paymentPayload === 'object') seen.add(paymentPayload);
+  };
+
   client.onAfterPaymentCreation(async (context: PaymentCreatedContext) => {
     if (hasCdpControls(client)) throw oneCounter();
-    const slot = (context as Slotted)[SLOT];
-    if (slot === undefined || slot.amount === 0n) return;
     const requirements = context.selectedRequirements;
-    // If another process spent the budget since the check, this throws; the client then
-    // discards the signed payload and nothing is sent.
-    const url = (context.paymentRequired as { resource?: { url?: unknown } } | undefined)?.resource?.url;
-    const payload = context.paymentPayload as SignedPayload | undefined;
-    try {
-      const id = identityOf(payload);
-      slot.hold = await budget.hold(slot.amount, {
-        rail: 'x402',
-        ...(requirements.payTo === undefined ? {} : { to: requirements.payTo }),
-        ...(typeof url === 'string' ? { note: url.slice(0, 1024) } : {}),
-        details: { network: requirements.network, asset: requirements.asset, scheme: requirements.scheme },
-        ...settlesBy(payload, requirements),
-        ...(id === undefined ? {} : { id }),
-      });
-    } catch (error) {
-      throw forAgent(error);
+    // A client that hands this hook another context than the one the check ran on has no slot:
+    // the payment is priced again here, never let through uncounted.
+    let slot = (context as Slotted)[SLOT];
+    if (slot === undefined) {
+      slot = { amount: price(requirements), hold: null, payload: null };
+      (context as Slotted)[SLOT] = slot;
     }
-    slot.payload = context.paymentPayload;
-    remember(context.paymentPayload, slot.hold);
+    const url = (context.paymentRequired as { resource?: { url?: unknown } } | undefined)?.resource?.url;
+    await holdSigned(slot, requirements, context.paymentPayload, url);
   });
+
+  // The backstop. @x402/core returns a payload that a scheme's own failure hook "recovered"
+  // straight to the transport, past the hook above: @x402/svm's batch-settlement client signs a
+  // second accept that way. So the client's createPaymentPayload is wrapped on the instance, and
+  // a payload the guard hasn't seen is held here, on the terms it says it accepted, or is never
+  // returned.
+  const create = (client as { createPaymentPayload?: unknown }).createPaymentPayload;
+  if (typeof create === 'function') {
+    Object.defineProperty(client, 'createPaymentPayload', {
+      configurable: true,
+      writable: true,
+      value: async function createGuarded(this: unknown, ...args: unknown[]): Promise<unknown> {
+        const paymentPayload = await (create as (...args: unknown[]) => Promise<unknown>).apply(this, args);
+        if (paymentPayload === null || typeof paymentPayload !== 'object' || seen.has(paymentPayload)) return paymentPayload;
+        const accepted = (paymentPayload as SignedPayload).accepted;
+        if (accepted === null || typeof accepted !== 'object') {
+          throw new BudgetRefused('terms', "the x402 client made a payment outside the budget's check, and it names no terms the budget can price");
+        }
+        const tooLong = timeoutRefusal(accepted);
+        if (tooLong !== null) throw tooLong;
+        const url = (args[0] as { resource?: { url?: unknown } } | undefined)?.resource?.url;
+        await holdSigned({ amount: price(accepted), hold: null, payload: null }, accepted, paymentPayload, url);
+        return paymentPayload;
+      },
+    });
+  }
 
   client.onPaymentCreationFailure(async (context: PaymentCreationFailureContext) => {
     // A later hook threw after this guard held the payment: the payload is never returned, so
@@ -408,8 +555,12 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     forget(context.paymentPayload);
     if (hold.state !== 'held') return undefined;
     if (context.settleResponse?.success === true) {
+      // The payee's word. Kept as evidence only if it could be a transaction: an id of hex or
+      // base58 digits, nothing a terminal would act on and nothing that fails the settle.
+      const said: unknown = context.settleResponse.transaction;
+      const tx = typeof said === 'string' && /^[A-Za-z0-9]{1,128}$/.test(said) ? said : undefined;
       try {
-        await hold.settle({ tx: context.settleResponse.transaction });
+        await hold.settle({ tx });
       } catch (error) {
         // Settled but not recorded: the payment stays held and keeps counting.
         throw new PaymentNotRecorded(hold.id, { cause: error });
@@ -441,7 +592,7 @@ const GUARDED_PROVIDER = Symbol.for('walletcap/agentkit-guard');
  * so a TypeScript subclass cannot override it. This wraps that method on the instance: every
  * client the provider builds is guarded before it can sign. Returns the provider.
  */
-export function guardAgentKit<P extends object>(provider: P, budget: Budget, options: { assets?: AssetEntry[] } = {}): P {
+export function guardAgentKit<P extends object>(provider: P, budget: Budget, options: GuardOptions = {}): P {
   const target = provider as P & { createX402Client?: unknown; [GUARDED_PROVIDER]?: unknown };
   const create = target?.createX402Client;
   if (typeof create !== 'function') {
@@ -449,6 +600,7 @@ export function guardAgentKit<P extends object>(provider: P, budget: Budget, opt
   }
   if (target[GUARDED_PROVIDER] !== undefined) throw new UsageError('this provider already has a budget guard');
   assetTable(options.assets ?? []); // a bad asset list fails here, not at the first payment
+  schemeSet(options.schemes ?? []);
   Object.defineProperty(provider, 'createX402Client', {
     value: async (walletProvider: unknown) =>
       guard(await (create as (wallet: unknown) => Promise<X402HookedClient>).call(provider, walletProvider), budget, options),

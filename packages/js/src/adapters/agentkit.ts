@@ -7,4 +7,4 @@
 //   import { guardAgentKit } from 'walletcap/agentkit';
 //   const x402 = guardAgentKit(new X402ActionProvider(), budget);
 export { guardAgentKit } from './_x402.js';
-export type { AssetEntry } from './_x402.js';
+export type { AssetEntry, GuardOptions } from './_x402.js';

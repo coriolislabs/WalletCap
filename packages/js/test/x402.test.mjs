@@ -272,7 +272,11 @@ test("a Permit2 payment, or one whose expiry walletcap can't read, counts until 
   // for as long as its terms allow.
   const { x402Client } = await import('@x402/core/client');
   const opaque = { scheme: 'opaque', createPaymentPayload: async version => ({ x402Version: version, payload: { signed: 'elsewhere' } }) };
-  const other = guard(new x402Client().register(NETWORK, opaque), budget);
+  // The guard counts a scheme it doesn't know only when its owner lists it.
+  const unlisted = guard(new x402Client().register(NETWORK, opaque), budget);
+  unlisted.setSpendControls(false);
+  await assert.rejects(unlisted.createPaymentPayload(kit.required(50_000, { scheme: 'opaque', maxTimeoutSeconds: 600 })), refusedFor('terms'));
+  const other = guard(new x402Client().register(NETWORK, opaque), budget, { schemes: ['opaque'] });
   other.setSpendControls(false);
   const signedAt = clock.now;
   const unread = await other.createPaymentPayload(kit.required(50_000, { scheme: 'opaque', maxTimeoutSeconds: 600 }));
@@ -310,4 +314,268 @@ test('an authorization valid longer than an hour is refused before it is signed'
   assert.equal((await budget.status()).payments, 0n);
   await client.createPaymentPayload(kit.required(10_000, { maxTimeoutSeconds: MAX_PAYMENT_TIMEOUT_SECONDS }));
   assert.equal((await budget.status()).inFlight, 10_000n);
+});
+
+// --- What the wallet signs, not only what the terms say ---------------------------------------
+
+test('x402 v1 terms that carry both amount fields are priced at the larger: the one a v1 client signs', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  // registerExactEvmScheme, x402's own helper, registers the v1 scheme on every network it knows.
+  // A v1 client signs maxAmountRequired; 0.4.1 priced `amount` when a payee sent both, so a $1,000
+  // authorization was held as one cent.
+  const { x402Client } = await import('@x402/core/client');
+  const { ExactEvmSchemeV1 } = await import('@x402/evm/exact/v1/client');
+  const { budget } = await setup();
+  const signer = {
+    address: kit.account.address,
+    signed: [],
+    async signTypedData(typed) {
+      this.signed.push(typed.message.value);
+      return kit.account.signTypedData(typed);
+    },
+  };
+  const client = guard(new x402Client().registerV1('base-sepolia', new ExactEvmSchemeV1(signer)), budget);
+  client.setSpendControls(false);
+  const v1 = fields => ({
+    x402Version: 1,
+    error: 'payment required',
+    accepts: [
+      {
+        scheme: 'exact',
+        network: 'base-sepolia',
+        asset: USDC,
+        payTo: PAY_TO,
+        maxTimeoutSeconds: 300,
+        resource: 'https://api.example/paid',
+        description: 'owned test resource',
+        mimeType: 'text/plain',
+        extra: { name: 'USDC', version: '2' },
+        ...fields,
+      },
+    ],
+  });
+  await assert.rejects(client.createPaymentPayload(v1({ amount: '10000', maxAmountRequired: '1000000000' })), refusedFor('per_payment'));
+  await assert.rejects(client.createPaymentPayload(v1({ amount: '1000000000', maxAmountRequired: '10000' })), refusedFor('per_payment'));
+  assert.deepEqual(signer.signed, [], 'nothing was signed');
+  assert.equal((await budget.status()).inFlight, 0n);
+
+  // What a v1 client signs is what is held.
+  const payload = await client.createPaymentPayload(v1({ amount: '1', maxAmountRequired: '50000' }));
+  assert.equal(payload.payload.authorization.value, '50000');
+  assert.deepEqual(signer.signed.map(String), ['50000']);
+  assert.equal((await budget.status()).inFlight, 50_000n);
+});
+
+test('an x402 amount is a whole number in decimal digits, or the payment is refused before signing', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { budget, client } = await setup();
+  // BigInt() reads '0x10' as 16 and ' 5 ' as 5; parseInt(…, 10) reads them as 0 and 5. A guard and
+  // a signer must never read one amount two ways, so only the one form every parser agrees on passes.
+  for (const amount of ['0x10', ' 50000', '50000 ', '5e4', '50000.0', '+5', '-5', '', '0b11', '\u0665', 1.5, -1, true, ['5']]) {
+    await assert.rejects(client.createPaymentPayload(kit.required(1, { amount })), refusedFor('terms'), JSON.stringify(amount));
+  }
+  await assert.rejects(client.createPaymentPayload(kit.required(1, { amount: undefined })), refusedFor('terms'));
+  assert.equal((await budget.status()).payments, 0n);
+  await client.createPaymentPayload(kit.required(1, { amount: 50_000 }));
+  assert.equal((await budget.status()).inFlight, 50_000n, 'a whole number is read too');
+});
+
+test('a batch-settlement channel is refused by default, and its deposit is what counts once its owner lists the scheme', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { x402Client } = await import('@x402/core/client');
+  const { BatchSettlementEvmScheme } = await import('@x402/evm/batch-settlement/client');
+  const terms = extra => kit.required(10_000, { scheme: 'batch-settlement', extra: { name: 'USDC', version: '2', receiverAuthorizer: PAY_TO, ...extra } });
+  const client = async (budget, options) => {
+    const made = guard(new x402Client().register(NETWORK, new BatchSettlementEvmScheme(kit.account)), budget, options);
+    made.setSpendControls(false);
+    return made;
+  };
+
+  // The request is one cent. The wallet would sign a deposit of five times that into the payee's
+  // channel, or of the minimum the payee announces: 0.4.1 held one cent for a $1,000 deposit.
+  const first = await setup();
+  const unlisted = await client(first.budget);
+  await assert.rejects(unlisted.createPaymentPayload(terms({ minDeposit: '1000000000' })), refusedFor('terms'));
+  await assert.rejects(unlisted.createPaymentPayload(terms()), /doesn't count the x402 scheme batch-settlement/);
+  assert.equal((await first.budget.status()).payments, 0n);
+
+  // Listed, the deposit the wallet signed is what is held: five cents here, the per-payment limit.
+  const second = await setup();
+  const listed = await client(second.budget, { schemes: ['batch-settlement'] });
+  const opened = await listed.createPaymentPayload(terms());
+  assert.equal(opened.payload.deposit.amount, '50000');
+  assert.equal((await second.budget.status()).inFlight, 50_000n, 'the deposit, not the one-cent request');
+
+  // A deposit over the limit is refused once it is signed, and the payload is discarded.
+  const third = await setup();
+  const greedy = await client(third.budget, { schemes: ['batch-settlement'] });
+  await assert.rejects(greedy.createPaymentPayload(terms({ minDeposit: '1000000000' })), refusedFor('per_payment'));
+  assert.equal((await third.budget.status()).payments, 0n);
+});
+
+test('a payment is held at what its payload signs for, when that is more than its terms', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { x402Client } = await import('@x402/core/client');
+  const { budget } = await setup({ perPayment: '$1', perDay: '$2' });
+  // A scheme that signs for more than the terms' amount, as a v1 client did with two amount fields.
+  const signs = value => ({
+    scheme: 'exact',
+    createPaymentPayload: async version => ({
+      x402Version: version,
+      payload: {
+        authorization: {
+          from: kit.account.address,
+          to: PAY_TO,
+          value,
+          validBefore: String(Math.floor(Date.now() / 1000) + 300),
+          nonce: `0x${'ab'.repeat(32)}`,
+        },
+      },
+    }),
+  });
+  const client = guard(new x402Client().register(NETWORK, signs('750000')), budget);
+  client.setSpendControls(false);
+  await client.createPaymentPayload(kit.required(10_000));
+  assert.equal((await budget.status()).inFlight, 750_000n);
+
+  const permit2 = {
+    scheme: 'exact',
+    createPaymentPayload: async version => ({
+      x402Version: version,
+      payload: {
+        permit2Authorization: {
+          from: kit.account.address,
+          permitted: { token: USDC, amount: '5000000' },
+          nonce: '7',
+          deadline: String(Math.floor(Date.now() / 1000) + 300),
+        },
+      },
+    }),
+  };
+  const over = guard(new x402Client().register(NETWORK, permit2), budget);
+  over.setSpendControls(false);
+  await assert.rejects(over.createPaymentPayload(kit.required(10_000)), refusedFor('per_payment'));
+  assert.equal((await budget.status()).inFlight, 750_000n, 'the $5 payload was refused, not held as one cent');
+});
+
+test('a client that hands each hook its own context is still counted: no payment passes for want of a check', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { budget } = await setup();
+  // The guard takes any client with x402's four hooks. One that builds a new context for the hook
+  // that runs after signing left 0.4.1 with no record of the check, and it held nothing.
+  const hooks = { before: [], after: [], failure: [], response: [] };
+  const client = {
+    onBeforePaymentCreation: hook => hooks.before.push(hook),
+    onAfterPaymentCreation: hook => hooks.after.push(hook),
+    onPaymentCreationFailure: hook => hooks.failure.push(hook),
+    onPaymentResponse: hook => hooks.response.push(hook),
+    async create(requirements) {
+      for (const hook of hooks.before) await hook({ selectedRequirements: requirements });
+      const paymentPayload = { x402Version: 2, payload: { signed: files++ }, accepted: requirements };
+      for (const hook of hooks.after) await hook({ selectedRequirements: requirements, paymentPayload });
+      return paymentPayload;
+    },
+  };
+  guard(client, budget);
+  const requirements = { scheme: 'exact', network: NETWORK, asset: USDC, amount: '50000', payTo: PAY_TO, maxTimeoutSeconds: 300 };
+  for (let i = 0; i < 3; i += 1) await client.create(requirements);
+  assert.equal((await budget.status()).inFlight, 150_000n);
+  await assert.rejects(client.create(requirements), refusedFor('budget'));
+  // Its after hook alone, with no check before it, prices the payment itself.
+  const lone = { selectedRequirements: { ...requirements, amount: '1000000' }, paymentPayload: { x402Version: 2, payload: {} } };
+  await assert.rejects(hooks.after[0](lone), refusedFor('per_payment'));
+});
+
+test('guard() refuses a list of schemes that is not a list of names', { skip: kit === null && 'the x402 devDependencies are not installed' }, async () => {
+  const { budget } = await setup();
+  for (const schemes of ['exact', [''], [7], null]) assert.throws(() => guard(kit.client(), budget, { schemes }), UsageError);
+});
+
+test("a payload a scheme's own failure hook recovers is held too, or never leaves the client", {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { x402Client } = await import('@x402/core/client');
+  // @x402/core returns a payload from a failure hook straight to the transport, past the hook
+  // that holds. @x402/svm's batch-settlement client signs a second accept that way; this scheme
+  // does the same in a few lines. 0.4.1 held nothing for it.
+  const recovering = {
+    scheme: 'exact',
+    createPaymentPayload: async () => {
+      throw new Error('the first accept needs an operator this client does not trust');
+    },
+    schemeHooks: {
+      onPaymentCreationFailure: async context => ({
+        recovered: true,
+        payload: { x402Version: 2, payload: { signed: ++files }, accepted: context.paymentRequired.accepts[1], resource: context.paymentRequired.resource },
+      }),
+    },
+  };
+  const { budget } = await setup();
+  const client = guard(new x402Client().register(NETWORK, recovering), budget);
+  client.setSpendControls(false);
+  const offer = (second, first = {}) => {
+    const required = kit.required(50_000, first);
+    required.accepts.push({ ...required.accepts[0], ...second });
+    return required;
+  };
+  for (let i = 0; i < 3; i += 1) await client.createPaymentPayload(offer({ amount: '50000' }));
+  assert.equal((await budget.status()).inFlight, 150_000n, 'each recovered payload was held');
+  await assert.rejects(client.createPaymentPayload(offer({ amount: '50000' })), refusedFor('budget'));
+
+  // The recovered accept is priced on its own terms, not the first one's: its amount, its
+  // scheme, its asset and its validity.
+  const { budget: second } = await setup();
+  const other = guard(new x402Client().register(NETWORK, recovering), second);
+  other.setSpendControls(false);
+  await assert.rejects(other.createPaymentPayload(offer({ amount: '1000000' }, { amount: '1' })), refusedFor('per_payment'));
+  await assert.rejects(other.createPaymentPayload(offer({ scheme: 'batch-settlement' })), refusedFor('terms'));
+  await assert.rejects(other.createPaymentPayload(offer({ asset: '0x0000000000000000000000000000000000000001' })), refusedFor('asset'));
+  await assert.rejects(other.createPaymentPayload(offer({ maxTimeoutSeconds: 86_400 })), refusedFor('timeout'));
+  assert.equal((await second.status()).payments, 0n);
+});
+
+test('a listed batch-settlement is still refused where its deposit cannot be read', {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { x402Client } = await import('@x402/core/client');
+  const { budget } = await setup();
+  const SOLANA = 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp';
+  const usdc = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  let signed = 0;
+  const channel = {
+    scheme: 'batch-settlement',
+    createPaymentPayload: async version => ({ x402Version: version, payload: { transaction: `deposit-${++signed}` } }),
+  };
+  const client = guard(new x402Client().register(SOLANA, channel), budget, { schemes: ['batch-settlement'] });
+  client.setSpendControls(false);
+  // On Solana the deposit is inside a transaction walletcap doesn't decode: $15 was signed there
+  // for $0.15 counted. Listed or not, the scheme is refused on a chain where it can't be read.
+  await assert.rejects(
+    client.createPaymentPayload(kit.required(50_000, { scheme: 'batch-settlement', network: SOLANA, asset: usdc })),
+    /can't count a batch-settlement payment on solana:/,
+  );
+  assert.equal(signed, 0);
+});
+
+test("the payee's word for a transaction is kept only if it could be one", {
+  skip: kit === null && 'the x402 devDependencies are not installed',
+}, async () => {
+  const { budget, client } = await setup();
+  // A "transaction" of terminal controls and a forged row, or one too long to keep, made 0.4.1's
+  // settle throw PaymentNotRecorded at the caller. It settles, with no evidence.
+  const forged = '\u001b[2K\r2026-11-10T00:00:00Z      $0.00  void       safe to void';
+  for (const transaction of [forged, 'x'.repeat(5000), 12345, { a: 1 }]) {
+    await pay(client, 10_000, { settleResponse: { success: true, transaction, network: NETWORK } });
+  }
+  await pay(client, 10_000);
+  const history = await budget.history();
+  assert.deepEqual(
+    history.map(payment => [payment.status, payment.tx]),
+    [['settled', TX], ...Array(4).fill(['settled', null])],
+  );
 });

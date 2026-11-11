@@ -226,3 +226,63 @@ test('walletcap-mcp runs the server Coinbase installed, not its installer', asyn
     ['trade'],
   );
 });
+
+test('walletcap-mcp: only the methods it knows reach the server, as it parsed them, and every tool list is filtered', async () => {
+  const path = join(DIR, 'methods.sqlite');
+  const log = join(DIR, 'methods.log');
+  const lines = join(DIR, 'methods.lines');
+  writeFileSync(log, '');
+  writeFileSync(lines, '');
+  (await openBudget({ wallet: WALLET, path, perPayment: '$0.05', perDay: '$0.15', create: true })).close();
+  const proxy = spawn(process.execPath, [MCP, '--wallet', WALLET, '--path', path, '--', process.execPath, FAKE_MCP], {
+    env: { ...process.env, FAKE_MCP_LOG: log, FAKE_MCP_LINES: lines },
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  const replies = [];
+  createInterface({ input: proxy.stdout }).on('line', line => replies.push(JSON.parse(line)));
+  const send = line => proxy.stdin.write(`${typeof line === 'string' ? line : JSON.stringify(line)}\n`);
+  const settle = async count => {
+    for (let i = 0; i < 200 && replies.length < count; i += 1) await new Promise(done => setTimeout(done, 25));
+    assert.equal(replies.length, count, JSON.stringify(replies));
+  };
+  try {
+    // 0.4 checked tools/call and forwarded every other method as it came: a method of the
+    // server's own, outside MCP, went straight to the wallet.
+    send({ jsonrpc: '2.0', id: 1, method: 'wallet/trade', params: { amount: '1000' } });
+    send({ jsonrpc: '2.0', method: 'wallet/trade', params: { amount: '1000' } }); // no id: dropped, unanswered
+    send('7');
+    await settle(2);
+    assert.deepEqual(replies[0], { jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'walletcap does not forward that method to the wallet' } });
+    assert.equal(replies[1].error.code, -32600);
+
+    // One line, two "method" keys: this parser reads the last, another may read the first. What
+    // reaches the server is what was checked, written out again.
+    send('{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"trade","arguments":{}},"method":"ping"}');
+    await settle(3);
+
+    // A tool list is filtered whatever id it answers: a ping sharing the id, and a null id.
+    send({ jsonrpc: '2.0', id: 3, method: 'ping' });
+    send({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
+    send({ jsonrpc: '2.0', id: null, method: 'tools/list' });
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    await settle(6);
+    const listed = replies.filter(reply => Array.isArray(reply.result?.tools));
+    assert.equal(listed.length, 2);
+    for (const reply of listed) {
+      assert.deepEqual(
+        reply.result.tools.map(tool => tool.name),
+        ['make_http_request_with_x402', 'send', 'get_wallet_balance'],
+      );
+    }
+  } finally {
+    proxy.stdin.end();
+    await new Promise(done => proxy.on('exit', done));
+  }
+  const reached = readFileSync(lines, 'utf8').trim().split('\n');
+  assert.deepEqual(
+    reached.map(line => JSON.parse(line).method),
+    ['ping', 'ping', 'tools/list', 'tools/list', 'notifications/initialized'],
+  );
+  for (const line of reached) assert.equal(line.match(/"method"/g).length, 1, line);
+  assert.equal(readFileSync(log, 'utf8'), '', 'no tool was called');
+});
