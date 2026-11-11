@@ -24,6 +24,8 @@ import {
 import { openOwner, type Owner } from '../core/owner.js';
 import { toWire } from '../core/wire.js';
 import { doctor, doctorText } from './doctor.js';
+import { initText, RAILS, railOf, snippetFor } from './init.js';
+import { watch } from './watch.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -52,6 +54,12 @@ Commands
   doctor               Check the budget file before you rely on it: its permissions, its
                        filesystem, its format, and that the rule's triggers are all in place.
                        It reads only, and exits 1 if a check fails
+  watch                Every entry the ledger takes, as it happens, while an agent runs: each
+                       hold, settlement and void, and what the budget has left after it. It
+                       reads only, and runs until you interrupt it or --for has passed
+  init                 From nothing to a guarded agent: set the wallet's limits as set does,
+                       check the file as doctor does, and print the code that puts the budget
+                       in front of the agent's payments, for --rail
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget.
                        For its MCP server, use the walletcap-mcp package: npx walletcap-mcp --wallet <address>
 
@@ -63,6 +71,9 @@ Options
   --max-payments <n|none>        Most payments in one window
   --limit <n>          How many payments history shows (default 20)
   --tx <hash>          With settle: the transaction that shows it paid
+  --since <30m|24h|7d> With watch: first print the entries of that long ago until now
+  --for <30s|10m|1h>   With watch: stop after that long
+  --rail <name>        With init: the code to print, for ${RAILS.join(', ')} (default ${RAILS[0]})
   --json               Machine-readable output
   --version            The version
 
@@ -83,6 +94,9 @@ const OPTIONS = {
   'older-than': { type: 'string' },
   tx: { type: 'string' },
   evidence: { type: 'string' },
+  since: { type: 'string' },
+  for: { type: 'string' },
+  rail: { type: 'string' },
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -103,6 +117,9 @@ interface Values {
   'older-than'?: string;
   tx?: string;
   evidence?: string;
+  since?: string;
+  for?: string;
+  rail?: string;
   json?: boolean;
   help?: boolean;
   version?: boolean;
@@ -218,9 +235,18 @@ const paymentFor = async (owner: Owner, values: Values, id: string, path: string
   return row;
 };
 
+// set's work, which init shares: the limits named on the command line, on the wallet's budget. It
+// creates the file, and the budget when the limits include a rolling one.
+const setLimits = async (values: Values, path: string, limits: LimitOptions, command: string): Promise<{ wallet: string; status: Status }> => {
+  if (values.wallet === undefined && (await wallets(path)).length !== 1) throw new Usage(`${command} needs --wallet <address>`);
+  const wallet = await walletOf(values, path);
+  return { wallet, status: await withOwner(path, owner => owner.setLimits(wallet, limits), true) };
+};
+
 // What a command prints, and the exit code when it isn't 0: a check that says no, a doctor that
-// finds a problem. Both still print their answer to stdout.
-type Output = string | { text: string; code: number };
+// finds a problem. Both still print their answer to stdout. watch prints as it goes, and hands
+// back no text.
+type Output = string | { text: string | null; code: number };
 type Command = (values: Values, path: string, rest: string[]) => Promise<Output>;
 
 const commands: Record<string, Command> = {
@@ -248,9 +274,7 @@ const commands: Record<string, Command> = {
   async set(values, path) {
     const limits = limitsOf(values);
     if (Object.keys(limits).length === 0) throw new Usage('set needs a limit, like --per-day 150 or --per-payment 50');
-    if (values.wallet === undefined && (await wallets(path)).length !== 1) throw new Usage('set needs --wallet <address>');
-    const wallet = await walletOf(values, path);
-    const status = await withOwner(path, owner => owner.setLimits(wallet, limits), true);
+    const { wallet, status } = await setLimits(values, path, limits, 'set');
     if (values.json) return json(status);
     const now = describeLimits({ cap: status.cap, windowMs: status.windowMs, perPayment: status.perPayment, maxPayments: status.maxPayments });
     return `${shortWallet(wallet)}: ${now}.\nWhat was spent still counts: ${formatUsd(status.spent)} spent, ${formatUsd(status.inFlight)} in flight, ${formatUsd(status.remaining)} left.`;
@@ -367,6 +391,34 @@ const commands: Record<string, Command> = {
     const report = doctor(path, { wallet: values.wallet });
     return { text: values.json ? json(report) : doctorText(report), code: report.ok ? 0 : 1 };
   },
+
+  async watch(values, path) {
+    await watch(path, { wallet: values.wallet, since: values.since, for: values.for, json: values.json, plain });
+    return { text: null, code: 0 };
+  },
+
+  async init(values, path) {
+    const rail = railOf(values.rail ?? RAILS[0]);
+    if (rail === undefined) throw new Usage(`unknown rail ${values.rail}: init prints the code for one of ${RAILS.join(', ')}`);
+    const limits = limitsOf(values);
+    let wallet: string;
+    let status: Status;
+    if (Object.keys(limits).length > 0) {
+      ({ wallet, status } = await setLimits(values, path, limits, 'init'));
+    } else {
+      // No limit named: the budget is there already, and init changes nothing in it.
+      const known = await wallets(path);
+      if (values.wallet === undefined && known.length !== 1) throw new Usage('init needs --wallet <address>');
+      const named = await walletOf(values, path);
+      if (!known.includes(named)) throw new Usage(`${shortWallet(named)} has no budget yet: init needs a rolling limit to create it, like --per-day 150`);
+      wallet = named;
+      status = await withOwner(path, owner => owner.status(named));
+    }
+    const report = doctor(path, { wallet });
+    const result = { status, doctor: report, rail, snippet: snippetFor(rail, wallet) };
+    const text = values.json ? json(result) : initText(result, { aside: path !== resolve(defaultBudgetPath()) });
+    return { text, code: report.ok ? 0 : 1 };
+  },
 };
 
 // A payment the CDP store holds isn't one that never left: CDP signed it, and its payee can
@@ -402,7 +454,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   }
   try {
     const output = await run(values, pathOf(values), rest);
-    process.stdout.write(`${typeof output === 'string' ? output : output.text}\n`);
+    const text = typeof output === 'string' ? output : output.text;
+    if (text !== null) process.stdout.write(`${text}\n`);
     return typeof output === 'string' ? 0 : output.code;
   } catch (error) {
     if (error instanceof Usage) {

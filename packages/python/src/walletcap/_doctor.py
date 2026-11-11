@@ -405,24 +405,39 @@ def doctor(path: Path, *, wallet: str | None = None) -> dict[str, Any]:
         connection.close()
 
 
-def doctor_text(report: dict[str, Any]) -> str:
-    """The report as the command prints it."""
-
-    checks = report["checks"]
-    width = max(len(check["id"]) for check in checks)
-    failed = sum(1 for check in checks if check["status"] == "fail")
-    warned = sum(1 for check in checks if check["status"] == "warn")
-    if failed == 0 and warned == 0:
-        verdict = "Everything checks out."
-    else:
-        parts = []
-        if failed:
-            parts.append(f"{failed} problem{_plural(failed)}")
-        if warned:
-            parts.append(f"{warned} warning{_plural(warned)}")
-        verdict = ", ".join(parts) + "."
-    lines = [
+def _check_lines(checks: list[dict[str, Any]]) -> list[str]:
+    width = max((len(check["id"]) for check in checks), default=0)
+    return [
         f"  {_LABEL[check['status']].ljust(4)}  {check['id'].ljust(width)}  {check['message']}"
         for check in checks
     ]
-    return "\n".join([f"Budget file {report['path']}", "", *lines, "", verdict])
+
+
+def _verdict(report: dict[str, Any]) -> str:
+    failed = sum(1 for check in report["checks"] if check["status"] == "fail")
+    warned = sum(1 for check in report["checks"] if check["status"] == "warn")
+    if failed == 0 and warned == 0:
+        return "Everything checks out."
+    parts = []
+    if failed:
+        parts.append(f"{failed} problem{_plural(failed)}")
+    if warned:
+        parts.append(f"{warned} warning{_plural(warned)}")
+    return ", ".join(parts) + "."
+
+
+def doctor_text(report: dict[str, Any]) -> str:
+    """The report as the command prints it."""
+
+    lines = _check_lines(report["checks"])
+    return "\n".join([f"Budget file {report['path']}", "", *lines, "", _verdict(report)])
+
+
+def doctor_findings(report: dict[str, Any]) -> str:
+    """The report as init prints it: each warning and failure, then the verdict.
+
+    The verdict alone when there are none.
+    """
+
+    found = [check for check in report["checks"] if check["status"] in ("warn", "fail")]
+    return "\n".join([*_check_lines(found), _verdict(report)])

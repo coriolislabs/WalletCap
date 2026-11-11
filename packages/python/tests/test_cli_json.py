@@ -29,6 +29,7 @@ from walletcap import NotSent, _clock, open_budget, open_owner  # noqa: E402
 NODE = shutil.which("node")
 WALLET = "0xd797ead28c38575fdf4fc523866287372340ca02"
 TX = "0x" + "ab" * 32
+RAILS = ("pay", "x402", "cdp", "agentkit", "awal", "mcp", "python")
 # Fields that depend on when the command ran: compared within a minute, not exactly.
 MOMENTS = {"age_ms", "counts_until"}
 # Fields that name the runtime, not the budget: Node and Python each carry their own SQLite.
@@ -39,9 +40,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run(command: list[str], path: Path, *args: str, code: int = 0) -> Any:
+def _output(command: list[str], path: Path, *args: str, code: int = 0) -> str:
     done = subprocess.run(
-        [*command, "--path", str(path), *args, "--json"],
+        [*command, "--path", str(path), *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -50,7 +51,11 @@ def _run(command: list[str], path: Path, *args: str, code: int = 0) -> Any:
         timeout=60,
     )
     assert done.returncode == code, done.stderr
-    return json.loads(done.stdout)
+    return done.stdout
+
+
+def _run(command: list[str], path: Path, *args: str, code: int = 0) -> Any:
+    return json.loads(_output(command, path, *args, "--json", code=code))
 
 
 def _same(npm: Any, python: Any, at: str = "") -> None:
@@ -134,6 +139,9 @@ def budget_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ("check", "5", "--wallet", WALLET),
         ("doctor",),
         ("doctor", "--wallet", WALLET),
+        ("init",),
+        ("init", "--wallet", WALLET, "--per-day", "200", "--per-payment", "none"),
+        *(("init", "--rail", rail) for rail in RAILS),
         # A payment the budget would refuse, and a wallet with no budget: each exits 1, and still
         # prints its answer.
         ("check", "60", "exits 1"),
@@ -158,3 +166,79 @@ def test_both_command_lines_print_the_same_json(
     text = json.dumps(npm).replace(escaped[0], escaped[1])
     _same(json.loads(text), python)
     _shape(python)
+
+
+def _copies(budget_file: Path, tmp_path: Path) -> list[tuple[list[str], Path]]:
+    """Each command line, with its own copy of the budget file."""
+
+    assert NODE is not None
+    npm_file, python_file = tmp_path / "npm.sqlite", tmp_path / "python.sqlite"
+    shutil.copyfile(budget_file, npm_file)
+    shutil.copyfile(budget_file, python_file)
+    return [([NODE, str(JS_CLI)], npm_file), ([sys.executable, "-m", "walletcap"], python_file)]
+
+
+@pytest.mark.parametrize(
+    ("args", "entries"),
+    [
+        # The fixture's ledger holds nine entries, two of them two hours old.
+        (("--since", "3h"), 9),
+        (("--since", "1h"), 7),
+        (("--since", "3h", "--wallet", WALLET), 9),
+        ((), 0),
+    ],
+    ids=lambda value: " ".join(value) if isinstance(value, tuple) else str(value),
+)
+def test_both_command_lines_watch_the_same_json_lines(
+    args: tuple[str, ...], entries: int, budget_file: Path, tmp_path: Path
+) -> None:
+    # watch prints JSON Lines: one object an entry, not one document.
+    npm, python = (
+        [
+            json.loads(line)
+            for line in _output(command, file, "watch", *args, "--for", "300ms", "--json").split(
+                "\n"
+            )
+            if line
+        ]
+        for command, file in _copies(budget_file, tmp_path)
+    )
+    assert len(python) == entries
+    _same(npm, python)
+    _shape(python)
+    assert [list(entry) for entry in npm] == [list(entry) for entry in python], "in one key order"
+
+
+def test_both_command_lines_init_a_fresh_file_the_same(tmp_path: Path) -> None:
+    assert NODE is not None
+    npm_file, python_file = (
+        tmp_path / "npm" / "budget.sqlite",
+        tmp_path / "python" / "budget.sqlite",
+    )
+    args = ("init", "--wallet", WALLET, "--per-day", "150", "--per-payment", "50", "--rail", "mcp")
+    npm = _run([NODE, str(JS_CLI)], npm_file, *args)
+    python = _run([sys.executable, "-m", "walletcap"], python_file, *args)
+    escaped = [json.dumps(str(file))[1:-1] for file in (npm_file, python_file)]
+    _same(json.loads(json.dumps(npm).replace(escaped[0], escaped[1])), python)
+    _shape(python)
+    assert python["doctor"]["ok"] is True
+    # Either command line reads the file the other made.
+    assert _run([NODE, str(JS_CLI)], python_file, "init")["status"] == python["status"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("watch", "--since", "3h", "--for", "300ms"),
+        ("watch", "--since", "3h", "--for", "300ms", "--wallet", WALLET),
+        *(("init", "--rail", rail) for rail in RAILS),
+    ],
+    ids=" ".join,
+)
+def test_both_command_lines_print_the_same_text_for_watch_and_init(
+    args: tuple[str, ...], budget_file: Path, tmp_path: Path
+) -> None:
+    (npm_command, npm_file), (python_command, python_file) = _copies(budget_file, tmp_path)
+    npm = _output(npm_command, npm_file, *args)
+    python = _output(python_command, python_file, *args)
+    assert npm.replace(str(npm_file), str(python_file)) == python
