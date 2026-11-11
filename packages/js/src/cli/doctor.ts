@@ -308,18 +308,24 @@ export function doctor(path: string, { wallet }: { wallet?: string | undefined }
 
 const LABEL: Readonly<Record<DoctorStatus, string>> = { ok: 'ok', warn: 'warn', fail: 'FAIL', skipped: 'skip' };
 
-/** The report as the command prints it. */
-export function doctorText(report: DoctorReport): string {
-  const width = Math.max(...report.checks.map(check => check.id.length));
+const checkLines = (checks: DoctorCheck[]): string[] => {
+  const width = Math.max(0, ...checks.map(check => check.id.length));
+  return checks.map(check => `  ${LABEL[check.status].padEnd(4)}  ${check.id.padEnd(width)}  ${check.message}`);
+};
+
+const verdictOf = (report: DoctorReport): string => {
   const failed = report.checks.filter(check => check.status === 'fail').length;
   const warned = report.checks.filter(check => check.status === 'warn').length;
   const counts = [failed > 0 ? `${failed} problem${plural(failed)}` : '', warned > 0 ? `${warned} warning${plural(warned)}` : ''].filter(Boolean);
-  const verdict = counts.length === 0 ? 'Everything checks out.' : `${counts.join(', ')}.`;
-  return [
-    `Budget file ${report.path}`,
-    '',
-    ...report.checks.map(check => `  ${LABEL[check.status].padEnd(4)}  ${check.id.padEnd(width)}  ${check.message}`),
-    '',
-    verdict,
-  ].join('\n');
+  return counts.length === 0 ? 'Everything checks out.' : `${counts.join(', ')}.`;
+};
+
+/** The report as the command prints it. */
+export function doctorText(report: DoctorReport): string {
+  return [`Budget file ${report.path}`, '', ...checkLines(report.checks), '', verdictOf(report)].join('\n');
+}
+
+/** The report as init prints it: each warning and failure, then the verdict; the verdict alone when there are none. */
+export function doctorFindings(report: DoctorReport): string {
+  return [...checkLines(report.checks.filter(check => check.status === 'warn' || check.status === 'fail')), verdictOf(report)].join('\n');
 }

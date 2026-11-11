@@ -19,6 +19,8 @@ from typing import Any
 
 from walletcap import __version__
 from walletcap._doctor import doctor, doctor_text
+from walletcap._init import RAILS, init_text, snippet_for
+from walletcap._watch import watch
 from walletcap.budget import UNSET, Budget, PaymentRecord, Status
 from walletcap.errors import BudgetUnavailable, UsageError, is_walletcap_error
 from walletcap.money import (
@@ -50,10 +52,13 @@ _COMMAND_NAMES = [
     "settle",
     "check",
     "doctor",
+    "watch",
+    "init",
 ]
 # What a command prints, and the exit code when it isn't 0: a check that says no, a doctor that
-# finds a problem. Both still print their answer to stdout.
-_Output = str | tuple[str, int]
+# finds a problem. Both still print their answer to stdout. watch prints as it goes, and hands
+# back no text.
+_Output = str | tuple[str | None, int]
 
 
 class _ArgumentError(Exception):
@@ -105,6 +110,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--older-than", help="with void --all-unknown: 24h, 7d, 30m")
     parser.add_argument("--tx", help="with settle: the transaction that shows it paid")
     parser.add_argument("--evidence", help="with void or settle: what shows it")
+    parser.add_argument(
+        "--since", help="with watch: first print the entries of that long ago until now, like 30m"
+    )
+    parser.add_argument(
+        "--for", dest="lasting", metavar="FOR", help="with watch: stop after that long, like 30s"
+    )
+    parser.add_argument(
+        "--rail",
+        help=f"with init: the code to print, for {', '.join(RAILS)} (default {RAILS[0]})",
+    )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
     return parser
 
@@ -215,7 +230,9 @@ def _status(args: argparse.Namespace, path: Path) -> str:
     return _json(status) if args.json else _detail(status)
 
 
-def _set(args: argparse.Namespace, path: Path) -> str:
+def _limits(args: argparse.Namespace) -> dict[str, Any] | None:
+    """The limits named on the command line, as the owner's handle takes them, or None."""
+
     def none(value: str | None) -> object:
         if value is None:
             return UNSET
@@ -239,11 +256,29 @@ def _set(args: argparse.Namespace, path: Path) -> str:
     # "none" is a limit too: it takes the per-payment limit, or the count's, away.
     named = [key for key, value in limits.items() if value is not None and value is not UNSET]
     if not named and args.per_payment is None and args.max_payments is None:
-        raise _ArgumentError("set needs a limit, like --per-day 150 or --per-payment 50")
+        return None
+    return limits
+
+
+def _set_limits(
+    args: argparse.Namespace, path: Path, limits: dict[str, Any], command: str
+) -> tuple[str, Status]:
+    """set's work, which init shares: the limits, on the wallet's budget.
+
+    It creates the file, and the budget when the limits include a rolling one.
+    """
+
     if args.wallet is None and len(_wallets(path)) != 1:
-        raise _ArgumentError("set needs --wallet <address>")
+        raise _ArgumentError(f"{command} needs --wallet <address>")
     wallet = _wallet(args, path)
-    status = _owner(path, create=True).set_limits(wallet, **limits)
+    return wallet, _owner(path, create=True).set_limits(wallet, **limits)
+
+
+def _set(args: argparse.Namespace, path: Path) -> str:
+    limits = _limits(args)
+    if limits is None:
+        raise _ArgumentError("set needs a limit, like --per-day 150 or --per-payment 50")
+    wallet, status = _set_limits(args, path, limits, "set")
     if args.json:
         return _json(status)
     now = describe_limits(
@@ -461,6 +496,53 @@ def _doctor(args: argparse.Namespace, path: Path) -> _Output:
     return _json(report) if args.json else doctor_text(report), 0 if report["ok"] else 1
 
 
+def _watch(args: argparse.Namespace, path: Path) -> _Output:
+    """Every entry the ledger takes, as it happens. It reads only."""
+
+    watch(
+        path,
+        wallet=args.wallet,
+        since=args.since,
+        lasting=args.lasting,
+        as_json=args.json,
+        plain=_plain,
+    )
+    return None, 0
+
+
+def _init(args: argparse.Namespace, path: Path) -> _Output:
+    """Set the limits as set does, check the file as doctor does, and print the rail's code."""
+
+    rail = RAILS[0] if args.rail is None else args.rail
+    if rail not in RAILS:
+        raise _ArgumentError(
+            f"unknown rail {rail}: init prints the code for one of {', '.join(RAILS)}"
+        )
+    limits = _limits(args)
+    if limits is not None:
+        wallet, status = _set_limits(args, path, limits, "init")
+    else:
+        # No limit named: the budget is there already, and init changes nothing in it.
+        known = _wallets(path)
+        if args.wallet is None and len(known) != 1:
+            raise _ArgumentError("init needs --wallet <address>")
+        wallet = _wallet(args, path)
+        if wallet not in known:
+            raise _ArgumentError(
+                f"{short_wallet(wallet)} has no budget yet: init needs a rolling limit to "
+                "create it, like --per-day 150"
+            )
+        status = _owner(path).status(wallet)
+    report = doctor(path, wallet=wallet)
+    snippet = snippet_for(rail, wallet)
+    code = 0 if report["ok"] else 1
+    if args.json:
+        result = {"status": status, "doctor": report, "rail": rail, "snippet": snippet}
+        return _json(result), code
+    aside = path != expand_home(default_budget_path()).absolute()
+    return init_text(status, report, snippet, aside=aside), code
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace, Path], _Output]] = {
     "status": _status,
     "set": _set,
@@ -472,6 +554,8 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace, Path], _Output]] = {
     "settle": _settle,
     "check": _check,
     "doctor": _doctor,
+    "watch": _watch,
+    "init": _init,
 }
 
 
@@ -488,12 +572,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     _utf8(sys.stderr)
     args = _parser().parse_args(argv)
     path = expand_home(args.path if args.path is not None else default_budget_path()).absolute()
-    code = 0
     try:
         output = _COMMANDS[args.command](args, path)
-        if isinstance(output, tuple):
-            output, code = output
-        print(output)
+        text, code = output if isinstance(output, tuple) else (output, 0)
+        if text is not None:
+            print(text)
     except _ArgumentError as error:
         print(error, file=sys.stderr)
         return 2
