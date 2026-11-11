@@ -72,16 +72,16 @@ every other:
    ```console
    $ mkdir walletcap-mcp-placeholder && cd walletcap-mcp-placeholder
    $ npm init -y >/dev/null
-   $ npm pkg set name=walletcap-mcp version=0.0.0 description="Name reserved for the walletcap MCP proxy; use 0.4.0 or later." license=Apache-2.0
+   $ npm pkg set name=walletcap-mcp version=0.0.0 description="Name reserved for the walletcap MCP proxy; use 0.5.0 or later." license=Apache-2.0
    $ npm publish --access public
    ```
 
 2. On npmjs.com, add the trusted publisher for `walletcap-mcp`: repository
    `coriolislabs/WalletCap`, workflow `publish.yml`, environment `npm`.
-3. Wait until `walletcap` 0.4.0 is on npm: `walletcap-mcp` depends on `walletcap ^0.4.0`.
-4. Tag `mcp-v0.4.0` on `main` and publish a GitHub Release from it. The workflow tests and packs
+3. Wait until `walletcap` 0.5.0 is on npm: `walletcap-mcp` depends on `walletcap ^0.5.0`.
+4. Tag `mcp-v0.5.0` on `main` and publish a GitHub Release from it. The workflow tests and packs
    `packages/mcp` and publishes it with provenance.
-5. Deprecate the placeholder: `npm deprecate walletcap-mcp@0.0.0 "Placeholder; use 0.4.0 or later."`
+5. Deprecate the placeholder: `npm deprecate walletcap-mcp@0.0.0 "Placeholder; use 0.5.0 or later."`
 
 ## The MCP Registry
 

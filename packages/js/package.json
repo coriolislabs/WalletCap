@@ -1,6 +1,6 @@
 {
   "name": "walletcap",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Spend limits for AI agent wallets: a per-payment cap and rolling 24-hour USDC budget that holds across restarts, replicas on one host and payment rails, kept in one SQLite ledger. Adapters for x402, Coinbase CDP spend controls, AgentKit and the Agentic Wallet.",
   "license": "Apache-2.0",
   "author": "Coriolis Labs Inc.",

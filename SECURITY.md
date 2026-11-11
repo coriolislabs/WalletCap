@@ -5,7 +5,8 @@ around its count, its reservations, or its failure modes, we want to know.
 
 ## Supported versions
 
-The latest **0.4.x** release is supported. 0.4.0 moved the spend rule into SQL
+The latest **0.5.x** release is supported. 0.4.x installs should upgrade: 0.5.0 fixed ways past
+the x402 guard, the Agentic Wallet wrapper and `pay()`. 0.4.0 moved the spend rule into SQL
 that both packages run (spec/schema.sql), so a report against that rule applies
 to both languages at once. 0.2.x installs should upgrade before relying on the
 guard: 0.3.0 fixed ways past the cap through unknown outcomes, a payee's word

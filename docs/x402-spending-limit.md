@@ -86,7 +86,7 @@ and $150 in any 24 hours, in USDC on Base. Results from 6 November 2026:
 
 The shared-store row varies from run to run: in eight runs it was $100 over five times and
 $200 over three times. The guard column was $0 over in every run. The crash test in the
-repository now runs walletcap 0.4.0, and its suite fails if the guard lets anything past the cap.
+repository now runs walletcap 0.5.0, and its suite fails if the guard lets anything past the cap.
 
 ## Links
 

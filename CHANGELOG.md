@@ -1,12 +1,14 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-10
 
 A security review of 0.4.1 found ways past the guard, fixed here, and this release adds two
 commands for scripts and deploys. It refuses things 0.4 let through (x402 schemes it doesn't
 count, amounts it can't read one way only, awal commands and MCP methods it doesn't know), so it
-is a breaking release: it goes out as 0.5.0.
+is a breaking release. Upgrade from 0.4: the budget file's format is unchanged.
+
+`walletcap-mcp` 0.5.0 is its first release on npm, and needs walletcap 0.5.0 or later.
 
 ### Security: the x402 guard
 

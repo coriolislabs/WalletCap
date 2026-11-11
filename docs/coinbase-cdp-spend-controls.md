@@ -90,7 +90,7 @@ held to $50 a payment and $150 in any 24 hours, in USDC on Base. Results from 6 
 The shared-store row varies from run to run: in eight runs it was $100 over five times and
 $200 over three times. The cdpStore column was $0 over in every run. In the shared-store row,
 walletcap's store also answers each call after 1 ms. The crash test in the repository now runs
-walletcap 0.4.0, and its suite fails if the cdpStore lets anything past the cap.
+walletcap 0.5.0, and its suite fails if the cdpStore lets anything past the cap.
 
 ## Links
 

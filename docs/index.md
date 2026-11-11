@@ -51,7 +51,7 @@ Past the $150 cap: $1,700 and 1,000 EURC with CDP's controls, $300 with Spend Pe
 with walletcap's guard, its cdpStore and AccountCapSpender. The shared-store row varies from
 run to run: in eight runs on 6 November 2026 it was $100 over five times and $200 over three
 times. Those runs used `@coinbase/cdp-sdk` 1.61.0, `@x402/core` 2.30.0, SpendPermissionManager
-1.0.0 and walletcap 0.2.3. The crash test in the repository now runs walletcap 0.4.0, and its
+1.0.0 and walletcap 0.2.3. The crash test in the repository now runs walletcap 0.5.0, and its
 suite fails if the guard or the cdpStore lets anything past the cap.
 
 Add `--agentkit` for Coinbase AgentKit's row: the agent approves a 1¢ offer, and AgentKit signs
