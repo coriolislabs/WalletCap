@@ -47,7 +47,8 @@ test('the objects the API returns have the shared fields, and no others', async 
   // Two hours ago: an x402 payment that failed, whose authorization has since expired.
   const now = Date.now();
   setClock(() => now - 7_200_000);
-  const budget = await walletcap.openBudget({ wallet: WALLET, path });
+  const decisions = [];
+  const budget = await walletcap.openBudget({ wallet: WALLET, path, onDecision: decision => decisions.push(decision) });
   const stale = await budget.hold('$4', { rail: 'x402', settlesBy: new Date(now - 3_600_000) });
   await stale.note('unknown', 'receipt timeout');
   resetClock();
@@ -61,6 +62,7 @@ test('the objects the API returns have the shared fields, and no others', async 
     HeldPayment: (await budget.holds())[0],
     BudgetLimits: (await owner.budgets())[0],
     VoidedPayment: (await owner.voidUnknown(WALLET, { olderThan: '1h' }))[0],
+    Decision: decisions[0],
   };
   for (const [name, fields] of Object.entries(NAMES.fields)) {
     const expected = name === 'Status' ? [...fields, ...NAMES.properties.Status] : fields;

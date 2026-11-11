@@ -12,6 +12,7 @@ import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SCHEMA_SQL, UPGRADE_SQL } from './_spec.generated.js';
 import { attachClock, clockTick, detachClock } from './_clock.js';
+import { stampLedgerTime } from './_decisions.js';
 import { loadSqlite } from './_sqlite.js';
 import { BudgetRefused, BudgetUnavailable, isWalletcapError, type RefusalSource, UsageError } from './errors.js';
 import { formatAmount, formatWindow, MAX_AMOUNT, type Micros, normalizeWallet, shortWallet } from './money.js';
@@ -77,6 +78,11 @@ export interface PaymentRow {
   now: bigint;
   settled_by: string | null;
   noted: string | null;
+}
+
+/** A payment after a move. `moved` is false when the call appended nothing: the move was already made. */
+export interface Moved extends PaymentRow {
+  moved: boolean;
 }
 
 /** What counts against a budget now: the status statement. */
@@ -340,8 +346,9 @@ const heldNote = (heldPayments: bigint, holds: OpenHold[]): string => {
  */
 export function refusal(why: RefusalRow, amount: bigint, limits: OwnLimits, openIds: () => OpenHold[]): BudgetRefused {
   const { source } = why;
+  // Dated with the ledger's time for it, which the decision log reports.
   const refused = (code: 'frozen' | 'per_payment' | 'budget' | 'max_payments', message: string, brief = message): BudgetRefused =>
-    new BudgetRefused(code, message, { brief, source });
+    stampLedgerTime(new BudgetRefused(code, message, { brief, source }), why.now);
   const name = shortWallet(why.wallet);
   const money = (value: bigint): string => formatAmount(value, why.unit);
   const window = formatWindow(why.window_ms);
@@ -880,9 +887,9 @@ export class Ledger {
 
   // A transition: append it if allowed, else find out whether it was already done, or why not.
   // `mine` says whether the caller has the payment's token; the owner's moves don't ask.
-  #move(statement: string, payment: string, args: Args, refused: (current: PaymentRow, mine: () => boolean) => string | null): Promise<PaymentRow> {
+  #move(statement: string, payment: string, args: Args, refused: (current: PaymentRow, mine: () => boolean) => string | null): Promise<Moved> {
     const id = paymentId(payment);
-    return this.#write(() => {
+    return this.#write((): Moved => {
       const moved = this.#get(statement, { payment: id, ...args });
       const current = this.#get<PaymentRow>('payment', { payment: id });
       if (current === null) throw new UsageError(`no payment ${id} in ${this.#path}`);
@@ -891,7 +898,7 @@ export class Ledger {
         const reason = refused(current, mine);
         if (reason !== null) throw new UsageError(reason);
       }
-      return current;
+      return { ...current, moved: moved !== null };
     });
   }
 
@@ -900,14 +907,14 @@ export class Ledger {
    * process that held it (`holder`). Settling a settled payment again is a no-op for that process;
    * without the token it is refused, whatever the payment's state.
    */
-  settle(payment: string, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<PaymentRow> {
+  settle(payment: string, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<Moved> {
     return this.#move('settle', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) }, (current, mine) =>
       mine() ? null : heldElsewhere(current.payment, 'settle'),
     );
   }
 
   /** held -> void, by the process that held it: evidence that the payment never moved money. */
-  void(payment: string, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<PaymentRow> {
+  void(payment: string, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<Moved> {
     return this.#move('void', payment, { evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) }, (current, mine) => {
       if (current.state === 'settled') return `payment ${current.payment} is settled; a settled payment can't be voided`;
       return mine() ? null : heldElsewhere(current.payment, 'void');
@@ -921,7 +928,7 @@ export class Ledger {
   bound(
     payment: string,
     { until = null, withinMs = null, holder }: { until?: bigint | Date | null; withinMs?: bigint | null; holder: string | null },
-  ): Promise<PaymentRow> {
+  ): Promise<Moved> {
     const args = {
       until: until === null ? null : millis(until, 'until'),
       within_ms: withinMs === null ? null : millis(withinMs, 'withinMs', { min: 1n }),
@@ -937,7 +944,7 @@ export class Ledger {
   }
 
   /** Note a held payment's outcome, by the process that held it: 'unknown' or 'refused'. It counts the same. */
-  note(payment: string, outcome: Outcome, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<PaymentRow> {
+  note(payment: string, outcome: Outcome, { evidence = null, holder }: { evidence?: string | null; holder: string | null }): Promise<Moved> {
     if (outcome !== 'unknown' && outcome !== 'refused') throw new UsageError("outcome is 'unknown' or 'refused'");
     return this.#move('note', payment, { outcome, evidence: text(evidence, 'evidence', EVIDENCE_LIMIT), holder: holderToken(holder) }, (current, mine) =>
       mine() ? null : heldElsewhere(current.payment, 'note'),

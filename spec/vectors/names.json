@@ -24,7 +24,8 @@
     "PaymentRecord": ["id", "amount", "status", "counting", "at", "rail", "to", "note", "tx", "wallet", "state", "settlesBy", "countsUntil"],
     "HeldPayment": ["id", "amount", "reason", "at", "ageMs", "settlesBy", "countsUntil", "rail", "to", "note", "error"],
     "BudgetLimits": ["wallet", "unit", "cap", "windowMs", "perPayment", "maxPayments", "frozen"],
-    "VoidedPayment": ["id", "amount"]
+    "VoidedPayment": ["id", "amount"],
+    "Decision": ["decision", "at", "wallet", "amount", "id", "rail", "to", "code", "source", "brief", "outcome", "settlesBy", "tx"]
   },
   "errors": {
     "BudgetRefused": ["code", "brief", "source"],
@@ -32,7 +33,7 @@
     "UsageError": ["paymentId", "paymentState"]
   },
   "options": {
-    "openBudget": ["wallet", "path", "create", "perPayment", "perHour", "perDay", "perWeek", "cap", "window", "maxPayments", "busyTimeoutMs", "onWarning"],
+    "openBudget": ["wallet", "path", "create", "perPayment", "perHour", "perDay", "perWeek", "cap", "window", "maxPayments", "busyTimeoutMs", "onWarning", "onDecision"],
     "openOwner": ["path", "create", "busyTimeoutMs"],
     "hold": ["id", "to", "note", "details", "rail", "settlesBy", "settlesWithin"],
     "setLimits": ["perPayment", "perHour", "perDay", "perWeek", "cap", "window", "maxPayments"],

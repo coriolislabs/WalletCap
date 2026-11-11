@@ -9,6 +9,7 @@
 // which every process on the host opens, for every rail. append() holds the payment through the
 // ledger's admission, inside one write transaction, so two processes that both pass the SDK's
 // own in-memory check cannot both record a payment past the cap.
+import { reportRefusal } from '../core/_decisions.js';
 import { ledgerOf } from '../core/_ledgers.js';
 import type { Budget, Hold } from '../core/budget.js';
 import { BudgetRefused, forAgent, UsageError } from '../core/errors.js';
@@ -130,18 +131,25 @@ export function cdpStore(budget: Budget, options: { asset: string; scale?: bigin
     },
 
     async append(entry) {
+      // A payment this store refuses before any hold, told to the budget's decision log: it has no
+      // amount the budget could count.
+      const refuse = (code: 'asset' | 'terms', message: string): BudgetRefused => {
+        const refusal = new BudgetRefused(code, message);
+        reportRefusal(budget, refusal, { rail: RAIL, amount: null, to: entry.payTo });
+        return refusal;
+      };
       const paid = normalizeAsset(entry.asset);
-      if (paid !== asset) throw new BudgetRefused('asset', `this CDP store counts ${asset}, not ${paid}`);
+      if (paid !== asset) throw refuse('asset', `this CDP store counts ${asset}, not ${paid}`);
       let atomic: bigint;
       try {
         atomic = BigInt(entry.atomicAmount);
       } catch {
-        throw new BudgetRefused('terms', 'atomicAmount must be an integer');
+        throw refuse('terms', 'atomicAmount must be an integer');
       }
-      if (atomic < 0n) throw new BudgetRefused('terms', 'atomicAmount must be an integer');
+      if (atomic < 0n) throw refuse('terms', 'atomicAmount must be an integer');
       if (atomic === 0n) return;
       const spend = atomic * scale;
-      if (spend > MAX_AMOUNT) throw new BudgetRefused('terms', 'payment does not fit in the budget unit');
+      if (spend > MAX_AMOUNT) throw refuse('terms', 'payment does not fit in the budget unit');
       // CDP records a payment when it creates it and removes it if settlement fails, so it is held
       // at once, from the ledger's own time, until the signed authorization can no longer be
       // redeemed. The entry's own `at` is CDP's, kept only with the payment.

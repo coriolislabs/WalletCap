@@ -17,6 +17,7 @@ from walletcap._version import version as _version
 from walletcap.budget import (
     Budget,
     Check,
+    Decision,
     HeldPayment,
     Hold,
     Outcome,
@@ -60,6 +61,7 @@ __all__ = [
     "BudgetUnavailable",
     "BudgetWarning",
     "Check",
+    "Decision",
     "Dollars",
     "HeldPayment",
     "Hold",
