@@ -5,10 +5,13 @@
 # - v<version>: walletcap to PyPI (packages/python) and npm (packages/js). Both carry that version.
 # - mcp-v<version>: walletcap-mcp to npm (packages/mcp).
 # - crash-test-v<version>: walletcap-crash-test to npm (bench/crash-test).
-# Every job checks out the tag itself, and the tag must be on main and match the package's
-# version. Building, testing and packing happen in jobs that can't publish; only the four short
-# publish jobs get an OIDC token (id-token: write), and they publish the artifacts the build jobs
-# packed. npm installs run with --ignore-scripts.
+# The release job resolves the tag to a commit once: that commit must be the one the run started
+# from, be on main, and carry the package's version. Every build job checks out that commit, not
+# the tag's name, so a tag moved while the run is under way changes nothing. Building, testing and
+# packing happen in jobs that can't publish, and each packs and uploads its artifact before it
+# runs a test; only the four short publish jobs get an OIDC token (id-token: write), and they
+# publish the artifacts the build jobs packed. npm installs run with --ignore-scripts, and the
+# wheel's build backend is pinned by hash (packages/python/build-constraints.txt).
 #
 # Trusted publishing, so no token is stored: PyPI matches this repository, publish.yml and the
 # "pypi" environment, and attaches PEP 740 attestations; npm matches this repository, publish.yml
@@ -35,6 +38,7 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       kind: ${{ steps.tag.outputs.kind }}
+      sha: ${{ steps.pin.outputs.sha }}
     steps:
       - name: Read the tag
         id: tag
@@ -58,17 +62,19 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: The tag is on main and names the package's version
+      - name: The tag is this run's commit, is on main and names the package's version
+        id: pin
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           KIND: ${{ steps.tag.outputs.kind }}
         run: |
-          git merge-base --is-ancestor "refs/tags/$TAG" origin/main
+          test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           version() { node -p "require('./$1/package.json').version"; }
           case "$KIND" in
             walletcap)
@@ -78,6 +84,7 @@ jobs:
             mcp) test "$TAG" = "mcp-v$(version packages/mcp)" ;;
             crash-test) test "$TAG" = "crash-test-v$(version bench/crash-test)" ;;
           esac
+          echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   # --- walletcap: build, test and pack, with no token -------------------------------------------
 
@@ -87,29 +94,28 @@ jobs:
     if: needs.release.outputs.kind == 'walletcap'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: refs/tags/${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+      # A named uv and no cache: a release build restores nothing an earlier run saved.
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.13.7"
+          enable-cache: false
       - name: Install the workspace from the lockfile
         run: npm ci --ignore-scripts --no-audit --no-fund
-      # The same suites CI runs: the JavaScript one builds walletcap, which the Python suite's
-      # cross-language tests run.
-      - name: The JavaScript suite
-        run: npm test -w walletcap
-      - name: The Python suite, on the locked dev group
-        working-directory: packages/python
-        run: uv run --locked pytest -q
+      # Packed and uploaded before any test runs, so nothing a test executes can touch what is
+      # published. A failed suite still fails this job, and the publish jobs need it.
       - name: Pack the npm tarball, the wheel and the sdist
         run: |
           mkdir -p out/npm out/python
           npm pack -w walletcap --pack-destination out/npm
-          (cd packages/python && uv build --out-dir ../../out/python)
+          (cd packages/python && uv build --build-constraints build-constraints.txt --require-hashes --out-dir ../../out/python)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: walletcap-npm
@@ -120,6 +126,13 @@ jobs:
           name: walletcap-python
           path: out/python/*
           if-no-files-found: error
+      # The same suites CI runs: the JavaScript one builds walletcap, which the Python suite's
+      # cross-language tests run.
+      - name: The JavaScript suite
+        run: npm test -w walletcap
+      - name: The Python suite, on the locked dev group
+        working-directory: packages/python
+        run: uv run --locked pytest -q
 
   pypi:
     name: PyPI
@@ -166,9 +179,9 @@ jobs:
     if: needs.release.outputs.kind == 'mcp'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: refs/tags/${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -176,17 +189,19 @@ jobs:
           package-manager-cache: false
       - name: Install the workspace from the lockfile
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: The suite, on this checkout's walletcap
+      # walletcap-mcp compiles against this checkout's walletcap. Packed and uploaded before the
+      # suite runs.
+      - name: Pack the tarball
         run: |
           npm run build -w walletcap
-          npm test -w walletcap-mcp
-      - name: Pack the tarball
-        run: mkdir -p out && npm pack -w walletcap-mcp --pack-destination out
+          mkdir -p out && npm pack -w walletcap-mcp --pack-destination out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: walletcap-mcp-npm
           path: out/*.tgz
           if-no-files-found: error
+      - name: The suite, on this checkout's walletcap
+        run: npm test -w walletcap-mcp
 
   mcp:
     name: npm (mcp)
@@ -218,14 +233,24 @@ jobs:
     if: needs.release.outputs.kind == 'crash-test'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          ref: refs/tags/${{ needs.release.outputs.tag }}
+          ref: ${{ needs.release.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
           package-manager-cache: false
+      # Packed and uploaded first: the install below has no lockfile, so nothing it brings in
+      # runs before the tarball is out of its reach.
+      - name: Pack the tarball
+        working-directory: bench/crash-test
+        run: mkdir -p ../../out && npm pack --pack-destination ../../out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: walletcap-crash-test-npm
+          path: out/*.tgz
+          if-no-files-found: error
       # Outside the workspace, so walletcap comes from npm, as users get it. There is no lockfile
       # there, so this is the one npm install, still without install scripts.
       - name: Run the crash test on the walletcap users get from npm
@@ -235,14 +260,6 @@ jobs:
           cd "$RUNNER_TEMP/crash-test"
           npm install --ignore-scripts --no-audit --no-fund --no-package-lock
           node --test
-      - name: Pack the tarball
-        working-directory: bench/crash-test
-        run: mkdir -p ../../out && npm pack --pack-destination ../../out
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: walletcap-crash-test-npm
-          path: out/*.tgz
-          if-no-files-found: error
 
   crash-test:
     name: npm (crash test)

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: Apache-2.0
+# Weekly update pull requests, grouped so a week is a handful of them. CI runs on each, so a new
+# @x402 or CDP release meets the guard's suite before anyone depends on the pair.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # The payment rails the adapters are tested against: one pull request, read with care.
+      rails:
+        patterns: ["@x402/*", "@coinbase/*", "viem"]
+      tools:
+        patterns: ["*"]
+        exclude-patterns: ["@x402/*", "@coinbase/*", "viem"]
+
+  - package-ecosystem: uv
+    directory: /packages/python
+    schedule:
+      interval: weekly
+    groups:
+      python-tools:
+        patterns: ["*"]

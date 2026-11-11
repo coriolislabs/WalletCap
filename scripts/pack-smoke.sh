@@ -24,9 +24,11 @@ cp scripts/smoke/smoke.mjs "$work/project/"
 )
 
 echo "== PyPI: the sdist, and wheels from the source and from the sdist =="
-uv build --quiet --sdist --out-dir "$work/dist" packages/python
-uv build --quiet --wheel --out-dir "$work/direct" packages/python
-uv build --quiet --wheel --out-dir "$work/from-sdist" "$work"/dist/walletcap-*.tar.gz
+# The build backend and everything it needs, pinned by hash, as publish.yml builds them.
+pins=(--build-constraints packages/python/build-constraints.txt --require-hashes)
+uv build --quiet "${pins[@]}" --sdist --out-dir "$work/dist" packages/python
+uv build --quiet "${pins[@]}" --wheel --out-dir "$work/direct" packages/python
+uv build --quiet "${pins[@]}" --wheel --out-dir "$work/from-sdist" "$work"/dist/walletcap-*.tar.gz
 python3 - "$work"/dist/walletcap-*.tar.gz <<'PY'
 import sys, tarfile
 names = sorted(tarfile.open(sys.argv[1]).getnames())
@@ -43,6 +45,20 @@ for spec in ("src/walletcap/spec/schema.sql", "src/walletcap/spec/upgrade.sql"):
     assert f"{top}/{spec}" in names, f"the sdist lacks {spec}"
 assert not any(n.endswith((".mjs", ".ts", ".sol", ".js")) for n in names), "the sdist holds non-Python sources"
 print(f"the sdist holds only the Python package: {len(names)} entries")
+PY
+# A wheel built from the unpacked sdist takes the rule from the sdist, whatever sits above it: pip
+# unpacks a source build under the temp folder, where anyone can leave a spec/ two levels up.
+mkdir -p "$work/tmp/build" "$work/tmp/spec"
+tar xzf "$work"/dist/walletcap-*.tar.gz -C "$work/tmp/build"
+printf -- '-- planted\n' > "$work/tmp/spec/schema.sql"
+printf -- '-- planted\n' > "$work/tmp/spec/upgrade.sql"
+uv build --quiet "${pins[@]}" --wheel --out-dir "$work/planted" "$work"/tmp/build/walletcap-*/
+python3 - "$work"/planted/walletcap-*.whl "$root/spec" <<'PY'
+import pathlib, sys, zipfile
+wheel, spec = zipfile.ZipFile(sys.argv[1]), pathlib.Path(sys.argv[2])
+for name in ("schema.sql", "upgrade.sql"):
+    assert wheel.read(f"walletcap/spec/{name}") == (spec / name).read_bytes(), f"the wheel's {name} is not the sdist's"
+print("a wheel built from the sdist ships the sdist's rule, not a spec/ planted above it")
 PY
 for wheel in "$work"/direct/walletcap-*.whl "$work"/from-sdist/walletcap-*.whl; do
   venv="$(mktemp -d "$work/venv.XXXX")"

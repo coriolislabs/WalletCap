@@ -45,7 +45,7 @@ Issues = "https://github.com/coriolislabs/WalletCap/issues"
 dev = ["pytest==9.1.1", "hypothesis==6.170.8", "mypy==2.4.0", "ruff==0.17.2"]
 
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

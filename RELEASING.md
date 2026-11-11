@@ -11,14 +11,38 @@ in jobs that can't publish, and four short jobs publish what was packed:
 | `mcp-v<version>` | `walletcap-mcp` to npm | `packages/mcp` |
 | `crash-test-v<version>` | `walletcap-crash-test` to npm | `bench/crash-test` |
 
-Every job checks out the tag. The tag must be on `main` and match the package's version, or the
-run stops before anything is built.
+The first job resolves the tag to a commit: it must be the commit the run started from, be on
+`main` and carry the package's version, or the run stops before anything is built. Every build
+job checks out that commit, not the tag's name. Each packs and uploads its artifact before it runs
+a test, and the wheel's build backend is pinned by hash in `packages/python/build-constraints.txt`
+(regenerate it with `uv pip compile --universal --generate-hashes` when hatchling moves).
+`scripts/check-workflows.mjs`, in CI's lint job, fails a change that drops any of this.
 
 ## Once, before the first release
 
 - **GitHub environments.** `pypi` and `npm` exist under Settings → Environments. Give each a
-  deployment rule that allows only the tags above (`v*`, `mcp-v*`, `crash-test-v*`), so a run
-  from a branch can't use them.
+  required reviewer and a deployment rule that allows only the tags above (`v*`, `mcp-v*`,
+  `crash-test-v*`). The registries trust the repository, the workflow's file name and the
+  environment's name, not the ref: until the environments have these rules, a branch whose own
+  `publish.yml` names the environment can publish. As an admin:
+
+  ```console
+  $ for env in npm pypi; do
+      gh api -X PUT repos/coriolislabs/WalletCap/environments/$env --input - <<'JSON'
+  {"reviewers": [{"type": "User", "id": 95724717}],
+   "deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+  JSON
+      for tag in 'v*' 'mcp-v*' 'crash-test-v*'; do
+        gh api -X POST repos/coriolislabs/WalletCap/environments/$env/deployment-branch-policies -f name="$tag" -f type=tag
+      done
+    done
+  ```
+
+- **Rulesets.** Under Settings → Rules: on `main`, require a pull request and CI, and block force
+  pushes and deletion; on the tags `v*`, `mcp-v*` and `crash-test-v*`, block updates and deletion
+  and restrict who creates them. Turn on immutable releases.
+- **Names.** Every npm name the docs tell a user to run must be ours before the docs say so:
+  `npm view <name>` answers with this repository. `walletcap-mcp` needs its placeholder (below).
 - **PyPI.** The `walletcap` project has a trusted publisher: owner `coriolislabs`, repository
   `WalletCap`, workflow `publish.yml`, environment `pypi`.
 - **npm.** `walletcap` and `walletcap-crash-test` each have a trusted publisher: organization or
