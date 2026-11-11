@@ -11,7 +11,11 @@ import { after, afterEach, test } from 'node:test';
 import { resetClock, setClock } from '../dist/core/_clock.js';
 import { decisionLogFile } from '../dist/core/_decisions.js';
 import { BudgetRefused, notSent, openBudget, openOwner, UsageError } from 'walletcap';
+import { guardAgenticWallet } from 'walletcap/agentic';
+import { cdpStore } from 'walletcap/cdp';
+import { guard } from 'walletcap/x402';
 import { race } from './support/race.mjs';
+import { NETWORK, PAY_TO, USDC, x402 } from './support/x402-kit.mjs';
 
 const DIR = mkdtempSync(join(tmpdir(), 'walletcap-decisions-'));
 // Windows keeps a budget file a test left open; its temp folder is cleared later.
@@ -29,6 +33,7 @@ afterEach(() => {
   delete process.env.WALLETCAP_LOG;
 });
 
+const kit = await x402();
 const WALLET = '0xd797ead28c38575fdf4fc523866287372340ca02';
 const TX = `0x${'ab'.repeat(32)}`;
 const T0 = 1_800_000_000_000;
@@ -481,5 +486,188 @@ test('handles in several processes append whole lines to one file', async () => 
   assert.deepEqual([count('held'), count('settled'), count('refused')], [paid, paid, all.length - paid]);
   assert.equal(lines.length, paid * 2 + (all.length - paid));
   assert.equal(decisions.length, outcomes.filter(outcome => outcome === 'paid').length * 2 + outcomes.filter(outcome => outcome !== 'paid').length);
+  budget.close();
+});
+
+// --- The adapters ------------------------------------------------------------------------------
+
+const X402_SKIP = kit === null && 'the x402 devDependencies are not installed';
+// A scheme the guard doesn't count, registered on the real client so its terms reach the guard.
+const OPAQUE = { scheme: 'opaque', createPaymentPayload: async version => ({ x402Version: version, payload: { signed: 'elsewhere' } }) };
+const SETTLED = { success: true, transaction: TX, network: NETWORK };
+
+/** The real x402 client, guarded, on a budget of ten cents, and how many payloads its wallet has signed. */
+const guarded = async () => {
+  // The exact scheme's validity is the wall clock's, so the ledger's clock starts there too.
+  const state = await fixture({ now: Date.now(), wallet: kit.account.address, limits: { perPayment: '$0.05', perDay: '$0.10' } });
+  const signed = { count: 0 };
+  const sign = kit.account.signTypedData;
+  const account = {
+    ...kit.account,
+    signTypedData: (...args) => {
+      signed.count += 1;
+      return sign(...args);
+    },
+  };
+  const { x402Client } = await import('@x402/core/client');
+  const { ExactEvmScheme } = await import('@x402/evm/exact/client');
+  const client = new x402Client().register(NETWORK, new ExactEvmScheme(account)).register(NETWORK, OPAQUE);
+  client.setSpendControls(false); // x402's own default cap stays out of the measurement
+  return { ...state, signed, client: guard(client, state.budget) };
+};
+
+test('the x402 guard reports a payment as held then settled, each once', { skip: X402_SKIP }, async () => {
+  const { budget, decisions, client, clock, signed } = await guarded();
+  const payload = await client.createPaymentPayload(kit.required(50_000));
+  await client.handlePaymentResponse({ paymentPayload: payload, requirements: payload.accepted, settleResponse: SETTLED });
+  const { from, nonce, validBefore } = payload.payload.authorization;
+  const payment = {
+    wallet: kit.account.address.toLowerCase(),
+    amount: 50_000n,
+    id: `eip3009:${from.toLowerCase()}:${nonce.toLowerCase()}`,
+    rail: 'x402',
+    to: PAY_TO,
+    settlesBy: new Date(Number(validBefore) * 1000),
+  };
+  assert.equal(signed.count, 1);
+  assert.deepEqual(decisions.map(plain), [
+    { ...NONE, decision: 'held', at: new Date(clock.now), ...payment },
+    { ...NONE, decision: 'settled', at: new Date(clock.now), ...payment, tx: TX },
+  ]);
+  budget.close();
+});
+
+test('the x402 guard reports what it refuses before signing, each once: over the budget, an asset, a scheme, a validity', {
+  skip: X402_SKIP,
+}, async () => {
+  const { budget, decisions, client, clock, signed } = await guarded();
+  for (let i = 0; i < 2; i += 1) await client.createPaymentPayload(kit.required(50_000));
+  assert.equal(signed.count, 2);
+  decisions.length = 0;
+  // The ledger answered the guard's check(), which logs nothing itself: the guard reports it, dated by the ledger.
+  clock.now += 5000;
+  const over = await client.createPaymentPayload(kit.required(50_000)).catch(error => error);
+  assert.ok(refusedFor('budget')(over));
+  const unknown = '0x0000000000000000000000000000000000000bad';
+  await assert.rejects(client.createPaymentPayload(kit.required(10_000, { asset: unknown })), refusedFor('asset'));
+  await assert.rejects(client.createPaymentPayload(kit.required(10_000, { scheme: 'opaque' })), refusedFor('terms'));
+  await assert.rejects(client.createPaymentPayload(kit.required(10_000, { maxTimeoutSeconds: 86_400 })), refusedFor('timeout'));
+  await assert.rejects(client.createPaymentPayload(kit.required(60_000)), refusedFor('per_payment'));
+  assert.equal(signed.count, 2, 'nothing more was signed');
+
+  assert.deepEqual(
+    decisions.map(({ decision, code, source, amount, id, rail, to }) => [decision, code, source, amount, id, rail, to]),
+    [
+      ['refused', 'budget', 'budget', 50_000n, null, 'x402', PAY_TO],
+      // An asset the guard can't price has no amount in dollars.
+      ['refused', 'asset', 'budget', null, null, 'x402', PAY_TO],
+      // A scheme it doesn't count, in an asset it prices: the amount the terms asked.
+      ['refused', 'terms', 'budget', 10_000n, null, 'x402', PAY_TO],
+      ['refused', 'timeout', 'budget', 10_000n, null, 'x402', PAY_TO],
+      ['refused', 'per_payment', 'budget', 60_000n, null, 'x402', PAY_TO],
+    ],
+  );
+  assert.equal(decisions[0].brief, over.message);
+  assert.deepEqual(decisions[0].at, new Date(clock.now));
+  assert.match(decisions[1].brief, /cannot price 0x0000000000000000000000000000000000000bad/);
+  assert.match(decisions[2].brief, /doesn't count the x402 scheme opaque/);
+  budget.close();
+});
+
+test('a hold the budget refuses after signing is reported once, though the guard throws a copy of the refusal', { skip: X402_SKIP }, async () => {
+  const { budget, decisions, client, path, signed } = await guarded();
+  // Another process takes the room between the guard's check and its hold.
+  const other = await openBudget({ wallet: kit.account.address, path });
+  client.onBeforePaymentCreation(async () => {
+    for (let i = 0; i < 2; i += 1) await other.hold('$0.05');
+  });
+  const refusal = await client.createPaymentPayload(kit.required(50_000)).catch(error => error);
+  assert.ok(refusedFor('budget')(refusal));
+  assert.equal(signed.count, 1, 'the check passed, so the wallet signed');
+  assert.deepEqual(
+    decisions.map(({ decision, code, amount, id, rail, to, brief }) => [decision, code, amount, id, rail, to, brief]),
+    [['refused', 'budget', 50_000n, null, 'x402', PAY_TO, refusal.message]],
+  );
+  // The agent's copy, like the log's brief, names no other payment.
+  assert.ok(!refusal.message.includes('wc-'), refusal.message);
+  budget.close();
+  other.close();
+});
+
+test("the Agentic Wallet wrapper reports each refusal once, its own and the budget's, and a payment as held, bound, settled", async () => {
+  const { budget, decisions } = await fixture({ limits: { perPayment: '$0.05', perDay: '$0.15' } });
+  const requirement = (overrides = {}) => ({
+    scheme: 'exact',
+    network: NETWORK,
+    asset: USDC,
+    amount: '50000',
+    payTo: PAY_TO,
+    maxTimeoutSeconds: 300,
+    extra: { name: 'USDC', version: '2' },
+    ...overrides,
+  });
+  let offered = [requirement()];
+  const answer = { status: 200, headers: { 'PAYMENT-RESPONSE': Buffer.from(JSON.stringify({ success: true, transaction: TX })).toString('base64') } };
+  const wallet = guardAgenticWallet(budget, {
+    request: async channel => (channel === 'send-transaction' ? { transactionHash: TX } : answer),
+    discover: async () => offered,
+  });
+  const send = more => wallet.request('send-transaction', { recipient: PAY_TO, amountAtomic: '50000', chain: 'base-sepolia', ...more });
+  const pay = more => wallet.request('make-x402-request', { baseURL: 'https://api.example', path: '/paid', method: 'GET', ...more });
+  const seen = () => decisions.splice(0).map(({ decision, code, amount, id, rail, to }) => [decision, code, amount, id === null ? null : 'an id', rail, to]);
+
+  // The budget's own refusal, through the wrapper's hold.
+  await assert.rejects(send({ amountAtomic: '60000' }), refusedFor('per_payment'));
+  assert.deepEqual(seen(), [['refused', 'per_payment', 60_000n, null, 'awal', PAY_TO]]);
+  // The wrapper's, before any hold.
+  await assert.rejects(send({ asset: 'ETH', chain: 'base' }), refusedFor('asset'));
+  assert.deepEqual(seen(), [['refused', 'asset', null, null, 'awal', PAY_TO]]);
+  offered = [requirement({ asset: '0x0000000000000000000000000000000000000bad' })];
+  await assert.rejects(pay(), refusedFor('asset'));
+  assert.deepEqual(seen(), [['refused', 'asset', null, null, 'awal-x402', PAY_TO]]);
+  offered = [requirement({ maxTimeoutSeconds: 86_400 })];
+  await assert.rejects(pay(), refusedFor('timeout'));
+  assert.deepEqual(seen(), [['refused', 'timeout', 50_000n, null, 'awal-x402', PAY_TO]]);
+  offered = [requirement({ scheme: 'batch-settlement' })];
+  await assert.rejects(pay(), refusedFor('terms'));
+  assert.deepEqual(seen(), [['refused', 'terms', 50_000n, null, 'awal-x402', PAY_TO]]);
+  offered = [];
+  await assert.rejects(pay(), refusedFor('terms'));
+  assert.deepEqual(seen(), [['refused', 'terms', null, null, 'awal-x402', null]]);
+  offered = [requirement()];
+  await assert.rejects(pay({ maxAmountPerRequest: 1 }), refusedFor('per_payment'));
+  assert.deepEqual(seen(), [['refused', 'per_payment', 50_000n, null, 'awal-x402', PAY_TO]]);
+
+  await pay();
+  assert.deepEqual(seen(), [
+    ['held', null, 50_000n, 'an id', 'awal-x402', PAY_TO],
+    ['bound', null, 50_000n, 'an id', 'awal-x402', PAY_TO],
+    ['settled', null, 50_000n, 'an id', 'awal-x402', PAY_TO],
+  ]);
+  await send();
+  assert.deepEqual(seen(), [
+    ['held', null, 50_000n, 'an id', 'awal', PAY_TO],
+    ['settled', null, 50_000n, 'an id', 'awal', PAY_TO],
+  ]);
+  budget.close();
+});
+
+test('the CDP store reports each refusal once: an asset it does not count, and a hold the budget refuses', async () => {
+  const { budget, decisions } = await fixture({ limits: { perDay: '$1' } });
+  const store = cdpStore(budget, { asset: USDC });
+  const entry = { atomicAmount: 600_000n, asset: USDC, network: NETWORK, payTo: PAY_TO, at: Date.now() };
+  await store.append(entry);
+  await assert.rejects(store.append({ ...entry, asset: '0x0000000000000000000000000000000000000bad' }), refusedFor('asset'));
+  // The cap, with a payment open: the store throws the agent's copy of the budget's refusal.
+  const over = await store.append(entry).catch(error => error);
+  assert.ok(refusedFor('budget')(over));
+  assert.deepEqual(
+    decisions.map(({ decision, code, amount, rail, to, brief }) => [decision, code, amount, rail, to, brief]),
+    [
+      ['held', null, 600_000n, 'cdp', PAY_TO, null],
+      ['refused', 'asset', null, 'cdp', PAY_TO, `this CDP store counts ${USDC.toLowerCase()}, not 0x0000000000000000000000000000000000000bad`],
+      ['refused', 'budget', 600_000n, 'cdp', PAY_TO, over.message],
+    ],
+  );
   budget.close();
 });

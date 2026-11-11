@@ -4,6 +4,7 @@
 // client from @x402/core, through the client's public payment hooks, so it works under
 // @x402/fetch, @x402/axios and Coinbase's CDP spend controls alike: whatever else is configured,
 // every payment the client creates is counted in the shared budget before it is sent.
+import { alreadyReported, ledgerTimeOf, reportRefusal, stampLedgerTime } from '../core/_decisions.js';
 import type { Budget, Hold } from '../core/budget.js';
 import { BudgetRefused, forAgent, PaymentNotRecorded, UsageError } from '../core/errors.js';
 
@@ -407,6 +408,22 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     }
     return toMicros(atomicOf(requirements), decimals);
   };
+  // What terms ask for, in micro-dollars, for the record of a refusal: null when the budget can't
+  // price their asset or read their amount.
+  const asked = (requirements: PaymentRequirements | null | undefined): bigint | null => {
+    try {
+      const decimals = requirements ? table.get(assetKey(requirements.network, requirements.asset)) : undefined;
+      return decimals === undefined ? null : toMicros(atomicOf(requirements as PaymentRequirements), decimals);
+    } catch {
+      return null;
+    }
+  };
+  // A refusal this guard is about to throw to the client, told to the budget's decision log first.
+  // A refusal hold() made is passed over: hold() told the log itself (holdSigned).
+  const refused = (error: unknown, requirements: PaymentRequirements | null | undefined, amount: bigint | null = asked(requirements)): unknown => {
+    reportRefusal(budget, error, { rail: 'x402', amount, to: requirements?.payTo });
+    return error;
+  };
   const remember = (payload: unknown, hold: Hold): void => {
     if (payload !== null && typeof payload === 'object') byPayload.set(payload, hold);
     const print = fingerprint(payload);
@@ -438,8 +455,13 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
       if (kept.length === 0 && requirements.length > 0) {
         // Say why the first of the terms that came closest was passed over.
         const [close] = countable;
-        if (close !== undefined) throw timeoutRefusal(close);
-        price(requirements.find(requirement => schemeRefusal(requirement) === null) ?? (requirements[0] as PaymentRequirements)); // throws the explanation
+        const passedOver = close ?? requirements.find(requirement => schemeRefusal(requirement) === null) ?? (requirements[0] as PaymentRequirements);
+        try {
+          if (close !== undefined) throw timeoutRefusal(close);
+          price(passedOver); // throws the explanation
+        } catch (error) {
+          throw refused(error, passedOver);
+        }
       }
       return kept;
     });
@@ -447,18 +469,29 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
 
   client.onBeforePaymentCreation(async (context: PaymentCreationContext) => {
     if (hasCdpControls(client)) throw oneCounter();
-    const amount = price(context.selectedRequirements);
-    const slot: Slot = { amount, hold: null, payload: null };
-    (context as Slotted)[SLOT] = slot;
-    if (amount === 0n) return undefined;
-    // An early refusal, before anything is signed. The hold that binds comes after. The
-    // agent is told why, not which holds its owner could void: that is for the owner's CLI.
-    const check = await budget.check(amount);
-    if (!check.ok) throw new BudgetRefused(check.code ?? 'budget', check.brief ?? check.message ?? 'refused', { source: check.source ?? 'budget' });
-    // The policy above has already set aside longer terms; this holds for a client without one.
-    const tooLong = timeoutRefusal(context.selectedRequirements);
-    if (tooLong !== null) throw tooLong;
-    return undefined;
+    const requirements = context.selectedRequirements;
+    let amount: bigint | undefined;
+    try {
+      amount = price(requirements);
+      const slot: Slot = { amount, hold: null, payload: null };
+      (context as Slotted)[SLOT] = slot;
+      if (amount === 0n) return undefined;
+      // An early refusal, before anything is signed. The hold that binds comes after. The
+      // agent is told why, not which holds its owner could void: that is for the owner's CLI.
+      const check = await budget.check(amount);
+      if (!check.ok) {
+        const refusal = new BudgetRefused(check.code ?? 'budget', check.brief ?? check.message ?? 'refused', { source: check.source ?? 'budget' });
+        // The ledger refused, through check(): the refusal is dated as the ledger dated its answer.
+        throw stampLedgerTime(refusal, ledgerTimeOf(check));
+      }
+      // The policy above has already set aside longer terms; this holds for a client without one.
+      const tooLong = timeoutRefusal(requirements);
+      if (tooLong !== null) throw tooLong;
+      return undefined;
+    } catch (error) {
+      // check() logs nothing, so the refusals made here, before any hold, are reported here.
+      throw refused(error, requirements, amount);
+    }
   });
 
   // Every payload the guard has held, or priced as free: the ones the client may hand out.
@@ -490,7 +523,9 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
           ...(id === undefined ? {} : { id }),
         });
       } catch (error) {
-        throw forAgent(error);
+        // hold() told the decision log; the copy the agent is given says so too, since it shares
+        // no identity with the refusal hold() threw.
+        throw alreadyReported(forAgent(error));
       }
       slot.payload = paymentPayload;
       remember(paymentPayload, slot.hold);
@@ -504,12 +539,16 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
     // A client that hands this hook another context than the one the check ran on has no slot:
     // the payment is priced again here, never let through uncounted.
     let slot = (context as Slotted)[SLOT];
-    if (slot === undefined) {
-      slot = { amount: price(requirements), hold: null, payload: null };
-      (context as Slotted)[SLOT] = slot;
+    try {
+      if (slot === undefined) {
+        slot = { amount: price(requirements), hold: null, payload: null };
+        (context as Slotted)[SLOT] = slot;
+      }
+      const url = (context.paymentRequired as { resource?: { url?: unknown } } | undefined)?.resource?.url;
+      await holdSigned(slot, requirements, context.paymentPayload, url);
+    } catch (error) {
+      throw refused(error, requirements, slot?.amount);
     }
-    const url = (context.paymentRequired as { resource?: { url?: unknown } } | undefined)?.resource?.url;
-    await holdSigned(slot, requirements, context.paymentPayload, url);
   });
 
   // The backstop. @x402/core returns a payload that a scheme's own failure hook "recovered"
@@ -526,13 +565,19 @@ export function guard<C extends X402HookedClient>(client: C, budget: Budget, { a
         const paymentPayload = await (create as (...args: unknown[]) => Promise<unknown>).apply(this, args);
         if (paymentPayload === null || typeof paymentPayload !== 'object' || seen.has(paymentPayload)) return paymentPayload;
         const accepted = (paymentPayload as SignedPayload).accepted;
-        if (accepted === null || typeof accepted !== 'object') {
-          throw new BudgetRefused('terms', "the x402 client made a payment outside the budget's check, and it names no terms the budget can price");
+        let amount: bigint | undefined;
+        try {
+          if (accepted === null || typeof accepted !== 'object') {
+            throw new BudgetRefused('terms', "the x402 client made a payment outside the budget's check, and it names no terms the budget can price");
+          }
+          const tooLong = timeoutRefusal(accepted);
+          if (tooLong !== null) throw tooLong;
+          const url = (args[0] as { resource?: { url?: unknown } } | undefined)?.resource?.url;
+          amount = price(accepted);
+          await holdSigned({ amount, hold: null, payload: null }, accepted, paymentPayload, url);
+        } catch (error) {
+          throw refused(error, accepted, amount);
         }
-        const tooLong = timeoutRefusal(accepted);
-        if (tooLong !== null) throw tooLong;
-        const url = (args[0] as { resource?: { url?: unknown } } | undefined)?.resource?.url;
-        await holdSigned({ amount: price(accepted), hold: null, payload: null }, accepted, paymentPayload, url);
         return paymentPayload;
       },
     });

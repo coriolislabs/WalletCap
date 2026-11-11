@@ -8,6 +8,7 @@
 // Once the wallet answers, the payment counts until one window past the time its authorization
 // expires, whatever the payee says; if the wallet never answers, until its owner voids it. A
 // send counts for one window, or, if its outcome is unknown, until its owner voids it.
+import { reportRefusal } from '../core/_decisions.js';
 import type { Budget, Hold } from '../core/budget.js';
 import { BudgetRefused, forAgent, PaymentNotRecorded, UsageError } from '../core/errors.js';
 import { formatUsd, trimAscii } from '../core/money.js';
@@ -162,6 +163,14 @@ export async function discoverRequirements(
   return required;
 }
 
+// What a request has learnt about its payment so far, for the decision log if it is refused
+// before any hold: the rail, what the payee asks in micro-dollars, and who it is.
+interface Asked {
+  rail: 'awal' | 'awal-x402';
+  amount: bigint | null;
+  to: unknown;
+}
+
 /** What guardAgenticWallet() returns: the budget, and the wallet's request channel with the budget on it. */
 export interface GuardedWallet {
   budget: Budget;
@@ -225,7 +234,19 @@ export function guardAgenticWallet(
   const settlesWithinMs = (requirements: PaymentRequirements[]): bigint =>
     BigInt(Math.max(...requirements.map(requirement => settlesWithinSeconds(requirement) ?? 0))) * 1000n + CLOCK_SKEW_MS;
 
-  async function send(data: RequestData): Promise<unknown> {
+  // What terms ask for in micro-dollars, or null when walletcap can't price their asset or read
+  // their amount.
+  const askedBy = (requirement: PaymentRequirements): bigint | null => {
+    try {
+      const decimals = table.get(assetKey(requirement.network, requirement.asset));
+      return decimals === undefined ? null : atomicToMicros(atomicOf(requirement), decimals);
+    } catch {
+      return null;
+    }
+  };
+
+  async function send(data: RequestData, asked: Asked): Promise<unknown> {
+    asked.to = data.recipient;
     const asset = String(data.asset ?? 'USDC').toUpperCase();
     const chain = String(data.chain ?? 'base');
     const network = Object.hasOwn(AWAL_CHAINS, chain) ? AWAL_CHAINS[chain] : undefined;
@@ -256,7 +277,7 @@ export function guardAgenticWallet(
     return result;
   }
 
-  async function x402(data: RequestData): Promise<unknown> {
+  async function x402(data: RequestData, asked: Asked): Promise<unknown> {
     // The wallet is handed the terms walletcap checks, the caller's or the ones walletcap
     // discovers, less any it can't price or bound. Handed terms, awal skips its own 402 discovery
     // and signs only a term equal to one of them, maxTimeoutSeconds included, so the payee can't
@@ -299,9 +320,11 @@ export function guardAgenticWallet(
     const candidates = usable.filter(wanted);
     if (candidates.length === 0) {
       // Nothing left the wallet could pay: say why for the terms it would have picked from.
-      const asked = offered.filter((requirement): requirement is PaymentRequirements => isTerm(requirement) && wanted(requirement));
-      const countable = asked.find(priced);
+      const passedOver = offered.filter((requirement): requirement is PaymentRequirements => isTerm(requirement) && wanted(requirement));
+      const countable = passedOver.find(priced);
       if (countable !== undefined) {
+        asked.amount = askedBy(countable);
+        asked.to = countable.payTo;
         throw (
           timeoutRefusal(countable) ??
           new BudgetRefused(
@@ -310,7 +333,8 @@ export function guardAgenticWallet(
           )
         );
       }
-      const first = asked[0] ?? offered.find(isTerm);
+      const first = passedOver[0] ?? offered.find(isTerm);
+      asked.to = first?.payTo;
       throw new BudgetRefused('asset', `walletcap cannot price ${first?.asset} on ${first?.network}; it pays only in the USD stablecoins it knows`);
     }
     const extensions = required?.extensions;
@@ -326,6 +350,8 @@ export function guardAgenticWallet(
     // the wallet at exactly that: it refuses to sign for more.
     const choice = candidates.reduce((most, requirement) => (atomicOf(requirement) > atomicOf(most) ? requirement : most));
     const micros = atomicToMicros(atomicOf(choice), table.get(assetKey(choice.network, choice.asset)) ?? 6);
+    asked.amount = micros;
+    asked.to = choice.payTo;
     if (data.maxAmountPerRequest !== undefined && micros > BigInt(data.maxAmountPerRequest)) {
       throw new BudgetRefused('per_payment', `the endpoint asks ${formatUsd(micros)}, more than the request's own maximum`);
     }
@@ -357,10 +383,14 @@ export function guardAgenticWallet(
 
   // The agent is told why a payment was refused, not which holds its owner could void: that
   // is for the owner's CLI (walletcap holds) and budget.check().
-  const toAgent = async (pay: () => Promise<unknown>): Promise<unknown> => {
+  const toAgent = async (rail: Asked['rail'], pay: (asked: Asked) => Promise<unknown>): Promise<unknown> => {
+    const asked: Asked = { rail, amount: null, to: null };
     try {
-      return await pay();
+      return await pay(asked);
     } catch (error) {
+      // Every refusal leaves through here, once. One that hold() made is in the decision log
+      // already, and is passed over by its identity: it is told to the log before it is copied.
+      reportRefusal(budget, error, asked);
       throw forAgent(error);
     }
   };
@@ -368,8 +398,8 @@ export function guardAgenticWallet(
   return {
     budget,
     async request(channel, data) {
-      if (channel === 'send-transaction') return toAgent(() => send((data ?? {}) as RequestData));
-      if (channel === 'make-x402-request') return toAgent(() => x402((data ?? {}) as RequestData));
+      if (channel === 'send-transaction') return toAgent('awal', asked => send((data ?? {}) as RequestData, asked));
+      if (channel === 'make-x402-request') return toAgent('awal-x402', asked => x402((data ?? {}) as RequestData, asked));
       return wallet(channel, data);
     },
   };
