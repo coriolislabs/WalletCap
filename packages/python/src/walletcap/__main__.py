@@ -155,7 +155,11 @@ def _iso(moment: datetime) -> str:
 
 # What a terminal acts on, not prints: C0 and C1 controls, DEL, and the bidi marks that reorder a
 # line. A payee's URL, a payee's "transaction" and a payer's note all reach these lists.
-_CONTROLS = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+# Half a surrogate pair goes too: a JavaScript payer can store one, UTF-8 can't write it, and Node
+# prints it as U+FFFD already.
+_CONTROLS = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069\ud800-\udfff]"
+)
 
 
 def _plain(text: str) -> str:

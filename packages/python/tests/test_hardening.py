@@ -245,3 +245,18 @@ def test_the_command_line_takes_whole_flags_and_none_as_a_limit(
     # "none" alone is a change: the npm command line takes it, and 0.4.1's Python one refused.
     assert main(["--path", str(path), "set", "--per-payment", "none"]) == 0
     assert open_owner(path).status(WALLET).per_payment is None
+
+
+def test_half_a_surrogate_pair_in_a_note_prints_as_a_replacement_character(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "b.sqlite"
+    budget = open_budget(WALLET, path=path, create=True, per_day="$100")
+    # A JavaScript payer can store half a surrogate pair. UTF-8 can't write one, so history and
+    # holds raised UnicodeEncodeError on it.
+    budget.hold("$1", note="half \ud83d pair")
+    for command in ("holds", "history"):
+        assert main(["--path", str(path), command]) == 0
+        out = capsys.readouterr().out
+        assert "half \ufffd pair" in out
+        out.encode("utf-8")

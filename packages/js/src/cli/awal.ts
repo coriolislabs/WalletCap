@@ -221,8 +221,8 @@ export async function awalMain(
       if (!/^0x[0-9a-fA-F]{40}$/.test(recipient) && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(recipient)) {
         return fail('INVALID_RECIPIENT', 'walletcap awal send takes an address (0x… or Solana), not an ENS name');
       }
+      // An asset that isn't USDC is refused by the wrapper, which also tells the decision log.
       const asset = String(values.asset).toUpperCase();
-      if (asset !== 'USDC') throw new BudgetRefused('asset', `walletcap counts USDC; it cannot price ${asset}, so it refuses this send`);
       const result = (await guard.request('send-transaction', { recipient, amountAtomic: usdcAtomic(amount), asset, chain: values.chain })) as {
         error?: unknown;
         transactionHash?: unknown;

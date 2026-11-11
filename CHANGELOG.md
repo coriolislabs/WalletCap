@@ -1,6 +1,39 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## Unreleased
+
+Three things for the day-to-day of running an agent on a budget: see what it is doing, see why
+it was refused, and set one up in a command.
+
+### Added
+
+- **A decision log.** `openBudget({ onDecision })` (Python: `open_budget(on_decision=...)`) is
+  called with a `Decision` for every hold admitted, every payment refused and every move of a
+  hold, and `WALLETCAP_LOG=<file>` appends each one to a file as a line of JSON, the same bytes
+  from both packages. A refusal used to leave nothing behind: the ledger records payments that
+  were admitted. Refusals are reported wherever they are made, once: by the budget's limits, by
+  the x402 guard before signing, by the Agentic Wallet wrapper, by the CDP store. The log can't
+  change a decision: it runs after the ledger has answered, and a callback that throws or a
+  file that can't be written is swallowed, with one warning.
+- **`walletcap watch`**, in both command lines: every entry the ledger takes as it happens, with
+  what the budget has left after it. It reads only. `--since <duration>` replays, `--for
+  <duration>` stops it, and `--json` prints JSON Lines.
+- **`walletcap init`**, in both command lines: sets a wallet's limits as `set` does, checks the
+  file as `doctor` does, and prints the code that puts the budget in front of the agent's
+  payments for `--rail`: `pay`, `x402`, `cdp`, `agentkit`, `awal`, `mcp` or `python`.
+
+### Fixed
+
+- Python's `history` and `holds` raised `UnicodeEncodeError` on a note holding half a surrogate
+  pair, which a JavaScript payer can store. It prints as U+FFFD, as the npm command line prints
+  it.
+
+### Changed
+
+- `walletcap awal send` with an asset other than USDC is refused by the wrapper, not the command
+  line before it, so the refusal names the chain and reaches the decision log.
+
 ## 0.5.0 — 2026-11-10
 
 A security review of 0.4.1 found ways past the guard, fixed here, and this release adds two

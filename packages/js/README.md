@@ -50,8 +50,11 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150
 
 The owner's handle is `openOwner()`, and the `walletcap` command: `status`, `set`, `freeze`,
 `unfreeze`, `history`, `holds`, `void <id>`, `void --all-unknown --older-than 24h` and
-`settle <id> --tx <hash>`. Two more only read: `check <dollars>` says whether a payment would be
-paid right now, and `doctor` checks the budget file before you rely on it.
+`settle <id> --tx <hash>`. Three more only read: `check <dollars>` says whether a payment would
+be paid right now, `doctor` checks the budget file before you rely on it, and `watch` prints every
+hold, settlement and void as it happens. `init` sets a wallet up in one command and prints the
+code for your integration. `openBudget({ onDecision })`, or `WALLETCAP_LOG=<file>`, gives you every
+decision, refusals included.
 
 Docs, the threat model and the full README: https://github.com/coriolislabs/WalletCap
 

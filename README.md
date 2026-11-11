@@ -63,6 +63,9 @@ demo or first-run setup:
 $ npx walletcap set --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
 ```
 
+Or in one step, `npx walletcap init --wallet 0xYourAgentWallet --per-payment 50 --per-day 150
+--rail x402` sets the limits, checks the file and prints the code for that integration.
+
 ```js
 import { openBudget } from 'walletcap';
 
@@ -229,6 +232,43 @@ Errors are four classes with no common base:
 | `BudgetRefused` | a limit refused the payment; `code` is `budget`, `per_payment`, `max_payments`, `frozen`, `asset`, `timeout` or `terms`, `brief` is what an agent should be told, and `source` says whether the budget's limits or the process's own refused |
 | `PaymentNotRecorded` | the payment went through, or may have, but couldn't be recorded; `paymentId` names it. Don't pay again |
 | `UsageError` | the call was malformed, or doesn't fit the payment's state |
+
+### A log of every decision
+
+A refusal leaves nothing in the ledger, so by itself the budget can't tell you afterwards why a
+payment didn't happen. Ask for its decisions:
+
+```js
+const budget = await openBudget({
+  wallet: account.address,
+  onDecision: decision => logger.info(decision), // held, refused, bound, noted, settled, void
+});
+```
+
+```console
+$ WALLETCAP_LOG=~/walletcap/decisions.jsonl node agent.js
+$ tail -f ~/walletcap/decisions.jsonl | jq -c '{decision, amount, code, brief}'
+{"decision":"held","amount":"12500000","code":null,"brief":null}
+{"decision":"settled","amount":"12500000","code":null,"brief":null}
+{"decision":"refused","amount":"51000000","code":"per_payment","brief":"$51.00 is over 0xd797…ca02's $50.00 limit per payment"}
+```
+
+- `onDecision` (Python: `on_decision`) is called once for every decision made through that
+  handle: a hold admitted (`held`), a payment refused (`refused`), and each move of a hold the
+  handle took (`bound`, `noted`, `settled`, `void`). A `Decision` always has the same fields,
+  null where one doesn't apply: `decision`, `at`, `wallet`, `amount`, `id`, `rail`, `to`, `code`,
+  `source`, `brief`, `outcome`, `settlesBy` and `tx`.
+- If `WALLETCAP_LOG` names a file when the budget is opened, each decision is also appended to
+  it as one line of JSON, in the shape `--json` prints: the same bytes from both languages, in
+  ASCII, so nothing a payee sent ends a line early or reaches a terminal as a control code.
+  walletcap creates the file `0600`, and several processes can share it.
+- A refusal is reported wherever it is made, once: by the budget's limits, or by an adapter
+  before any hold (the x402 guard's check before signing, an asset, scheme or validity it can't
+  count, the Agentic Wallet wrapper, the CDP store). `check()`, the owner's handle and reads
+  report nothing.
+- The log can't change a decision. It runs after the ledger has answered, and a callback that
+  throws or a file that can't be written is swallowed, with one `BudgetWarning` for the handle.
+  A callback isn't waited for.
 
 ### Python
 
@@ -469,6 +509,8 @@ $ npx walletcap void --all-unknown --older-than 24h   # every unknown or refused
 $ npx walletcap settle <id> --tx 0x…   # a payment you know paid
 $ npx walletcap check 12.50            # would $12.50 be paid right now? It holds nothing
 $ npx walletcap doctor                 # check the budget file before you rely on it
+$ npx walletcap watch                  # every hold, settlement and void, as it happens
+$ npx walletcap init --wallet 0x… --per-day 150 --rail x402   # limits, a check, and the code
 ```
 
 Amounts are dollars; leave out the `$` sign, which your shell would expand. Add `--wallet` when
@@ -494,6 +536,24 @@ in the file); 1 for anything walletcap refused or couldn't do.
   ```console
   $ npx walletcap doctor --json | jq -e .ok
   ```
+- `walletcap watch` follows the ledger while an agent runs: one line for every entry it takes,
+  with what the budget has left after it. It reads only, and runs until you interrupt it or
+  `--for <duration>` has passed; `--since <duration>` first replays that long ago until now, and
+  `--json` prints one JSON object a line. A refusal takes no entry, so it isn't here: it is in
+  the [decision log](#a-log-of-every-decision).
+
+  ```console
+  $ npx walletcap watch
+  Watching /home/you/.local/state/walletcap/budget.sqlite
+  0xd797…ca02: $0.00 spent of $150.00 per 24h, $150.00 left · at most $50.00 a payment
+
+  02:39:41Z  held         $12.50  x402    to 0x4165…5efd  https://api.example/paid  settles by 2026-11-11T02:44:41Z  eip3009:0x…  ($137.50 left)
+  02:39:42Z  settled      $12.50  x402    to 0x4165…5efd  https://api.example/paid  tx 0xabab…  eip3009:0x…  ($137.50 left)
+  ```
+- `walletcap init` is the first run in one command. It sets the wallet's limits as `set` does
+  (with no limit flag it changes nothing), checks the file as `doctor` does, and prints the code
+  for `--rail`: `pay` (the default), `x402`, `cdp`, `agentkit`, `awal`, `mcp` or `python`, with
+  the wallet's address filled in. It exits 1 if a doctor check fails.
 
 `void --all-unknown` leaves a payment the payee could still settle: it counts until one window
 past the time it can't. An x402 payment with no such time, one the wallet may have signed as it

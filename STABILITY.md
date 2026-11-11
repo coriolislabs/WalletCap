@@ -24,7 +24,7 @@ Each entry point, and the names it exports. Exported TypeScript types are public
 
 | Entry point | Exports |
 |---|---|
-| `walletcap` | `openBudget`, `Budget`, `Hold`, `openOwner`, `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `notSent`, `toMicros`, `formatUsd`, `defaultBudgetPath`, `MAX_AMOUNT`, `SCHEMA_VERSION`, `MIN_SQLITE_VERSION`; types `BudgetOptions`, `HoldOptions`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`, `VoidedPayment`, `OwnerOptions`, `LimitOptions`, `Dollars`, `Micros`, `Window`, `RefusalCode`, `RefusalSource`, `Outcome`, `PaymentState`, `NotSent` |
+| `walletcap` | `openBudget`, `Budget`, `Hold`, `openOwner`, `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `notSent`, `toMicros`, `formatUsd`, `defaultBudgetPath`, `MAX_AMOUNT`, `SCHEMA_VERSION`, `MIN_SQLITE_VERSION`; types `BudgetOptions`, `HoldOptions`, `Check`, `Decision`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`, `VoidedPayment`, `OwnerOptions`, `LimitOptions`, `Dollars`, `Micros`, `Window`, `RefusalCode`, `RefusalSource`, `Outcome`, `PaymentState`, `NotSent` |
 | `walletcap/x402` | `guard`, `MAX_PAYMENT_TIMEOUT_SECONDS`, `USD_ASSETS`, `COUNTED_SCHEMES`; types `AssetEntry`, `GuardOptions`, `PaymentRequirements`, `PaymentCreationContext`, `PaymentCreatedContext`, `PaymentCreationFailureContext`, `PaymentResponseContext`, `X402HookedClient` |
 | `walletcap/cdp` | `cdpStore`; types `SpendStore`, `SpendLedgerEntry`, `SpendLedgerEntryInput` |
 | `walletcap/agentkit` | `guardAgentKit`; types `AssetEntry`, `GuardOptions` |
@@ -55,14 +55,14 @@ app with esbuild and runs it from another folder.
 
 Every name in `walletcap.__all__`: `open_budget`, `Budget`, `Hold`, `Paying`, `open_owner`,
 `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `NotSent`,
-`BudgetWarning`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`,
+`BudgetWarning`, `Check`, `Decision`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`,
 `VoidedPayment`, `Micros`, `Dollars`, `Window`, `RefusalCode`, `RefusalSource`, `PaymentState`,
 `Outcome`, `to_micros`, `format_usd`, `default_budget_path`, `MAX_AMOUNT`, `SCHEMA_VERSION`,
 `MIN_SQLITE_VERSION` and `__version__`. The package has no dependencies.
 
 The Python names match the JavaScript ones, in Python's naming convention: `open_budget` for
 `openBudget`, `set_limits` for `setLimits`, `void_unknown` for `voidUnknown`, `payment_id` for
-`paymentId`, `windowMs` for `window_ms`, `busyTimeoutMs` for `busy_timeout_ms` (milliseconds in
+`paymentId`, `on_decision` for `onDecision`, `windowMs` for `window_ms`, `busyTimeoutMs` for `busy_timeout_ms` (milliseconds in
 both). The async forms of the payer's methods are `acheck`, `ahold`, `apayment`, `astatus`, `aholds`
 and `ahistory`, and a hold's are `asettle`, `avoid`, `asettles_by`, `asettles_within` and `anote`.
 Where a value's type differs, each takes its language's own: a hold's `settlesWithin` is
@@ -90,6 +90,17 @@ So `check(status().remaining)`, `check(remaining / 2n)` and `check(remaining // 
 micro-dollars in both. Converting an amount to a plain number yourself, `Number(remaining)` or
 `int(remaining)`, gives micro-dollars that walletcap would read as dollars: don't pass one back.
 ADR 0015 records why.
+
+### The decision log
+
+`onDecision` (Python `on_decision`) is called with a `Decision` for every hold admitted, payment
+refused and move of a hold made through a payer's handle. Its fields are public: `decision`
+(`held`, `refused`, `bound`, `noted`, `settled` or `void`), `at`, `wallet`, `amount`, `id`,
+`rail`, `to`, `code`, `source`, `brief`, `outcome`, `settlesBy` (`settles_by`) and `tx`. A release
+may add a field or a kind of decision. The file `WALLETCAP_LOG` names gets one line of JSON a
+decision, with those fields in that order in the shape `--json` prints, the same bytes from both
+packages apart from `at`. The log never changes a decision, and what a callback throws is never
+the caller's error.
 
 ### Errors
 
@@ -122,10 +133,11 @@ other message's, may change in any release.
 - `walletcap` (npm), and `walletcap` or `python -m walletcap` (PyPI): the commands `status`,
   `set`, `freeze`, `unfreeze`, `history`, `holds`, `void <id> [--evidence <text>]`,
   `void --all-unknown --older-than <duration>`,
-  `settle <id> [--tx <hash>] [--evidence <text>]`, `check <dollars>` and `doctor`, with the flags `--wallet`, `--path`,
+  `settle <id> [--tx <hash>] [--evidence <text>]`, `check <dollars>`, `doctor`, `watch` and
+  `init`, with the flags `--wallet`, `--path`,
   `--per-payment`, `--per-hour`, `--per-day`, `--per-week`, `--cap`, `--window`,
-  `--max-payments`, `--limit`, `--older-than`, `--all-unknown`, `--tx`, `--evidence` and
-  `--json`. The npm CLI also has `awal <command>`.
+  `--max-payments`, `--limit`, `--older-than`, `--all-unknown`, `--tx`, `--evidence`, `--since`,
+  `--for`, `--rail` and `--json`. The npm CLI also has `awal <command>`.
 - Exit codes: 0 when the command worked; 1 when walletcap refused or couldn't use the budget;
   2 when the command line is wrong. `check` exits 1 when the budget would refuse the payment,
   and `doctor` exits 1 when a check fails (a warning doesn't); both still print their answer.
@@ -135,6 +147,11 @@ other message's, may change in any release.
   `journal`, `rules`, `projection`, `budgets`, `frozen` and `open_holds`. A release may add a check; a
   message's wording may change. `sqlite_version` names the runtime's own SQLite, so it is the
   one field the two command lines may print differently.
+- `watch --json` prints JSON Lines, one object an entry, with the keys `seq`, `at`, `kind`,
+  `payment`, `wallet`, `amount`, `until`, `outcome`, `rail`, `to`, `note`, `evidence` and
+  `remaining`, in that order. `init --json` prints `status` (what `set --json` prints), `doctor`
+  (what `doctor --json` prints), `rail` and `snippet`. The rails are `pay`, `x402`, `cdp`,
+  `agentkit`, `awal`, `mcp` and `python`; a snippet's text may change in any release.
 - `--json` prints the same output from both command lines, field for field: object keys in
   snake_case (`window_ms`, `in_flight`, `counts_until`), every amount, count and duration as a
   string of decimal digits (micro-dollars for amounts), every time as an ISO 8601 UTC string to
