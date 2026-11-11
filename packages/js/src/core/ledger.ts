@@ -6,13 +6,13 @@
 // 10 ms wait), and wording refusals. The file
 // serves one host: SQLite's locks aren't reliable over NFS, SMB or Docker Desktop bind mounts.
 import { randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { DatabaseSync, SQLInputValue, StatementSync } from 'node:sqlite';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SCHEMA_SQL, UPGRADE_SQL } from './_spec.generated.js';
 import { attachClock, clockTick, detachClock } from './_clock.js';
+import { loadSqlite } from './_sqlite.js';
 import { BudgetRefused, BudgetUnavailable, isWalletcapError, type RefusalSource, UsageError } from './errors.js';
 import { formatAmount, formatWindow, MAX_AMOUNT, type Micros, normalizeWallet, shortWallet } from './money.js';
 
@@ -174,31 +174,6 @@ export interface LedgerOptions {
   create?: boolean;
 }
 
-type Sqlite = typeof import('node:sqlite');
-
-// node:sqlite prints an ExperimentalWarning when it loads (Node 22 and 24). Load it once with
-// that one warning held back, so an agent's logs stay clean.
-const require = createRequire(import.meta.url);
-let sqlite: Sqlite | undefined;
-const loadSqlite = (): Sqlite => {
-  if (sqlite !== undefined) return sqlite;
-  const emitWarning = process.emitWarning;
-  process.emitWarning = function quietSqlite(this: unknown, warning: string | Error, ...rest: unknown[]) {
-    const [first] = rest;
-    const type = typeof first === 'string' ? first : (first as { type?: string } | undefined)?.type;
-    if (type === 'ExperimentalWarning' && /SQLite/i.test(String((warning as Error)?.message ?? warning))) return;
-    (emitWarning as (...args: unknown[]) => void).call(process, warning, ...rest);
-  } as typeof process.emitWarning;
-  try {
-    sqlite = require('node:sqlite') as Sqlite;
-  } catch (error) {
-    throw new BudgetUnavailable(`walletcap needs Node 22.13 or later, for node:sqlite (${(error as Error).message})`, { cause: error });
-  } finally {
-    process.emitWarning = emitWarning;
-  }
-  return sqlite;
-};
-
 /** One spec file, split on its '-- @' lines. */
 export interface Spec {
   sections: Record<string, string>;
@@ -263,7 +238,8 @@ const parameterNames = (sql: string): string[] => [
   ...new Set([...sql.replace(/'(?:[^']|'')*'/g, "''").matchAll(/:([A-Za-z_][A-Za-z0-9_]*)/g)].map(m => m[1] ?? '')),
 ];
 
-const versionAtLeast = (version: string, least: string): boolean => {
+/** Internal: whether a dotted version is at least `least`. */
+export const versionAtLeast = (version: string, least: string): boolean => {
   const [a, b] = [version, least].map(text => text.split('.').map(Number)) as [number[], number[]];
   for (let i = 0; i < 3; i += 1) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
   return true;
@@ -298,6 +274,13 @@ export const paymentId = (value: unknown): string => {
     throw new UsageError('a payment id is 1 to 160 of letters, digits and _ . : @ / + -');
   }
   return value;
+};
+
+// The id of a payment about to be held: one a command line won't read as an option.
+const newPaymentId = (value: unknown): string => {
+  const id = paymentId(value);
+  if (id.startsWith('-')) throw new UsageError("a payment id can't start with '-': a command line reads it as an option");
+  return id;
 };
 
 const railName = (value: unknown): string => {
@@ -414,6 +397,17 @@ const guardMessage = (error: unknown): string | null => {
 // Another process holds the write lock: the attempt is retried after a wait.
 class Busy extends Error {}
 
+interface FileIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
+// Which file a path names right now, or null if it names none.
+const fileIdentity = (path: string): FileIdentity | null => {
+  const stat = statSync(path, { bigint: true, throwIfNoEntry: false });
+  return stat === undefined ? null : { dev: stat.dev, ino: stat.ino };
+};
+
 const isBusy = (error: unknown): boolean => (Number((error as { errcode?: unknown })?.errcode) & 0xff) === BUSY;
 
 type Args = Record<string, unknown>;
@@ -440,6 +434,8 @@ export class Ledger {
   readonly #path: string;
   readonly #busyTimeoutMs: number;
   #closed = false;
+  // The file this connection opened, once it is open: its device and inode.
+  #identity: FileIdentity | null = null;
   readonly #statements = new Map<string, Prepared>();
 
   private constructor(path: string, db: DatabaseSync, busyTimeoutMs: number) {
@@ -464,6 +460,13 @@ export class Ledger {
         closeSync(openSync(path, 'wx', 0o600));
       } catch (error) {
         if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw unusable(path, error);
+        // Another process created it first: fine. A link to a file that isn't there is not: SQLite
+        // would follow it and create the budget somewhere else, readable by anyone.
+        if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+          throw new BudgetUnavailable(
+            `the budget file ${path} is a symbolic link to a file that doesn't exist; walletcap creates a budget only at the path itself`,
+          );
+        }
       }
     }
     let db: DatabaseSync;
@@ -492,6 +495,7 @@ export class Ledger {
         }
       });
       await ledger.#prepareFile();
+      ledger.#identity = fileIdentity(path);
     } catch (error) {
       ledger.close();
       throw isWalletcapError(error) ? error : unusable(path, error);
@@ -614,6 +618,17 @@ export class Ledger {
   // One try: a whole transaction, synchronous, so nothing else on this thread sees it half done.
   #run<T>(begin: string, work: () => T): T {
     if (this.#closed) throw new BudgetUnavailable(`the budget file ${this.#path} is closed`);
+    // This connection keeps the file it opened, even once that file is deleted or another is
+    // moved into its place: it would go on counting in a file no other process sees, beside a new
+    // budget that starts from nothing. The path must still name the file that was opened.
+    if (this.#identity !== null) {
+      const now = fileIdentity(this.#path);
+      if (now === null || now.dev !== this.#identity.dev || now.ino !== this.#identity.ino) {
+        throw new BudgetUnavailable(
+          `the budget file ${this.#path} was ${now === null ? 'removed' : 'replaced'} after this process opened it, so what this process counted is no longer the wallet's budget: open the budget again`,
+        );
+      }
+    }
     clockTick();
     try {
       this.#db.exec(begin);
@@ -790,7 +805,7 @@ export class Ledger {
    * Admission: hold `amount` for a payment, or throw the BudgetRefused that says why not.
    * `until` (ms) or `withinMs` (from the ledger's now) bounds when it could settle. `limits`
    * are the paying process's own, tighter ones. Holding an identity already in the ledger
-   * returns that payment if the wallet and amount match.
+   * throws UsageError, which says where that payment stands.
    */
   hold(
     name: string,
@@ -816,7 +831,7 @@ export class Ledger {
     const args = {
       wallet,
       amount: units(amount, 'amount'),
-      payment: payment === null ? null : paymentId(payment),
+      payment: payment === null ? null : newPaymentId(payment),
       until: until === null ? null : millis(until, 'until'),
       within_ms: withinMs === null ? null : millis(withinMs, 'withinMs', { min: 1n }),
       rail: railName(rail),
@@ -846,8 +861,11 @@ export class Ledger {
             known,
           );
         }
+        // Ids are one namespace for the whole file. Another wallet's payment is named, not described.
         throw new UsageError(
-          `payment ${payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)} from ${shortWallet(existing.wallet)}`,
+          existing.wallet === wallet
+            ? `payment ${payment} is already in the ledger, for ${formatAmount(BigInt(existing.amount), why.unit)}`
+            : `payment ${payment} is already in the ledger, under another wallet's budget; use another id`,
           known,
         );
       }

@@ -101,8 +101,12 @@ class NotSent(Exception):  # noqa: N818 - says what happened, not that something
     """Raise inside ``with budget.pay(...)`` to say the payment never left the wallet.
 
     The payment is voided. Any other exception keeps it counting, because a payment that
-    failed halfway may still have moved money.
+    failed halfway may still have moved money. It speaks for one payment, the innermost
+    ``pay()`` block it leaves: a block around that one keeps counting, noted unknown.
     """
+
+    # Set once a pay() block has voided its payment for this exception.
+    _spent: bool = False
 
 
 class BudgetWarning(UserWarning):

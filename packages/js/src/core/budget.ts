@@ -13,7 +13,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { registerLedger } from './_ledgers.js';
-import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, UsageError } from './errors.js';
+import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, spendNotSent, UsageError } from './errors.js';
 import {
   type BudgetRow,
   Ledger,
@@ -87,7 +87,7 @@ export interface Check {
 export interface HoldOptions {
   /**
    * The payment's identity: the rail's own (eip3009:<from>:<nonce>, tx:<hash>) or your own key.
-   * One id is one payment: holding it again returns that payment. Defaults to a new one.
+   * One id is one payment, held once: holding it again throws UsageError. Defaults to a new one.
    */
   id?: string;
   /** Who is paid, for the history. */
@@ -242,7 +242,7 @@ const settlesByOf = (row: PaymentRow): Date | null => (row.until === null ? null
 const countsUntilOf = (row: PaymentRow): Date | null =>
   row.counts_from === null || row.counts_from === OPEN ? null : new Date(Number(row.counts_from + row.window_ms));
 
-const noteOf = (info: Info): string | undefined => textOf(info.note) ?? (info.network ? String(info.network) : undefined);
+const noteOf = (info: Info): string | undefined => textOf(info.note) ?? textOf(info.network);
 
 /** Internal: a history row as a Payment. */
 export function paymentOf(row: PaymentRow): Payment {
@@ -322,8 +322,15 @@ function summarize({
 
 /** Internal: ` --path "<file>"` unless it is the default file, for commands a message names. */
 export function pathFlag(path: string): string {
-  return path === resolve(defaultBudgetPath()) ? '' : ` --path ${JSON.stringify(path)}`;
+  return path === resolve(defaultBudgetPath()) ? '' : ` --path ${shellQuote(path)}`;
 }
+
+// A path as a POSIX shell reads one word, as Python's shlex.quote writes it: double quotes would
+// let $(…) in a path run when its owner pastes the command.
+const shellQuote = (text: string): string => {
+  if (process.platform === 'win32') return /[\s"]/.test(text) || text === '' ? `"${text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"` : text;
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(text) ? text : `'${text.replaceAll("'", `'"'"'`)}'`;
+};
 
 // --- The paying process's own limits ---------------------------------------------------------
 
@@ -586,8 +593,12 @@ export class Budget {
       result = await fn(hold);
     } catch (error) {
       if (hold.state === 'held') {
+        // The tag is one payment's, this one's: a pay() around this one finds it spent, and
+        // notes its own payment unknown.
+        const never = isNotSent(error);
+        spendNotSent(error);
         try {
-          if (isNotSent(error)) await hold.void({ evidence: `not sent: ${errorText(error)}` });
+          if (never) await hold.void({ evidence: `not sent: ${errorText(error)}` });
           else await hold.note('unknown', errorText(error));
         } catch {
           // Recording failed; the payment stays held, and keeps counting.
@@ -595,9 +606,12 @@ export class Budget {
       }
       throw error;
     }
-    if (hold.state === 'held') {
+    // A function that voided its hold, then paid after all and returns the transaction, is
+    // settled, so the payment counts. A void hold with nothing to show stays void.
+    const tx = transactionOf(result);
+    if (hold.state === 'held' || (hold.state === 'void' && tx !== undefined)) {
       try {
-        await hold.settle({ tx: transactionOf(result) });
+        await hold.settle({ tx });
       } catch (error) {
         throw new PaymentNotRecorded(hold.id, { cause: error });
       }

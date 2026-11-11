@@ -1,0 +1,39 @@
+{
+  "about": "Wallet names: one address is one budget, however it is written, and a spelling walletcap doesn't reduce to the address is refused, not kept as a second budget. Both packages' tests read this file.",
+  "same": [
+    {
+      "name": "0xd797ead28c38575fdf4fc523866287372340ca02",
+      "spellings": [
+        "0xd797ead28c38575fdf4fc523866287372340ca02",
+        "0xd797ead28C38575FDf4fC523866287372340Ca02",
+        "0xD797EAD28C38575FDF4FC523866287372340CA02",
+        "eip155:8453:0xd797ead28c38575fdf4fc523866287372340ca02",
+        "eip155:1:0xd797ead28C38575FDf4fC523866287372340Ca02",
+        " 0xd797ead28c38575fdf4fc523866287372340ca02\n"
+      ]
+    },
+    {
+      "name": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "spellings": [
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      ]
+    },
+    { "name": "card-visa-4242", "spellings": ["card-visa-4242", " card-visa-4242 "] },
+    { "name": "ops.treasury/eu", "spellings": ["ops.treasury/eu"] }
+  ],
+  "refused": [
+    { "input": "EIP155:8453:0xd797ead28c38575fdf4fc523866287372340ca02", "why": "an uppercase scheme is not CAIP-10, and would be a second budget" },
+    { "input": "base:0xd797ead28c38575fdf4fc523866287372340ca02", "why": "an ERC-3770 short name" },
+    { "input": "ethereum:0xd797ead28c38575fdf4fc523866287372340ca02", "why": "an EIP-681 prefix" },
+    { "input": "did:pkh:eip155:1:0xd797ead28c38575fdf4fc523866287372340ca02", "why": "a DID around the address" },
+    { "input": "eip155:8453:0xd797ead28c38575fdf4fc523866287372340ca02@x", "why": "CAIP-10 with a suffix" },
+    { "input": "agent-0xd797ead28c38575fdf4fc523866287372340ca02", "why": "a name around the address" },
+    { "input": "d797ead28c38575fdf4fc523866287372340ca02", "why": "the 40 digits with no 0x" },
+    { "input": "0Xd797ead28c38575fdf4fc523866287372340ca02", "why": "an uppercase 0X" },
+    { "input": "0xd797ead28c38575fdf4fc523866287372340ca0", "why": "39 digits: a truncated address" },
+    { "input": "0xD797ead28C38575FDf4fC523866287372340Ca02", "why": "mixed case that fails EIP-55" },
+    { "input": "has space", "why": "not a plain name" },
+    { "input": "", "why": "empty" }
+  ]
+}

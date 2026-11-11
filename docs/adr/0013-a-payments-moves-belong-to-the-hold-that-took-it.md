@@ -21,7 +21,8 @@ from that:
 - The payer's moves, the statements `settle`, `void`, `bound` and `note`, append only when
   `:holder` matches the held entry's token. Without it the client says why: "payment X was held
   by another process: only that process, or the budget's owner, can void it".
-- Settling a payment that is already settled appends nothing and succeeds for anyone.
+- Settling a payment that is already settled appends nothing. It succeeds for the hold that took
+  the payment and for the owner; without the token it is refused, like any other move.
 - The owner's moves are statements of their own, `owner_settle` and `owner_void`. They take
   evidence and no token: the owner reconciles any payment from what the chain shows.
 - A voided id is spent. Holding it again is refused with `UsageError` ("payment X was voided;

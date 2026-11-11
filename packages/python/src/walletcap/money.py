@@ -274,6 +274,8 @@ _FLOAT = re.compile(r"([0-9]+)(?:\.([0-9]*))?(?:e([+-]?[0-9]+))?")
 _DURATION_MS: Final = {"ms": 1, "s": 1_000, "m": 60_000, "h": HOUR_MS, "d": DAY_MS, "w": WEEK_MS}
 _DURATION_WORDS: Final = {"hour": HOUR_MS, "day": DAY_MS, "week": WEEK_MS}
 _EVM_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+_EVM_INSIDE = re.compile(r"0[xX][0-9a-fA-F]{40}")
+_EVM_BARE = re.compile(r"[0-9a-fA-F]{40}")
 _CAIP10_EVM = re.compile(r"eip155:[0-9]+:(0x[0-9a-fA-F]{40})")
 _CAIP10_SOLANA = re.compile(r"solana:[1-9A-HJ-NP-Za-km-z]+:([1-9A-HJ-NP-Za-km-z]{32,44})")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}")
@@ -496,6 +498,13 @@ def normalize_wallet(wallet: object) -> str:
     # A mistyped address must not quietly open a second budget.
     if name[:2].lower() == "0x":
         raise UsageError(f"wallet {name!r} looks like an EVM address but is not 40 hex digits")
+    # Nor may another spelling of one: "base:0x…", "EIP155:1:0x…", "did:pkh:eip155:1:0x…" or the
+    # 40 digits with no 0x would each be a budget of its own beside the address's.
+    if _EVM_INSIDE.search(name) or _EVM_BARE.fullmatch(name):
+        raise UsageError(
+            f"wallet {name!r} carries an EVM address in a form walletcap doesn't read; "
+            "pass the address itself, or eip155:<chain>:<address>"
+        )
     if _IDENTIFIER.fullmatch(name) is None:
         raise UsageError(
             "wallet must be an address or a plain name "

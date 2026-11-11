@@ -4,7 +4,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import type { Status } from '../core/budget.js';
+import { openBudget, type Status } from '../core/budget.js';
 import { BudgetUnavailable, isWalletcapError } from '../core/errors.js';
 import type { LimitOptions } from '../core/money.js';
 import {
@@ -17,11 +17,13 @@ import {
   normalizeWallet,
   shortWallet,
   storedWalletName,
+  toMicros,
   toWindowMs,
   trimAscii,
 } from '../core/money.js';
 import { openOwner, type Owner } from '../core/owner.js';
 import { toWire } from '../core/wire.js';
+import { doctor, doctorText } from './doctor.js';
 
 const { version } = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { version: string };
 
@@ -45,6 +47,11 @@ Commands
                        its failure; any other with none, a transfer say, only goes by id
   settle <id> [--tx <hash>] [--evidence <what shows it>]
                        A payment you know paid: it counts through one window from now
+  check <dollars>      Whether a payment of that much would be paid right now, without holding
+                       it: exits 0 if it would, 1 if the budget would refuse it
+  doctor               Check the budget file before you rely on it: its permissions, its
+                       filesystem, its format, and that the rule's triggers are all in place.
+                       It reads only, and exits 1 if a check fails
   awal <command>       Coinbase's Agentic Wallet CLI, with send and x402 pay counted in the budget.
                        For its MCP server, use the walletcap-mcp package: npx walletcap-mcp --wallet <address>
 
@@ -110,6 +117,13 @@ const json = (value: unknown): string => JSON.stringify(toWire(value), null, 2);
 const pathOf = (values: Values): string => resolve(expandHome(values.path ?? defaultBudgetPath()));
 
 const iso = (date: Date): string => date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+// What a terminal acts on, not prints: C0 and C1 controls, DEL, and the bidi marks that reorder a
+// line. A payee's URL, a payee's "transaction" and a payer's note all reach these lists.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it removes
+const CONTROLS = /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+/** `text` as a terminal can only print it: each control character becomes U+FFFD. */
+const plain = (text: string): string => text.replace(CONTROLS, '\ufffd');
 
 // The limits named on the command line, as the owner's handle takes them.
 const limitsOf = (values: Values): LimitOptions => {
@@ -204,7 +218,10 @@ const paymentFor = async (owner: Owner, values: Values, id: string, path: string
   return row;
 };
 
-type Command = (values: Values, path: string, rest: string[]) => Promise<string>;
+// What a command prints, and the exit code when it isn't 0: a check that says no, a doctor that
+// finds a problem. Both still print their answer to stdout.
+type Output = string | { text: string; code: number };
+type Command = (values: Values, path: string, rest: string[]) => Promise<Output>;
 
 const commands: Record<string, Command> = {
   async status(values, path) {
@@ -268,8 +285,8 @@ const commands: Record<string, Command> = {
             formatUsd(row.amount).padStart(10),
             row.status.padEnd(9),
             row.rail.padEnd(6),
-            row.to ? `to ${shortWallet(row.to.toLowerCase())}` : '',
-            row.tx ? `tx ${row.tx}` : (row.note ?? ''),
+            row.to ? `to ${plain(shortWallet(row.to.toLowerCase()))}` : '',
+            row.tx ? `tx ${plain(row.tx)}` : plain(row.note ?? ''),
             row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown' ? `(${row.id})` : '',
             row.rail === 'cdp' && (row.status === 'in flight' || row.status === 'refused' || row.status === 'unknown') ? CDP_HISTORY : '',
           ]
@@ -293,7 +310,7 @@ const commands: Record<string, Command> = {
             hold.reason.padEnd(9),
             `${formatAge(hold.ageMs)} old`.padEnd(12),
             hold.rail.padEnd(6),
-            hold.to ? `to ${shortWallet(hold.to.toLowerCase())}` : (hold.note ?? ''),
+            hold.to ? `to ${plain(shortWallet(hold.to.toLowerCase()))}` : plain(hold.note ?? ''),
             hold.countsUntil === null ? 'counts until voided or settled' : `counts until ${iso(hold.countsUntil)}`,
             hold.rail === 'cdp' ? cdpSigned(hold.settlesBy) : '',
           ]
@@ -327,6 +344,28 @@ const commands: Record<string, Command> = {
       const until = settled.countsUntil === null ? '' : `; it counts until ${iso(settled.countsUntil)}`;
       return `Settled ${id} (${formatUsd(row.amount)} from ${shortWallet(row.wallet)})${until}.`;
     });
+  },
+
+  async check(values, path, [amount]) {
+    if (amount === undefined) throw new Usage('check needs an amount in dollars, like: walletcap check 12.50');
+    const wallet = await walletOf(values, path);
+    const budget = await openBudget({ wallet, path });
+    try {
+      const check = await budget.check(amount);
+      const text = values.json
+        ? json(check)
+        : check.ok
+          ? `Yes: ${formatUsd(toMicros(amount))} from ${shortWallet(wallet)} would be paid now. ${formatUsd(check.remaining)} is left in its window.`
+          : `No: ${check.message}`;
+      return { text, code: check.ok ? 0 : 1 };
+    } finally {
+      budget.close();
+    }
+  },
+
+  async doctor(values, path) {
+    const report = doctor(path, { wallet: values.wallet });
+    return { text: values.json ? json(report) : doctorText(report), code: report.ok ? 0 : 1 };
   },
 };
 
@@ -362,8 +401,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 2;
   }
   try {
-    process.stdout.write(`${await run(values, pathOf(values), rest)}\n`);
-    return 0;
+    const output = await run(values, pathOf(values), rest);
+    process.stdout.write(`${typeof output === 'string' ? output : output.text}\n`);
+    return typeof output === 'string' ? 0 : output.code;
   } catch (error) {
     if (error instanceof Usage) {
       process.stderr.write(`${error.message}\n`);

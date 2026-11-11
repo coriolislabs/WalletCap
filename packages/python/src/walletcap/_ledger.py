@@ -170,6 +170,15 @@ def payment_id(value: object) -> str:
     return value
 
 
+def _new_id(value: object) -> str:
+    """The id of a payment about to be held: one a command line won't read as an option."""
+
+    key = payment_id(value)
+    if key.startswith("-"):
+        raise UsageError("a payment id can't start with '-': a command line reads it as an option")
+    return key
+
+
 def _rail(value: object) -> str:
     if not isinstance(value, str) or _RAIL.fullmatch(value) is None:
         raise UsageError("rail must be a plain identifier")
@@ -269,7 +278,11 @@ def cdp_hold_note(payment: str, until: int | None) -> str:
 
 
 def _iso_seconds(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        moment = datetime.fromtimestamp(ms / 1000, tz=UTC)
+    except (OverflowError, ValueError, OSError):
+        moment = datetime.max.replace(tzinfo=UTC)  # the ledger's times outlast a datetime
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _held_note(held_payments: int, holds: list[Row]) -> str:
@@ -407,11 +420,18 @@ class Ledger:
         if not self._path.exists():
             if not create:
                 raise BudgetUnavailable(f"no budget file at {self._path}")
-            self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _private_folder(self._path.parent)
             try:
                 os.close(os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
             except FileExistsError:
-                pass
+                # Another process created it first: fine. A link to a file that isn't there is
+                # not: SQLite would follow it and create the budget somewhere else, readable by
+                # anyone.
+                if self._path.is_symlink():
+                    raise BudgetUnavailable(
+                        f"the budget file {self._path} is a symbolic link to a file that doesn't "
+                        "exist; walletcap creates a budget only at the path itself"
+                    ) from None
             except OSError as error:
                 raise BudgetUnavailable(
                     f"the budget file {self._path} cannot be used: {error}"
@@ -429,8 +449,14 @@ class Ledger:
 
     def _connect(self) -> sqlite3.Connection:
         try:
+            # mode=rw: SQLite opens the file and never creates one. A budget file deleted under
+            # a running process is unavailable; it is not replaced by an empty file anyone can
+            # read, for the next open to write a schema into.
             connection = sqlite3.connect(
-                self._path, timeout=self._busy_timeout, isolation_level=None
+                f"{self._path.absolute().as_uri()}?mode=rw",
+                uri=True,
+                timeout=self._busy_timeout,
+                isolation_level=None,
             )
         except sqlite3.Error as error:
             raise BudgetUnavailable(
@@ -713,7 +739,7 @@ class Ledger:
 
         ``until`` (ms) or ``within_ms`` (from the ledger's now) bounds when it could settle.
         ``limits`` are the paying process's own, tighter ones. Holding an identity already in
-        the ledger returns that payment if the wallet and amount match.
+        the ledger raises UsageError, which says where that payment stands.
         """
 
         wallet = normalize_wallet(name)
@@ -723,7 +749,7 @@ class Ledger:
         args: dict[str, object] = {
             "wallet": wallet,
             "amount": spend,
-            "payment": None if payment is None else payment_id(payment),
+            "payment": None if payment is None else _new_id(payment),
             "until": until_ms,
             "within_ms": None if within_ms is None else millis(within_ms, "within_ms", low=1),
             "rail": _rail(rail),
@@ -761,13 +787,19 @@ class Ledger:
                         payment_id=payment,
                         payment_state=state,
                     )
-                raise UsageError(
-                    f"payment {payment} is already in the ledger, for "
-                    f"{format_amount(existing['amount'], why['unit'])} from "
-                    f"{short_wallet(existing['wallet'])}",
-                    payment_id=payment,
-                    payment_state=state,
-                )
+                # Ids are one namespace for the whole file. Another wallet's payment is named,
+                # not described.
+                if existing["wallet"] == wallet:
+                    message = (
+                        f"payment {payment} is already in the ledger, for "
+                        f"{format_amount(existing['amount'], why['unit'])}"
+                    )
+                else:
+                    message = (
+                        f"payment {payment} is already in the ledger, under another wallet's "
+                        "budget; use another id"
+                    )
+                raise UsageError(message, payment_id=payment, payment_state=state)
             if why["settles_too_soon"] and until_ms is not None:
                 raise UsageError(
                     f"settles_by {_iso(until_ms)} is not after now ({_iso(why['now'])}): "
@@ -958,6 +990,19 @@ class Ledger:
 
 
 _LEGACY_TABLES = ("spend", "budgets")
+
+
+def _private_folder(folder: Path) -> None:
+    """Create ``folder`` and every missing folder above it, each 0700, as Node's mkdir does."""
+
+    missing = []
+    while not folder.exists():
+        missing.append(folder)
+        folder = folder.parent
+    for made in reversed(missing):
+        made.mkdir(mode=0o700, exist_ok=True)
+
+
 """The tables walletcap 0.2 and 0.3 create, empty, in a newer file before they refuse it."""
 
 

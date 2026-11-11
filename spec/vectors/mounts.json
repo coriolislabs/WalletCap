@@ -1,0 +1,26 @@
+{
+  "about": "walletcap doctor's filesystem check: /proc/self/mountinfo text, and the filesystem type each path is on. Both packages' tests read this file.",
+  "mountinfo": [
+    "22 28 0:21 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw",
+    "28 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw,errors=remount-ro",
+    "31 28 0:26 / /tmp rw,nosuid,nodev shared:9 - tmpfs tmpfs rw",
+    "96 28 0:52 / /mnt/team rw,relatime shared:60 - nfs4 fileserver:/export/team rw,vers=4.2",
+    "97 28 0:53 / /mnt/share\\040drive rw,relatime shared:61 - cifs //nas/share rw,vers=3.1.1",
+    "98 28 0:54 / /workspace rw,relatime - virtiofs workspace rw",
+    "99 98 259:3 / /workspace/data rw,relatime - xfs /dev/nvme1n1 rw",
+    "100 28 0:55 / /home/agent/remote rw,nosuid,nodev,relatime - fuse.sshfs agent@host:/srv rw,user_id=1000,group_id=1000",
+    "101 28 0:56 / /media/usb rw,nosuid,nodev,relatime - fuseblk /dev/sdb1 rw,user_id=0,group_id=0,allow_other,blksize=4096",
+    "102 28 0:57 / /mnt/team rw,relatime shared:62 - ext4 /dev/sdc1 rw"
+  ],
+  "cases": [
+    { "path": "/home/agent/.local/state/walletcap/budget.sqlite", "type": "ext4" },
+    { "path": "/tmp/budget.sqlite", "type": "tmpfs" },
+    { "path": "/tmpfile/budget.sqlite", "type": "ext4" },
+    { "path": "/mnt/team/budget.sqlite", "type": "ext4" },
+    { "path": "/mnt/share drive/walletcap/budget.sqlite", "type": "cifs" },
+    { "path": "/workspace/budget.sqlite", "type": "virtiofs" },
+    { "path": "/workspace/data/budget.sqlite", "type": "xfs" },
+    { "path": "/home/agent/remote/budget.sqlite", "type": "fuse.sshfs" },
+    { "path": "/media/usb/budget.sqlite", "type": "fuseblk" }
+  ]
+}

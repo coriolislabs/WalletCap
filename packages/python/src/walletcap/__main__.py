@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import re
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -17,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from walletcap import __version__
-from walletcap.budget import UNSET, PaymentRecord, Status
+from walletcap._doctor import doctor, doctor_text
+from walletcap.budget import UNSET, Budget, PaymentRecord, Status
 from walletcap.errors import BudgetUnavailable, UsageError, is_walletcap_error
 from walletcap.money import (
     Micros,
@@ -31,12 +33,27 @@ from walletcap.money import (
     short_wallet,
     stored_wallet_name,
     strip_ascii,
+    to_micros,
     to_window_ms,
 )
 from walletcap.owner import Owner
 
 _EPILOG = "Amounts are dollars: --per-day 150. Leave out the $ sign, which your shell would expand."
-_COMMAND_NAMES = ["status", "set", "freeze", "unfreeze", "history", "holds", "void", "settle"]
+_COMMAND_NAMES = [
+    "status",
+    "set",
+    "freeze",
+    "unfreeze",
+    "history",
+    "holds",
+    "void",
+    "settle",
+    "check",
+    "doctor",
+]
+# What a command prints, and the exit code when it isn't 0: a check that says no, a doctor that
+# finds a problem. Both still print their answer to stdout.
+_Output = str | tuple[str, int]
 
 
 class _ArgumentError(Exception):
@@ -56,14 +73,18 @@ def _whole(text: str) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
+    # No abbreviations: --all must not mean --all-unknown. The npm command line is as strict.
     parser = argparse.ArgumentParser(
         prog="walletcap",
         description="One spend budget per wallet, for every agent that pays from it.",
         epilog=_EPILOG,
+        allow_abbrev=False,
     )
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("command", nargs="?", default="status", choices=_COMMAND_NAMES)
-    parser.add_argument("id", nargs="?", help="the payment to void or settle")
+    parser.add_argument(
+        "id", nargs="?", help="the payment to void or settle, or the dollars to check"
+    )
     parser.add_argument("--wallet", help="the wallet the money leaves from")
     parser.add_argument("--path", help=f"the budget file (default: {default_budget_path()})")
     parser.add_argument("--per-payment", help="most one payment may spend, or none")
@@ -115,6 +136,17 @@ def _json(value: Any) -> str:
 
 def _iso(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# What a terminal acts on, not prints: C0 and C1 controls, DEL, and the bidi marks that reorder a
+# line. A payee's URL, a payee's "transaction" and a payer's note all reach these lists.
+_CONTROLS = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _plain(text: str) -> str:
+    """``text`` as a terminal can only print it: each control character becomes U+FFFD."""
+
+    return _CONTROLS.sub("\ufffd", text)
 
 
 def _owner(path: Path, *, create: bool = False) -> Owner:
@@ -204,7 +236,9 @@ def _set(args: argparse.Namespace, path: Path) -> str:
         "window": args.window,
         "max_payments": max_payments,
     }
-    if all(value is None or value is UNSET for value in limits.values()):
+    # "none" is a limit too: it takes the per-payment limit, or the count's, away.
+    named = [key for key, value in limits.items() if value is not None and value is not UNSET]
+    if not named and args.per_payment is None and args.max_payments is None:
         raise _ArgumentError("set needs a limit, like --per-day 150 or --per-payment 50")
     if args.wallet is None and len(_wallets(path)) != 1:
         raise _ArgumentError("set needs --wallet <address>")
@@ -259,8 +293,8 @@ def _history(args: argparse.Namespace, path: Path) -> str:
             format_usd(payment.amount).rjust(10),
             payment.status.ljust(9),
             payment.rail.ljust(6),
-            f"to {short_wallet(payment.to.lower())}" if payment.to else "",
-            f"tx {payment.tx}" if payment.tx else (payment.note or ""),
+            f"to {_plain(short_wallet(payment.to.lower()))}" if payment.to else "",
+            f"tx {_plain(payment.tx)}" if payment.tx else _plain(payment.note or ""),
             f"({payment.id})" if payment.status in ("in flight", "refused", "unknown") else "",
             _CDP_HISTORY
             if payment.rail == "cdp" and payment.status in ("in flight", "refused", "unknown")
@@ -303,7 +337,7 @@ def _holds(args: argparse.Namespace, path: Path) -> str:
             hold.reason.ljust(9),
             f"{format_age(hold.age_ms)} old".ljust(12),
             hold.rail.ljust(6),
-            f"to {short_wallet(hold.to.lower())}" if hold.to else (hold.note or ""),
+            f"to {_plain(short_wallet(hold.to.lower()))}" if hold.to else _plain(hold.note or ""),
             until,
             _cdp_signed(hold.settles_by) if hold.rail == "cdp" else "",
         ]
@@ -400,7 +434,34 @@ def _settle(args: argparse.Namespace, path: Path) -> str:
     )
 
 
-_COMMANDS: dict[str, Callable[[argparse.Namespace, Path], str]] = {
+def _check(args: argparse.Namespace, path: Path) -> _Output:
+    """Whether a payment of that much would be paid right now, without holding it."""
+
+    if args.id is None:
+        raise _ArgumentError("check needs an amount in dollars, like: walletcap check 12.50")
+    wallet = _wallet(args, path)
+    with Budget(wallet, path=path) as budget:
+        check = budget.check(args.id)
+    if args.json:
+        text = _json(check)
+    elif check.ok:
+        text = (
+            f"Yes: {format_usd(to_micros(args.id))} from {short_wallet(wallet)} would be paid "
+            f"now. {format_usd(check.remaining)} is left in its window."
+        )
+    else:
+        text = f"No: {check.message}"
+    return text, 0 if check.ok else 1
+
+
+def _doctor(args: argparse.Namespace, path: Path) -> _Output:
+    """Check the budget file before relying on it. It reads only."""
+
+    report = doctor(path, wallet=args.wallet)
+    return _json(report) if args.json else doctor_text(report), 0 if report["ok"] else 1
+
+
+_COMMANDS: dict[str, Callable[[argparse.Namespace, Path], _Output]] = {
     "status": _status,
     "set": _set,
     "freeze": _freeze,
@@ -409,6 +470,8 @@ _COMMANDS: dict[str, Callable[[argparse.Namespace, Path], str]] = {
     "holds": _holds,
     "void": _void,
     "settle": _settle,
+    "check": _check,
+    "doctor": _doctor,
 }
 
 
@@ -425,8 +488,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     _utf8(sys.stderr)
     args = _parser().parse_args(argv)
     path = expand_home(args.path if args.path is not None else default_budget_path()).absolute()
+    code = 0
     try:
-        print(_COMMANDS[args.command](args, path))
+        output = _COMMANDS[args.command](args, path)
+        if isinstance(output, tuple):
+            output, code = output
+        print(output)
     except _ArgumentError as error:
         print(error, file=sys.stderr)
         return 2
@@ -435,7 +502,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise
         print(error, file=sys.stderr)
         return 1
-    return 0
+    return code
 
 
 if __name__ == "__main__":

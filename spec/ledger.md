@@ -53,8 +53,8 @@ payment stays `HELD`, noted `unknown`.
 
 Two parties append transitions. The paying process's statements, `settle`, `void`, `bound` and
 `note`, need the token its hold returned (Identity, below); without it they append nothing, and
-the client refuses the move, except settling a payment that is already settled, which succeeds
-for anyone. The owner's, `owner_settle` and `owner_void`, need no token: they reconcile a
+the client refuses the move, a settled payment's included. The owner's, `owner_settle` and
+`owner_void`, need no token (settling a payment that is already settled succeeds): they reconcile a
 payment, whoever held it, from evidence such as the chain's record.
 
 The owner's bulk release, `void_unknown`, voids every `HELD` payment of `unknown` or `refused`

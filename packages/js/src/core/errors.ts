@@ -94,17 +94,33 @@ export const forAgent = (error: unknown): unknown =>
 /** An error tagged with notSent(). */
 export type NotSent<E> = E & { notSent: true };
 
+// The tag pay() reads. A registered symbol, so two copies of the package agree on it, and no
+// parsed JSON or Object.assign(error, body) can carry it: a payee's `"notSent": true` in an error
+// body is only a string key, and voids nothing.
+const NOT_SENT = Symbol.for('walletcap.notSent');
+
 /**
  * Tag an error to say the payment never left the wallet, so `pay()` voids it instead of
  * counting it: `throw notSent(error)` or `throw notSent('card declined')`. Untagged errors keep
- * counting, because a payment that failed halfway may still have moved money.
+ * counting, because a payment that failed halfway may still have moved money. The tag speaks for
+ * one payment: the innermost `pay()` it is thrown out of.
  */
 export function notSent<E>(error?: E): E extends Error ? NotSent<E> : NotSent<Error> {
   const tagged = (error instanceof Error ? error : new Error(error === undefined ? 'the payment was not sent' : String(error))) as Error & {
     notSent?: boolean;
   };
   tagged.notSent = true;
+  Object.defineProperty(tagged, NOT_SENT, { value: true, writable: true, configurable: true });
   return tagged as E extends Error ? NotSent<E> : NotSent<Error>;
 }
 
-export const isNotSent = (error: unknown): boolean => error !== null && typeof error === 'object' && (error as { notSent?: unknown }).notSent === true;
+/**
+ * Internal: the tag is used up. It speaks for one payment, the innermost pay() it leaves: a pay()
+ * around that one may already have paid, and keeps counting.
+ */
+export const spendNotSent = (error: unknown): void => {
+  if (isNotSent(error)) (error as { [NOT_SENT]?: boolean })[NOT_SENT] = false;
+};
+
+/** Whether notSent() tagged `error`. A `notSent` property alone doesn't count: data can set one. */
+export const isNotSent = (error: unknown): boolean => error !== null && typeof error === 'object' && (error as { [NOT_SENT]?: unknown })[NOT_SENT] === true;

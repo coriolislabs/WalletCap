@@ -198,6 +198,13 @@ export function normalizeWallet(wallet: unknown): string {
   }
   // A mistyped address must not quietly open a second budget.
   if (/^0x/i.test(name)) throw new UsageError(`wallet ${JSON.stringify(name)} looks like an EVM address but is not 40 hex digits`);
+  // Nor may another spelling of one: "base:0x…", "EIP155:1:0x…", "did:pkh:eip155:1:0x…" or the
+  // 40 digits with no 0x would each be a budget of its own beside the address's.
+  if (/0[xX][0-9a-fA-F]{40}/.test(name) || /^[0-9a-fA-F]{40}$/.test(name)) {
+    throw new UsageError(
+      `wallet ${JSON.stringify(name)} carries an EVM address in a form walletcap doesn't read; pass the address itself, or eip155:<chain>:<address>`,
+    );
+  }
   if (!IDENTIFIER.test(name)) {
     throw new UsageError('wallet must be an address or a plain name (letters, digits and _ . : @ / -, at most 128)');
   }

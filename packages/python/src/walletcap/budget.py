@@ -87,6 +87,8 @@ UNSET: Final = _Unset.UNSET
 """A limit left out: no opinion, as opposed to None (no limit)."""
 
 _OPEN: Final = 2**63 - 1
+_EVIDENCE_LIMIT: Final = 1024
+_MAX_COUNT: Final = 2**63 - 1  # what fits in SQLite's 64-bit integers
 
 PaymentState = Literal["held", "settled", "void"]
 """A payment's state in the ledger: ``held``, ``settled`` or ``void``."""
@@ -241,7 +243,7 @@ def _limits(
     if max_payments is not UNSET:
         if max_payments is None:
             limits["max_payments"] = None
-        elif type(max_payments) is int and max_payments >= 0:
+        elif type(max_payments) is int and 0 <= max_payments <= _MAX_COUNT:
             limits["max_payments"] = max_payments
         else:
             raise UsageError("max_payments must be a whole number of payments")
@@ -291,20 +293,48 @@ def _duration_ms(duration: object, label: str) -> int:
 
 
 def _error_text(error: BaseException) -> str:
-    return str(error)[:200]
+    # A lone surrogate, from a payee's JSON say, can't be stored: it is replaced, not raised on.
+    return str(error)[:200].encode("utf-8", "replace").decode("utf-8")
+
+
+def _evidence(tx: object) -> str | None:
+    """A transaction hash as the ledger keeps it, or None for anything that isn't one.
+
+    web3.py returns a hash as bytes (HexBytes). Evidence that can't be kept is dropped, never a
+    reason to leave a payment that paid unrecorded.
+    """
+
+    if isinstance(tx, bytes | bytearray):
+        return "0x" + bytes(tx).hex()
+    if isinstance(tx, str) and tx:
+        return tx[:_EVIDENCE_LIMIT].encode("utf-8", "replace").decode("utf-8")
+    return None
+
+
+def _text_of(value: object) -> str | None:
+    """A field of a payment's info, if it is the string it should be."""
+
+    return value if isinstance(value, str) else None
 
 
 # --- Views of the ledger's rows, shared with the owner's handle -------------------------------
 
 
+# The ledger keeps times up to 10^15 ms, about the year 33,658; a datetime stops at 9999.
+_LAST_MOMENT = datetime.max.replace(tzinfo=UTC)
+
+
 def _moment(ms: int) -> datetime:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    try:
+        return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    except (OverflowError, ValueError, OSError):
+        return _LAST_MOMENT
 
 
 def _info(text: str | None) -> dict[str, Any]:
     try:
         info = json.loads(text) if text else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}
     return info if isinstance(info, dict) else {}
 
@@ -344,9 +374,9 @@ def payment_of(row: Row) -> Payment:
         bool(row["counting"]),
         _moment(row["held_at"]),
         row["rail"],
-        info.get("to") or info.get("payTo"),
-        info.get("note") or info.get("network"),
-        row["settled_by"] or info.get("tx"),
+        _text_of(info.get("to")) or _text_of(info.get("payTo")),
+        _text_of(info.get("note")) or _text_of(info.get("network")),
+        row["settled_by"] or _text_of(info.get("tx")),
     )
 
 
@@ -385,9 +415,9 @@ def held_payment_of(row: Row) -> HeldPayment:
         _settles_by(row),
         _counts_until(row),
         row["rail"],
-        info.get("to") or info.get("payTo"),
-        info.get("note") or info.get("network"),
-        row["noted"] or info.get("error"),
+        _text_of(info.get("to")) or _text_of(info.get("payTo")),
+        _text_of(info.get("note")) or _text_of(info.get("network")),
+        row["noted"] or _text_of(info.get("error")),
     )
 
 
@@ -514,7 +544,7 @@ class Hold:
 
         # Settling a payment this hold already settled is a no-op.
         self._state = self._ledger.settle(
-            self._id, holder=self._token("settle"), evidence=tx or self.tx
+            self._id, holder=self._token("settle"), evidence=_evidence(tx) or _evidence(self.tx)
         )["state"]
 
     def void(self, *, evidence: str | None = None) -> None:
@@ -677,7 +707,11 @@ class Paying:
         traceback: TracebackType | None,
     ) -> None:
         hold = self._hold
-        if hold is None or hold.state != "held":
+        if hold is None or hold.state == "settled":
+            return
+        # A block that voided its hold, then paid after all and says so with a transaction, is
+        # settled, so the payment counts. A void hold with nothing to show stays void.
+        if hold.state == "void" and (exc is not None or _evidence(hold.tx) is None):
             return
         if exc is None:
             try:
@@ -685,9 +719,14 @@ class Paying:
             except Exception as error:
                 raise PaymentNotRecorded(hold.id, error) from error
             return
-        # If recording fails too, the payment stays held and keeps counting.
-        with contextlib.suppress(BudgetUnavailable, UsageError):
-            if isinstance(exc, NotSent) or getattr(exc, "not_sent", False) is True:
+        # If recording fails too, whatever the reason, the payment stays held and keeps counting,
+        # and the block's own exception is the one that leaves.
+        with contextlib.suppress(Exception):
+            # Only the NotSent class says so. An attribute named not_sent doesn't: an exception
+            # built from a payee's error body could carry one. And it says so once, about the
+            # innermost block it leaves: a block around that one may already have paid.
+            if isinstance(exc, NotSent) and not exc._spent:
+                exc._spent = True
                 hold.void(evidence=f"not sent: {_error_text(exc)}")
             else:
                 hold.note("unknown", _error_text(exc))

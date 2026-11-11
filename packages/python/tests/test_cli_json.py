@@ -31,13 +31,15 @@ WALLET = "0xd797ead28c38575fdf4fc523866287372340ca02"
 TX = "0x" + "ab" * 32
 # Fields that depend on when the command ran: compared within a minute, not exactly.
 MOMENTS = {"age_ms", "counts_until"}
+# Fields that name the runtime, not the budget: Node and Python each carry their own SQLite.
+RUNTIME = {"sqlite_version"}
 
 pytestmark = pytest.mark.skipif(
     NODE is None or not JS_CLI.exists(), reason="requires node and packages/js/dist"
 )
 
 
-def _run(command: list[str], path: Path, *args: str) -> Any:
+def _run(command: list[str], path: Path, *args: str, code: int = 0) -> Any:
     done = subprocess.run(
         [*command, "--path", str(path), *args, "--json"],
         capture_output=True,
@@ -47,7 +49,7 @@ def _run(command: list[str], path: Path, *args: str) -> Any:
         env={**os.environ, "PYTHONPATH": str(SOURCE)},
         timeout=60,
     )
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == code, done.stderr
     return json.loads(done.stdout)
 
 
@@ -61,6 +63,9 @@ def _same(npm: Any, python: Any, at: str = "") -> None:
         assert len(npm) == len(python), f"{at}: {len(npm)} rows != {len(python)}"
         for index, (left, right) in enumerate(zip(npm, python, strict=True)):
             _same(left, right, f"{at}[{index}]")
+    elif at.rsplit(".", 1)[-1] in RUNTIME:
+        assert isinstance(npm, str), at
+        assert isinstance(python, str), at
     elif at.rsplit(".", 1)[-1] in MOMENTS and npm is not None:
         if at.endswith("age_ms"):
             assert abs(int(npm) - int(python)) < 60_000, at
@@ -125,6 +130,14 @@ def budget_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ("void", "order-17", "--evidence", "checked: never broadcast"),
         ("void", "--all-unknown", "--older-than", "1h"),
         ("settle", "order-17", "--tx", TX),
+        ("check", "5"),
+        ("check", "5", "--wallet", WALLET),
+        ("doctor",),
+        ("doctor", "--wallet", WALLET),
+        # A payment the budget would refuse, and a wallet with no budget: each exits 1, and still
+        # prints its answer.
+        ("check", "60", "exits 1"),
+        ("doctor", "--wallet", "0x4165cb72de51a67aac32dc33197d779552205efd", "exits 1"),
     ],
     ids=" ".join,
 )
@@ -132,11 +145,13 @@ def test_both_command_lines_print_the_same_json(
     args: tuple[str, ...], budget_file: Path, tmp_path: Path
 ) -> None:
     assert NODE is not None
+    code = 1 if args[-1] == "exits 1" else 0
+    args = args[:-1] if code else args
     npm_file, python_file = tmp_path / "npm.sqlite", tmp_path / "python.sqlite"
     shutil.copyfile(budget_file, npm_file)
     shutil.copyfile(budget_file, python_file)
-    npm = _run([NODE, str(JS_CLI)], npm_file, *args)
-    python = _run([sys.executable, "-m", "walletcap"], python_file, *args)
+    npm = _run([NODE, str(JS_CLI)], npm_file, *args, code=code)
+    python = _run([sys.executable, "-m", "walletcap"], python_file, *args, code=code)
     # Each copy names its own file; everything else is the same. The paths are swapped as JSON
     # writes them, so a Windows path's backslashes match too.
     escaped = [json.dumps(str(file))[1:-1] for file in (npm_file, python_file)]
