@@ -42,7 +42,7 @@ Repository = "https://github.com/coriolislabs/WalletCap"
 Issues = "https://github.com/coriolislabs/WalletCap/issues"
 
 [dependency-groups]
-dev = ["pytest==9.1.1", "hypothesis==6.170.8", "mypy==2.4.0", "ruff==0.17.2"]
+dev = ["pytest==9.2.0", "hypothesis==6.170.15", "mypy==2.4.1", "ruff==0.17.4"]
 
 [build-system]
 requires = ["hatchling==1.33.0"]
