@@ -51,6 +51,8 @@ class BudgetRefused(Exception):  # noqa: N818 - the same name as in JavaScript
         self.code: RefusalCode = code
         self.brief = message if brief is None else brief
         self.source: RefusalSource = source
+        # Set by the ledger on a refusal of its own: its time for it, in milliseconds.
+        self._ledger_ms: int | None = None
 
 
 class PaymentNotRecorded(Exception):  # noqa: N818 - the same name as in JavaScript
@@ -110,7 +112,11 @@ class NotSent(Exception):  # noqa: N818 - says what happened, not that something
 
 
 class BudgetWarning(UserWarning):
-    """A limit the code asked for is looser than the budget's, and so does nothing."""
+    """Something walletcap passed over, which changes no payment.
+
+    A limit the code asked for is looser than the budget's, and so does nothing; or the decision
+    log's callback raised, or its file couldn't be written.
+    """
 
 
 def is_walletcap_error(error: BaseException) -> bool:

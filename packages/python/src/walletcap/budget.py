@@ -37,8 +37,10 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Literal, TypeVar, cast
 
+from walletcap._decisions import DecisionLog, decision_log_file
 from walletcap._ledger import Ledger, ProcessLimits, Row, held_elsewhere, merged_note_of
 from walletcap.errors import (
+    BudgetRefused,
     BudgetUnavailable,
     BudgetWarning,
     NotSent,
@@ -69,6 +71,7 @@ from walletcap.money import (
 __all__ = [
     "Budget",
     "Check",
+    "Decision",
     "HeldPayment",
     "Hold",
     "Paying",
@@ -199,6 +202,38 @@ class HeldPayment:
     to: str | None
     note: str | None
     error: str | None
+
+
+@dataclass(frozen=True)
+class Decision:
+    """One decision made through a payer's handle.
+
+    What ``on_decision`` is called with, and one line of the ``WALLETCAP_LOG`` file. Every field
+    is always there, None where it doesn't apply.
+
+    ``decision`` is ``"held"`` (a hold was admitted), ``"refused"`` (the budget refused a
+    payment) or ``"bound"``, ``"noted"``, ``"settled"`` or ``"void"`` (a hold this handle took
+    moved). ``at`` is the ledger's time for it. ``amount`` is micro-dollars: for a refusal, what
+    was asked. ``id`` is the payment's, and None for a refusal, which made no payment. ``code``,
+    ``source`` and ``brief`` are a refusal's: ``brief`` says why, without the ids of other
+    payments. ``outcome`` is what a ``"noted"`` decision noted, ``settles_by`` the last moment
+    the payment could settle, when it has one, and ``tx`` the evidence a ``"settled"`` decision
+    was recorded with, when it has any.
+    """
+
+    decision: Literal["held", "refused", "bound", "noted", "settled", "void"]
+    at: datetime
+    wallet: str
+    amount: Micros | None
+    id: str | None
+    rail: str
+    to: str | None = None
+    code: RefusalCode | None = None
+    source: RefusalSource | None = None
+    brief: str | None = None
+    outcome: Outcome | None = None
+    settles_by: datetime | None = None
+    tx: str | None = None
 
 
 # --- Reading input ---------------------------------------------------------------------------
@@ -363,6 +398,54 @@ def _label(row: Row, info: dict[str, Any]) -> PaymentStatus:
     return cast("Outcome", outcome) if outcome in ("refused", "unknown") else "in flight"
 
 
+def _payee(info: dict[str, Any]) -> str | None:
+    """Who a payment's info says is paid, as JavaScript reads it: ``to``, else ``payTo``."""
+
+    to = _text_of(info.get("to"))
+    return _text_of(info.get("payTo")) if to is None else to
+
+
+_BRIEF_LIMIT: Final = 1024
+"""As much of a refusal's brief as a log line keeps, in both languages."""
+
+
+def _refused(wallet: str, refusal: BudgetRefused, amount: Micros, request: _Request) -> Decision:
+    """A refusal the ledger made, as a decision: dated with the ledger's time for it."""
+
+    return Decision(
+        "refused",
+        datetime.now(UTC) if refusal._ledger_ms is None else _moment(refusal._ledger_ms),
+        wallet,
+        amount,
+        None,
+        request.rail,
+        _payee(request.info),
+        refusal.code,
+        refusal.source,
+        # The brief, never the message: the message names other payments, for their owner.
+        refusal.brief[:_BRIEF_LIMIT],
+    )
+
+
+def _moved(
+    decision: Literal["bound", "noted", "settled", "void"], row: Row, outcome: Outcome | None = None
+) -> Decision:
+    """A move the ledger appended, as a decision."""
+
+    return Decision(
+        decision,
+        _moment(row["now"]),
+        row["wallet"],
+        Micros(row["amount"]),
+        row["payment"],
+        row["rail"],
+        _payee(_info(row["info"])),
+        outcome=outcome,
+        settles_by=_settles_by(row),
+        tx=row["settled_by"] if decision == "settled" else None,
+    )
+
+
 def payment_of(row: Row) -> Payment:
     """Internal: a history row as a Payment."""
 
@@ -505,13 +588,30 @@ class Hold:
         state: PaymentState,
         *,
         holder: str | None = None,
+        decisions: DecisionLog | None = None,
     ) -> None:
         self._ledger = ledger
         self._id = payment_id
         self._amount = amount
         self._state = state
         self._holder = holder
+        self._decisions = decisions
         self.tx: str | None = None
+
+    def _moved(
+        self,
+        decision: Literal["bound", "noted", "settled", "void"],
+        row: Row,
+        outcome: Outcome | None = None,
+    ) -> None:
+        """What the ledger answered to a move: this handle's state, and a decision if it moved.
+
+        A move already made is no decision.
+        """
+
+        self._state = row["state"]
+        if row["moved"] and self._decisions is not None:
+            self._decisions.record(_moved(decision, row, outcome))
 
     def _token(self, verb: str) -> str:
         """The token this hold's moves need; a hold for a payment another process took has none."""
@@ -543,9 +643,10 @@ class Hold:
         """
 
         # Settling a payment this hold already settled is a no-op.
-        self._state = self._ledger.settle(
+        row = self._ledger.settle(
             self._id, holder=self._token("settle"), evidence=_evidence(tx) or _evidence(self.tx)
-        )["state"]
+        )
+        self._moved("settled", row)
 
     def void(self, *, evidence: str | None = None) -> None:
         """The payment never left the wallet, and never will: it stops counting.
@@ -556,21 +657,21 @@ class Hold:
         row = self._ledger.void(
             self._id, holder=self._token("void"), evidence=evidence or "not sent"
         )
-        self._state = row["state"]
+        self._moved("void", row)
 
     def settles_by(self, moment: datetime) -> None:
         """The last moment the payment could still settle, after now. A hold learns it once."""
 
         until = _moment_ms(moment, "settles_by")
         holder = self._token("bound")
-        self._state = self._ledger.bound(self._id, holder=holder, until=until)["state"]
+        self._moved("bound", self._ledger.bound(self._id, holder=holder, until=until))
 
     def settles_within(self, duration: timedelta) -> None:
         """The same, as a time from now by the ledger's clock."""
 
         within = _duration_ms(duration, "settles_within")
         holder = self._token("bound")
-        self._state = self._ledger.bound(self._id, holder=holder, within_ms=within)["state"]
+        self._moved("bound", self._ledger.bound(self._id, holder=holder, within_ms=within))
 
     def note(self, outcome: Outcome, detail: str | None = None) -> None:
         """What is known about a held payment's outcome: ``"unknown"`` or ``"refused"``.
@@ -580,9 +681,8 @@ class Hold:
 
         evidence = None if detail is None else detail[:1024]
         holder = self._token("note")
-        self._state = self._ledger.note(self._id, outcome, holder=holder, evidence=evidence)[
-            "state"
-        ]
+        row = self._ledger.note(self._id, outcome, holder=holder, evidence=evidence)
+        self._moved("noted", row, outcome)
 
     async def asettle(self, *, tx: str | None = None) -> None:
         await asyncio.to_thread(lambda: self.settle(tx=tx))
@@ -771,7 +871,10 @@ class Budget:
         max_payments: int | _Unset | None = UNSET,
         busy_timeout_ms: int = 30_000,
         on_warning: Callable[[str], None] | None = None,
+        on_decision: Callable[[Decision], object] | None = None,
     ) -> None:
+        if on_decision is not None and not callable(on_decision):
+            raise UsageError("on_decision must be a function")
         self._wallet = normalize_wallet(wallet)
         self._path = expand_home(path if path is not None else default_budget_path()).absolute()
         asked = _limits(
@@ -811,6 +914,9 @@ class Budget:
         self._limits, looser = _process_limits(row, asked)
         if looser:
             self._warn_looser(on_warning, row, asked)
+        # The log file is the one WALLETCAP_LOG names now, as the budget file is the one the path
+        # names now.
+        self._decisions = DecisionLog(on_decision, decision_log_file())
 
     @property
     def wallet(self) -> str:
@@ -894,26 +1000,46 @@ class Budget:
 
     def _hold(self, request: _Request) -> Hold:
         micros = _positive(to_micros(request.amount))
-        held = self._ledger.hold(
-            self._wallet,
-            micros,
-            rail=request.rail,
-            payment=request.payment_id,
-            info=json.dumps(request.info) if request.info else None,
-            until=None
-            if request.settles_by is None
-            else _moment_ms(request.settles_by, "settles_by"),
-            within_ms=None
-            if request.settles_within is None
-            else _duration_ms(request.settles_within, "settles_within"),
-            limits=self._limits,
+        try:
+            held = self._ledger.hold(
+                self._wallet,
+                micros,
+                rail=request.rail,
+                payment=request.payment_id,
+                info=json.dumps(request.info) if request.info else None,
+                until=None
+                if request.settles_by is None
+                else _moment_ms(request.settles_by, "settles_by"),
+                within_ms=None
+                if request.settles_within is None
+                else _duration_ms(request.settles_within, "settles_within"),
+                limits=self._limits,
+            )
+        except BudgetRefused as refusal:
+            # Only a refusal is a decision: a call that was wrong, or a file that can't be read,
+            # decided nothing.
+            self._decisions.record(_refused(self._wallet, refusal, micros, request))
+            raise
+        payment_id = str(held["payment"])
+        self._decisions.record(
+            Decision(
+                "held",
+                _moment(held["at"]),
+                self._wallet,
+                micros,
+                payment_id,
+                request.rail,
+                _payee(request.info),
+                settles_by=None if held["until"] is None else _moment(held["until"]),
+            )
         )
         return Hold(
             self._ledger,
-            str(held["payment"]),
+            payment_id,
             micros,
             cast("PaymentState", held["state"]),
             holder=held["holder"],
+            decisions=self._decisions,
         )
 
     def payment(self, payment_id: str) -> PaymentRecord | None:
@@ -1029,6 +1155,7 @@ def open_budget(
     max_payments: int | _Unset | None = UNSET,
     busy_timeout_ms: int = 30_000,
     on_warning: Callable[[str], None] | None = None,
+    on_decision: Callable[[Decision], object] | None = None,
 ) -> Budget:
     """Open the wallet's budget, to pay from it. Its owner creates it first with ``walletcap set``.
 
@@ -1037,6 +1164,14 @@ def open_budget(
     ``"12.50 USDC"``), ints, floats, Decimals or ``Micros``. Limits given here only tighten the
     budget's, for this process: ``per_hour``, ``per_day``, ``per_week``, or ``cap`` with
     ``window``, and ``per_payment`` and ``max_payments``.
+
+    ``on_decision`` is called with a ``Decision`` once for every decision made through this
+    handle: a hold admitted (``"held"``), a payment the budget refused (``"refused"``), and each
+    move of a hold this handle took (``"bound"``, ``"noted"``, ``"settled"``, ``"void"``). It is
+    called after the ledger has answered, in the thread that asked it, so nothing it does changes
+    a decision: what it raises is swallowed, with one ``BudgetWarning`` for the handle.
+    ``check()`` and reads report nothing. If the environment variable ``WALLETCAP_LOG`` names a
+    file when the budget is opened, each decision is also appended to it, as one line of JSON.
     """
 
     return Budget(
@@ -1052,4 +1187,5 @@ def open_budget(
         max_payments=max_payments,
         busy_timeout_ms=busy_timeout_ms,
         on_warning=on_warning,
+        on_decision=on_decision,
     )

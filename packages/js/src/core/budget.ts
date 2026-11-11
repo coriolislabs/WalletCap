@@ -12,12 +12,15 @@
 // tighten things for its own process, and if the count cannot be read, nothing is paid.
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { type DecisionFields, DecisionLog, decisionLogFile, ledgerTimeOf, registerDecisions, stampLedgerTime } from './_decisions.js';
 import { registerLedger } from './_ledgers.js';
-import { BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, spendNotSent, UsageError } from './errors.js';
+import { BudgetRefused, BudgetUnavailable, isNotSent, PaymentNotRecorded, type RefusalCode, type RefusalSource, spendNotSent, UsageError } from './errors.js';
 import {
   type BudgetRow,
+  type Held,
   Ledger,
   mergedNoteOf,
+  type Moved,
   OPEN,
   type Outcome,
   type PaymentRow,
@@ -46,7 +49,7 @@ import {
 import { withJSON } from './wire.js';
 
 const LIMIT_KEYS = ['perPayment', 'perHour', 'perDay', 'perWeek', 'cap', 'window', 'maxPayments'];
-const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', ...LIMIT_KEYS]);
+const OPTION_KEYS = new Set(['wallet', 'path', 'create', 'busyTimeoutMs', 'onWarning', 'onDecision', ...LIMIT_KEYS]);
 const HOLD_KEYS = new Set(['id', 'to', 'note', 'details', 'rail', 'settlesBy', 'settlesWithin']);
 const TO_LIMIT = 256;
 const NOTE_LIMIT = 1024;
@@ -66,6 +69,51 @@ export interface BudgetOptions extends LimitOptions {
   busyTimeoutMs?: number;
   /** Called instead of process.emitWarning when a limit this code asks for is looser than the budget's, and so does nothing. */
   onWarning?: (message: string) => void;
+  /**
+   * Called once for every decision made through this handle: a hold admitted ('held'), a payment
+   * refused by the budget or by an adapter in front of it ('refused'), and each move of a hold this
+   * handle took ('bound', 'noted', 'settled', 'void'). It is called after the ledger has answered
+   * and is never waited for, so nothing it does changes a decision: what it throws, or rejects
+   * with, is swallowed, with one warning for the handle. check() and reads report nothing.
+   *
+   * If the environment variable WALLETCAP_LOG names a file when the budget is opened, each decision
+   * is also appended to it, as one line of the JSON that JSON.stringify(decision) gives.
+   */
+  onDecision?: (decision: Decision) => void;
+}
+
+/**
+ * One decision made through a payer's handle: what onDecision is called with, and one line of the
+ * WALLETCAP_LOG file. Every field is always there, null where it doesn't apply.
+ */
+export interface Decision {
+  /**
+   * 'held': a hold was admitted. 'refused': the budget, or an adapter in front of it, refused a
+   * payment. 'bound', 'noted', 'settled', 'void': a hold this handle took moved.
+   */
+  decision: 'held' | 'refused' | 'bound' | 'noted' | 'settled' | 'void';
+  /** When: the ledger's time where the ledger gave one, otherwise this process's. */
+  at: Date;
+  wallet: string;
+  /** Micro-dollars. For a refusal, what was asked, or null if an adapter could not price it. */
+  amount: Micros | null;
+  /** The payment's id; null for a refusal, which made no payment. */
+  id: string | null;
+  rail: string;
+  /** Who is paid, as the hold or the payee's terms named it. */
+  to: string | null;
+  /** A refusal's code; null for anything else. */
+  code: RefusalCode | null;
+  /** Whose limit refused: the owner's ('budget') or this process's own ('process'). */
+  source: RefusalSource | null;
+  /** A refusal's brief: why, without the ids of other payments. */
+  brief: string | null;
+  /** What a 'noted' decision noted. */
+  outcome: Outcome | null;
+  /** The last moment the payment could settle, when it has one. */
+  settlesBy: Date | null;
+  /** The evidence a 'settled' decision was recorded with, when it has any. */
+  tx: string | null;
 }
 
 /** Whether an amount would be paid right now. */
@@ -225,6 +273,22 @@ const parseInfo = (text: string | null): Info => {
 
 const textOf = (value: unknown): string | undefined => (typeof value === 'string' ? value : undefined);
 
+// Who a payment's info says is paid, as the history shows it.
+const payeeOf = (info: Info | null): string | null => textOf(info?.to) ?? textOf(info?.payTo) ?? null;
+
+// A move the ledger appended, as the decision log takes it.
+const movedFields = (decision: 'bound' | 'noted' | 'settled' | 'void', row: Moved, outcome?: Outcome): DecisionFields => ({
+  decision,
+  at: row.now,
+  amount: row.amount,
+  id: row.payment,
+  rail: row.rail,
+  to: payeeOf(parseInfo(row.info)),
+  ...(outcome === undefined ? {} : { outcome }),
+  settlesBy: row.until,
+  tx: decision === 'settled' ? row.settled_by : null,
+});
+
 const errorText = (error: unknown): string => String((error as Error)?.message ?? error).slice(0, 200);
 
 // --- Views of the ledger's rows, shared with the owner's handle -------------------------------
@@ -379,27 +443,36 @@ function processLimits(row: BudgetRow, asked: Limits): { limits: ProcessLimits; 
  * Only the hold that took a payment can move it: it carries the token the ledger checks. Another
  * process, or the budget's owner by the payment's id, can't use it.
  */
-let makeHold: (ledger: Ledger, id: string, amount: Micros, state: PaymentState, holder: string | null) => Hold;
+let makeHold: (ledger: Ledger, held: Held, amount: Micros, decisions: DecisionLog) => Hold;
 
 export class Hold {
   readonly #ledger: Ledger;
   readonly #id: string;
   readonly #amount: Micros;
   readonly #holder: string | null;
+  readonly #decisions: DecisionLog;
   #state: PaymentState;
 
   // Budget.hold() makes these, through makeHold: the constructor is private, so the public
   // declarations never name the ledger.
   static {
-    makeHold = (ledger, id, amount, state, holder) => new Hold(ledger, id, amount, state, holder);
+    makeHold = (ledger, held, amount, decisions) => new Hold(ledger, held, amount, decisions);
   }
 
-  private constructor(ledger: Ledger, id: string, amount: Micros, state: PaymentState, holder: string | null) {
+  private constructor(ledger: Ledger, held: Held, amount: Micros, decisions: DecisionLog) {
     this.#ledger = ledger;
-    this.#id = id;
+    this.#id = held.payment;
     this.#amount = amount;
-    this.#state = state;
-    this.#holder = holder;
+    this.#state = held.state;
+    this.#holder = held.holder;
+    this.#decisions = decisions;
+  }
+
+  // What the ledger answered to a move: this handle's state, and, if this call is the one that
+  // moved the payment, a decision. A move already made is no decision.
+  #moved(decision: 'bound' | 'noted' | 'settled' | 'void', row: Moved, outcome?: Outcome): void {
+    this.#state = row.state;
+    if (row.moved) this.#decisions.record(movedFields(decision, row, outcome));
   }
 
   // The token this hold's moves need; a hold for a payment another process took has none.
@@ -429,29 +502,31 @@ export class Hold {
    */
   async settle({ tx }: { tx?: string | undefined } = {}): Promise<void> {
     // Settling a payment this hold already settled is a no-op.
-    this.#state = (await this.#ledger.settle(this.#id, { evidence: tx ?? null, holder: this.#token('settle') })).state;
+    this.#moved('settled', await this.#ledger.settle(this.#id, { evidence: tx ?? null, holder: this.#token('settle') }));
   }
 
   /** The payment never left the wallet, and never will: it stops counting. A settled payment can't be voided. */
   async void({ evidence }: { evidence?: string | undefined } = {}): Promise<void> {
-    this.#state = (await this.#ledger.void(this.#id, { evidence: evidence ?? 'not sent', holder: this.#token('void') })).state;
+    this.#moved('void', await this.#ledger.void(this.#id, { evidence: evidence ?? 'not sent', holder: this.#token('void') }));
   }
 
   /** The last moment the payment could still settle, after now. A hold learns it once. */
   async settlesBy(when: Date | number | bigint): Promise<void> {
-    this.#state = (await this.#ledger.bound(this.#id, { until: momentMs(when, 'settlesBy'), withinMs: null, holder: this.#token('bound') })).state;
+    this.#moved('bound', await this.#ledger.bound(this.#id, { until: momentMs(when, 'settlesBy'), withinMs: null, holder: this.#token('bound') }));
   }
 
   /** The same, as a time from now by the ledger's clock, in milliseconds. */
   async settlesWithin(ms: number | bigint): Promise<void> {
-    this.#state = (await this.#ledger.bound(this.#id, { until: null, withinMs: durationMs(ms, 'settlesWithin'), holder: this.#token('bound') })).state;
+    this.#moved('bound', await this.#ledger.bound(this.#id, { until: null, withinMs: durationMs(ms, 'settlesWithin'), holder: this.#token('bound') }));
   }
 
   /** What is known about a held payment's outcome; it counts the same. */
   async note(outcome: Outcome, detail?: string): Promise<void> {
-    this.#state = (
-      await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024), holder: this.#token('note') })
-    ).state;
+    this.#moved(
+      'noted',
+      await this.#ledger.note(this.#id, outcome, { evidence: detail === undefined ? null : detail.slice(0, 1024), holder: this.#token('note') }),
+      outcome,
+    );
   }
 }
 
@@ -475,12 +550,14 @@ export class Budget {
   readonly #wallet: string;
   readonly #path: string;
   readonly #limits: ProcessLimits;
+  readonly #decisions: DecisionLog;
 
-  private constructor(ledger: Ledger, wallet: string, path: string, limits: ProcessLimits) {
+  private constructor(ledger: Ledger, wallet: string, path: string, limits: ProcessLimits, decisions: DecisionLog) {
     this.#ledger = ledger;
     this.#wallet = wallet;
     this.#path = path;
     this.#limits = limits;
+    this.#decisions = decisions;
   }
 
   /** The same as openBudget(). */
@@ -491,6 +568,7 @@ export class Budget {
     // Fail closed: a missing budget file refuses every payment until its owner creates it.
     const create = options.create ?? false;
     const asked = parseLimits(options);
+    if (options.onDecision !== undefined && typeof options.onDecision !== 'function') throw new UsageError('onDecision must be a function');
     if (!create && !existsSync(path)) {
       throw new BudgetUnavailable(
         `no budget file at ${path}; its owner creates one with: npx walletcap set --wallet ${wallet}${pathFlag(path)} --per-day <dollars>`,
@@ -517,8 +595,11 @@ export class Budget {
       if (row.unit !== 'usd' && row.unit !== 'usdc') throw new UsageError(`${shortWallet(wallet)}'s budget counts in ${row.unit}, not usd`);
       const { limits, looser } = processLimits(row, asked);
       if (looser) warnLooser(options.onWarning, row, asked, path);
-      const budget = new Budget(ledger, wallet, path, limits);
+      // The log file is the one WALLETCAP_LOG names now, as the budget file is the one the path names now.
+      const decisions = new DecisionLog(wallet, options.onDecision, decisionLogFile());
+      const budget = new Budget(ledger, wallet, path, limits, decisions);
       registerLedger(budget, ledger);
+      registerDecisions(budget, decisions);
       return budget;
     } catch (error) {
       ledger.close();
@@ -539,10 +620,12 @@ export class Budget {
   /** Whether `amount` would be paid right now, without holding it. */
   async check(amount: Dollars): Promise<Check> {
     const { refusal, remaining } = await this.#ledger.check(this.#wallet, positive(toMicros(amount)), { limits: this.#limits });
-    return withJSON(
-      refusal === null
-        ? { ok: true, remaining, code: null, source: null, message: null, brief: null }
-        : { ok: false, remaining, code: refusal.code, source: refusal.source, message: refusal.message, brief: refusal.brief },
+    if (refusal === null) return withJSON({ ok: true, remaining, code: null, source: null, message: null, brief: null });
+    // A question, not a decision: nothing is logged. The answer keeps the ledger's time for it, for
+    // an adapter that refuses on it.
+    return stampLedgerTime(
+      withJSON({ ok: false, remaining, code: refusal.code, source: refusal.source, message: refusal.message, brief: refusal.brief }),
+      ledgerTimeOf(refusal),
     );
   }
 
@@ -557,15 +640,23 @@ export class Budget {
     const { to, note, details, rail = 'js', settlesBy, settlesWithin, id } = options;
     const micros = positive(toMicros(amount));
     const info = describe(to, note, details);
-    const held = await this.#ledger.hold(this.#wallet, micros, {
-      payment: id ?? null,
-      rail,
-      info: info === null ? null : JSON.stringify(info),
-      until: settlesBy === undefined || settlesBy === null ? null : momentMs(settlesBy, 'settlesBy'),
-      withinMs: settlesWithin === undefined || settlesWithin === null ? null : durationMs(settlesWithin, 'settlesWithin'),
-      limits: this.#limits,
-    });
-    return makeHold(this.#ledger, held.payment, micros, held.state, held.holder);
+    let held: Held;
+    try {
+      held = await this.#ledger.hold(this.#wallet, micros, {
+        payment: id ?? null,
+        rail,
+        info: info === null ? null : JSON.stringify(info),
+        until: settlesBy === undefined || settlesBy === null ? null : momentMs(settlesBy, 'settlesBy'),
+        withinMs: settlesWithin === undefined || settlesWithin === null ? null : durationMs(settlesWithin, 'settlesWithin'),
+        limits: this.#limits,
+      });
+    } catch (error) {
+      // Only a refusal is a decision: a call that was wrong, or a file that can't be read, decided nothing.
+      if (error instanceof BudgetRefused) this.#decisions.refused(error, { rail, amount: micros, to: payeeOf(info) });
+      throw error;
+    }
+    this.#decisions.record({ decision: 'held', at: held.at, amount: micros, id: held.payment, rail, to: payeeOf(info), settlesBy: held.until });
+    return makeHold(this.#ledger, held, micros, this.#decisions);
   }
 
   /**

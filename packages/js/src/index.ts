@@ -6,7 +6,7 @@
 // four errors. The vendor adapters are subpath exports that import it: walletcap/x402,
 // walletcap/cdp, walletcap/agentkit and walletcap/agentic.
 export { Budget, Hold, openBudget } from './core/budget.js';
-export type { BudgetOptions, Check, HeldPayment, HoldOptions, Payment, PaymentRecord, Status } from './core/budget.js';
+export type { BudgetOptions, Check, Decision, HeldPayment, HoldOptions, Payment, PaymentRecord, Status } from './core/budget.js';
 export { BudgetRefused, BudgetUnavailable, notSent, PaymentNotRecorded, UsageError } from './core/errors.js';
 export type { NotSent, RefusalCode, RefusalSource } from './core/errors.js';
 export { MIN_SQLITE_VERSION, SCHEMA_VERSION } from './core/ledger.js';

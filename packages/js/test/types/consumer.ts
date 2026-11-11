@@ -2,14 +2,20 @@
 // A consumer of the packed package, compiled by test/types.test.mjs with skipLibCheck off, only
 // es2022's library and no @types/node: walletcap's declarations must need nothing else. The
 // expected errors below check the declarations refuse what the runtime refuses.
-import { BudgetRefused, defaultBudgetPath, Hold, type Micros, openBudget, openOwner, type Status, UsageError } from 'walletcap';
+import { BudgetRefused, type Decision, defaultBudgetPath, Hold, type Micros, openBudget, openOwner, type Status, UsageError } from 'walletcap';
 import { guardAgenticWallet } from 'walletcap/agentic';
 import { guardAgentKit } from 'walletcap/agentkit';
 import { cdpStore } from 'walletcap/cdp';
 import { guard, MAX_PAYMENT_TIMEOUT_SECONDS, type X402HookedClient } from 'walletcap/x402';
 
 export async function use(client: X402HookedClient, provider: object): Promise<Micros> {
-  await using budget = await openBudget({ wallet: '0xd797ead28c38575fdf4fc523866287372340ca02', perDay: '$150' });
+  const decisions: Decision[] = [];
+  await using budget = await openBudget({
+    wallet: '0xd797ead28c38575fdf4fc523866287372340ca02',
+    perDay: '$150',
+    onDecision: decision => decisions.push(decision),
+  });
+  const refused: Micros | null = decisions.find(decision => decision.decision === 'refused' && decision.code === 'budget')?.amount ?? null;
   const hold = await budget.hold('$1', { id: 'order-1', settlesWithin: MAX_PAYMENT_TIMEOUT_SECONDS * 1000 });
   await hold.settle({ tx: `0x${'ab'.repeat(32)}` });
   const status: Status = await budget.status();
@@ -21,10 +27,14 @@ export async function use(client: X402HookedClient, provider: object): Promise<M
   const owner = await openOwner({ path: budget.path });
   owner.close();
   const error: unknown = null;
-  if (error instanceof BudgetRefused) return status.spent;
+  if (error instanceof BudgetRefused) return refused ?? status.spent;
   if (error instanceof UsageError) return status.inFlight;
   // @ts-expect-error Budget.hold() makes a Hold; it has no public constructor.
   new Hold();
+  // An async callback is taken too; its promise is never waited for.
+  (await openBudget({ wallet: budget.wallet, onDecision: async (decision: Decision) => void JSON.stringify(decision) })).close();
+  // @ts-expect-error onDecision is a function.
+  await openBudget({ wallet: budget.wallet, onDecision: 'console.log' });
   // @ts-expect-error the wallet's request channel is required.
   guardAgenticWallet(budget, {});
   // @ts-expect-error defaultBudgetPath() takes no arguments.

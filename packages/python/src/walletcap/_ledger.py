@@ -326,7 +326,10 @@ def refusal(
     source = why["source"]
 
     def refused(code: RefusalCode, message: str, brief: str | None = None) -> BudgetRefused:
-        return BudgetRefused(code, message, brief=brief, source=source)
+        error = BudgetRefused(code, message, brief=brief, source=source)
+        # Dated with the ledger's time for it, which the decision log reports.
+        error._ledger_ms = why["now"]
+        return error
 
     if code == "frozen":
         note = _note(why["frozen_by"], _frozen_note)
@@ -844,7 +847,8 @@ class Ledger:
                 reason = why(current, mine)
                 if reason is not None:
                     raise UsageError(reason)
-            return current
+            # `moved` is False when the call appended nothing: the move was already made.
+            return {**current, "moved": moved is not None}
 
     def settle(self, payment: str, *, holder: str | None, evidence: str | None = None) -> Row:
         """held or void -> settled, with the evidence, by the process that held it.
