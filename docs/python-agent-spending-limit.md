@@ -88,7 +88,8 @@ owner.void_unknown(agent_address, older_than="24h")
 
 The `walletcap` command (or `python -m walletcap`) is the owner's handle, with the same commands
 and output as `npx walletcap`: `status`, `set`, `freeze`, `unfreeze`, `history`, `holds`,
-`void <id>`, `void --all-unknown --older-than 24h` and `settle <id> --tx <hash>`.
+`void <id>`, `void --all-unknown --older-than 24h`, `settle <id> --tx <hash>`, `check <dollars>`
+and `doctor`.
 
 In the library, the two handles are an API split: any process that can open the file can open
 an owner's handle. To keep an agent from raising its own limits, run it as another OS user.

@@ -50,7 +50,8 @@ await budget.pay('$12.50', () => sendUsdc(payee, '12.50')); // refused past $150
 
 The owner's handle is `openOwner()`, and the `walletcap` command: `status`, `set`, `freeze`,
 `unfreeze`, `history`, `holds`, `void <id>`, `void --all-unknown --older-than 24h` and
-`settle <id> --tx <hash>`.
+`settle <id> --tx <hash>`. Two more only read: `check <dollars>` says whether a payment would be
+paid right now, and `doctor` checks the budget file before you rely on it.
 
 Docs, the threat model and the full README: https://github.com/coriolislabs/WalletCap
 

@@ -9,7 +9,9 @@
   "scripts": {
     "build": "npm run build -w walletcap -w walletcap-mcp",
     "test": "npm test -w walletcap -w walletcap-mcp",
-    "lint": "biome check"
+    "lint": "biome check",
+    "check": "bash scripts/check.sh",
+    "ci": "bash scripts/ci.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.2"

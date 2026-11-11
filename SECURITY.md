@@ -34,8 +34,8 @@ Please include:
 
 ## In scope
 
-- the SQLite ledger (`ledger.mjs`, `src/walletcap/ledger.py`) and its
-  transaction/counting rules;
+- the SQLite ledger (`spec/schema.sql`, and its clients `packages/js/src/core/ledger.ts` and
+  `packages/python/src/walletcap/_ledger.py`) and its transaction/counting rules;
 - the JavaScript and Python budget APIs and the CLI;
 - the x402 guard and the CDP `SpendStore`;
 - the Agentic Wallet CLI/MCP wrapper;

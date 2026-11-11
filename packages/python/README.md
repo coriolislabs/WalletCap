@@ -38,9 +38,11 @@ with budget.pay("$12.50") as payment:  # refused past $150 in any 24 hours
   comes back is `Micros`, a micro-dollar amount that `to_micros` reads as micro-dollars. Its
   arithmetic returns a `Micros` or raises `TypeError`: `remaining // 2` works, `remaining + 1`
   doesn't, since a bare number would be read as dollars.
-- The owner's command, `walletcap` or `python -m walletcap`: `status`, `set`, `freeze`,
+- The owner's command, `walletcap` (or `python -P -m walletcap`; without `-P`, Python imports
+  from the folder you run it in, which an agent may be able to write): `status`, `set`, `freeze`,
   `unfreeze`, `history`, `holds`, `void <id>`, `void --all-unknown --older-than 24h` and
-  `settle <id> --tx <hash>`.
+  `settle <id> --tx <hash>`. Two more only read: `check <dollars>` says whether a payment would
+  be paid right now, and `doctor` checks the budget file before you rely on it.
 
 The ledger's rule is SQL that ships inside the package (`walletcap/spec/schema.sql`), the same
 file the npm package runs. Source, docs and the threat model:

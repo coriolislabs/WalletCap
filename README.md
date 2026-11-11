@@ -180,6 +180,10 @@ import { notSent } from 'walletcap';
 throw notSent(error); // inside the payment function
 ```
 
+Only `notSent()` says so: a `notSent` property on an error voids nothing, since an error built
+from a payee's JSON body could carry one. And it says so about one payment, the innermost `pay()`
+it is thrown out of: a `pay()` around that one may already have paid, and keeps counting.
+
 For more control, `hold()` gives you the payment's handle:
 
 ```js
@@ -281,6 +285,18 @@ const fetchPaid = wrapFetchWithPayment(fetch, client);
 - A payee may ask for an authorization valid up to an hour (`MAX_PAYMENT_TIMEOUT_SECONDS`, 3600),
   as Coinbase's CDP spend controls allow. Longer terms are passed over for shorter ones on offer;
   when none are, the payment is refused before signing, with the code `timeout`.
+- A payment is priced at the most its terms ask the wallet to sign for. x402 v2 names that
+  `amount` and v1 `maxAmountRequired`, and a client signs whichever its protocol version reads,
+  so terms that carry both are priced at the larger. An amount is a whole number in decimal
+  digits; anything else (`0x10`, `5e4`, a space) is refused with the code `terms`. Once the
+  wallet has signed, the payment is held at what the payload itself moves, an EIP-3009 `value`, a
+  Permit2 `amount` or a channel deposit, when that is more than the terms said.
+- The schemes `exact`, `upto` and `auth-capture` are counted (`COUNTED_SCHEMES`): under each the
+  wallet signs for at most the terms' amount. Any other scheme is refused before signing, with
+  the code `terms`, unless you list it: `guard(client, budget, { schemes: ['batch-settlement'] })`.
+  Under `batch-settlement` the wallet signs a deposit into the payee's channel, five times the
+  request's amount by default or the minimum the payee announces. On EVM the guard reads that
+  deposit from the payload and holds it; on Solana it can't, and holds the request's amount.
 - USDC on Base, Ethereum, Polygon, Arbitrum, Optimism, Avalanche and Solana is priced out of
   the box, plus Base Sepolia, Arbitrum Sepolia and Solana devnet (`USD_ASSETS`). Add another USD
   stablecoin with `guard(client, budget, { assets: [{ network, asset, decimals }] })`. List only
@@ -358,12 +374,17 @@ another server, put its command after `--`.
 ```
 
 - `send` and `x402 pay` (over MCP, `send` and `make_http_request_with_x402`) are checked against
-  the wallet's budget before the wallet signs anything, and counted. Every other CLI command is
-  the wallet's own.
+  the wallet's budget before the wallet signs anything, and counted.
+- The CLI commands that move no money pass through to awal as they are: `status`, `address`,
+  `balance`, `show`, `auth login`, `auth verify`, `x402 bazaar list`, `x402 bazaar search` and
+  `x402 details`. Any other command, `trade` or one awal adds later, is refused: walletcap can't
+  count it. So is a command behind an option (`--json send …`). The wallet's owner lets one
+  through, uncounted, with `WALLETCAP_AWAL_ALLOW="trade,auth logout"`.
 - Over MCP, the tools that move no money (balance, address, sign-in, bazaar search, payment
   discovery) pass through. Any other tool, `trade` or one the server adds later, is refused and
   left out of the tool list: walletcap can't count it. `--allow-tool <name>` lets one through,
-  uncounted. JSON-RPC batches are refused.
+  uncounted. JSON-RPC batches are refused, and so is a request whose method isn't one of MCP's
+  own: the server never sees it.
 - An x402 payment is priced from the endpoint's own 402 answer, and the wallet is capped at
   exactly that amount, so it refuses to sign for more. The wallet is handed, as
   `paymentRequirements`, the terms walletcap can price that are valid an hour or less, from the
@@ -446,12 +467,33 @@ $ npx walletcap holds                  # held payments that still count, and why
 $ npx walletcap void <id> --evidence "never mined"   # a held payment you know never left the wallet
 $ npx walletcap void --all-unknown --older-than 24h   # every unknown or refused one older than that
 $ npx walletcap settle <id> --tx 0x…   # a payment you know paid
+$ npx walletcap check 12.50            # would $12.50 be paid right now? It holds nothing
+$ npx walletcap doctor                 # check the budget file before you rely on it
 ```
 
 Amounts are dollars; leave out the `$` sign, which your shell would expand. Add `--wallet` when
 the file holds more than one budget, and `--json` for scripts. Exit codes: 0 when it worked; 2
 when the command line is wrong (an unknown command or flag, a missing argument, a payment id not
 in the file); 1 for anything walletcap refused or couldn't do.
+
+`check` and `doctor` are for scripts, CI and a deploy's first minute. Both only read.
+
+- `walletcap check <dollars>` answers whether a payment of that much would be paid right now, and
+  exits 0 if it would and 1 if the budget would refuse it, with the refusal: a preflight for a
+  shell script, or `walletcap check 5 && ./pay.sh`. `--json` prints what `budget.check()` returns.
+- `walletcap doctor` checks the deployment, not the count. It reports the file's mode and owner
+  (other users must not be able to write it, or read its holds' tokens), the filesystem it is on
+  (on Linux it reads `/proc/self/mountinfo`, and fails a file on NFS, SMB, 9p or virtiofs, where
+  SQLite's locks aren't reliable), the runtime's SQLite, the file's schema and integrity, whether
+  write-ahead logging is on, that every table, index, view and trigger of the rule is in the
+  file exactly as walletcap ships it (a dropped or edited trigger fails the check), and that
+  every payment's state is the one its ledger entries give it. Then it lists
+  each frozen budget and each budget with held payments that nothing bounds. It exits 1 if a
+  check fails, and 0 with warnings. Run it in CI, or as a container's start-up probe:
+
+  ```console
+  $ npx walletcap doctor --json | jq -e .ok
+  ```
 
 `void --all-unknown` leaves a payment the payee could still settle: it counts until one window
 past the time it can't. An x402 payment with no such time, one the wallet may have signed as it
@@ -485,7 +527,9 @@ put it elsewhere. Both languages compute the same default.
   `synchronous = FULL`: the log is synced at every commit, so a payment the ledger admitted
   survives the process crashing. It needs SQLite 3.37.0 or later, and refuses an older one.
 - The budget is as durable as that file. In a container, put it on a local volume that outlives
-  the container, or a redeploy starts a new file. A missing file refuses every payment.
+  the container, or a redeploy starts a new file. A missing file refuses every payment, and so
+  does one deleted or replaced under a running process: a payer counts in the file it opened,
+  and refuses once the path names another. Open the budget again after a restore.
 - walletcap 0.4 upgrades a file that 0.2 or 0.3 wrote the first time it opens it, in one
   transaction: every payment that counted keeps counting at least as long. 0.2 and 0.3 can't
   open the file afterwards, so stop every 0.2 and 0.3 process before upgrading. One that opens
@@ -505,8 +549,9 @@ walletcap has three tiers of enforcement, and the library is the one that ships 
   on a Unix socket (`walletcapd`), is planned.
 - **On chain, the limit binds.** `AccountCapSpender` makes the cap part of the payment path for
   Spend Permissions, so the agent's own code can't raise it. It is unaudited; testnet only.
-- **One file is one host.** Network filesystems aren't supported, and walletcap doesn't detect
-  them yet. Agents on more than one host need a shared service, which isn't shipped.
+- **One file is one host.** Network filesystems aren't supported. `walletcap doctor` detects one
+  on Linux; opening the budget doesn't check. Agents on more than one host need a shared
+  service, which isn't shipped.
 - **It can't see a revoke that lands later in the same block,** and for x402 schemes that settle
   later (batch vouchers), a payment counts from when the server confirms it.
 - **Some x402 payments can't be confirmed.** `@x402/fetch` doesn't report v1 settlements back.

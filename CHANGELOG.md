@@ -1,6 +1,176 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## Unreleased
+
+A security review of 0.4.1 found ways past the guard, fixed here, and this release adds two
+commands for scripts and deploys. It refuses things 0.4 let through (x402 schemes it doesn't
+count, amounts it can't read one way only, awal commands and MCP methods it doesn't know), so it
+is a breaking release: it goes out as 0.5.0.
+
+### Security: the x402 guard
+
+- **x402 v1 terms with two amount fields were priced at the smaller.** x402 v2 names a payment's
+  amount `amount` and v1 names it `maxAmountRequired`. The guard read `amount` first, whatever
+  the protocol version, and a v1 client signs `maxAmountRequired`. A payee that sent both, a
+  small `amount` beside a large `maxAmountRequired`, had the large one signed and the small one
+  counted: against a budget of $0.05 a payment and $0.15 a day, the wallet signed an EIP-3009
+  authorization for $1,000 and the guard held one cent, or nothing when `amount` was `0`. x402's
+  own `registerExactEvmScheme` helper registers the v1 scheme on every network it knows, so a
+  client set up the usual way was exposed, AgentKit's included. The guard now prices terms at
+  the larger of the two fields, before anything is signed, and so does the Agentic Wallet
+  wrapper.
+- **A batch-settlement deposit was counted as the request's amount.** Under x402's
+  `batch-settlement` scheme (`@x402/evm` and `@x402/svm` 2.28) the wallet signs a deposit into
+  the payee's payment channel: five times the request's amount by default, or the minimum the
+  payee announces in `extra.minDeposit`. The guard held the request's amount: one cent for a
+  $1,000 deposit, on the same budget. The guard now counts the schemes `exact`, `upto` and
+  `auth-capture`, under which the wallet signs for at most the terms' amount, and refuses any
+  other before signing, with the code `terms`, unless `guard(client, budget, { schemes: [...] })`
+  lists it. A listed `batch-settlement` is counted on EVM, where the guard reads the deposit
+  from the signed payload and holds that, and refused on any other chain.
+- **A payload a scheme "recovered" was never held.** `@x402/core` returns a payload from a
+  scheme's failure hook straight to the transport, past the hook where the guard holds.
+  `@x402/svm`'s batch-settlement client signs a second accept that way, so those payments were
+  signed with nothing in the ledger. The guard now wraps the client's `createPaymentPayload`: a
+  payload it hasn't seen is held on the terms it says it accepted, or is never returned.
+- **A payment is held at what its payload signs for.** Once the wallet has signed, the guard
+  reads the payload's own amount (an EIP-3009 `value`, a Permit2 `permitted.amount`, a channel
+  deposit) and holds the larger of it and the terms' amount. A payload that signs for more than
+  the budget admits is refused and discarded, whatever its terms said.
+- **An x402 amount is read one way only.** `BigInt()` reads `"0x10"` as 16 and `" 5 "` as 5; other
+  parsers read them as 0, or refuse them. The guard now takes a whole number in decimal digits
+  (or a whole JavaScript number or bigint) and refuses anything else with the code `terms`, so
+  it can't price one number while a signer signs another.
+- **The guard no longer passes a payment it has no record of checking.** It kept its check's
+  result on the context object `@x402/core` hands from hook to hook, and returned without
+  holding when the hook that runs after signing found none there. `@x402/core` 2.28 copies the
+  context, so its payments were held; a client that builds each hook its own context, which
+  `guard()` accepts, had every payment pass uncounted. The hook now prices the payment itself.
+- A payee's `transaction` is kept as a settlement's evidence only if it is letters and digits.
+  One of terminal controls, or too long to keep, made the settle fail and `PaymentNotRecorded`
+  reach the caller; the payment now settles with no evidence. A refusal repeats a payee's asset
+  or network only if it is an address or an id, never a sentence.
+
+### Security: the Agentic Wallet and its MCP server
+
+- **`walletcap awal` handed awal every command but `send` and `x402 pay`.** `trade` reached the
+  wallet uncounted, though `walletcap-mcp` refuses the same tool. So did a payment behind an
+  option (`--json send 25 0x…`), under another spelling (`Send`), or with `--help` as some
+  option's value (`send 25 0x… --chain --help`): each was passed to awal with all its arguments.
+  `walletcap awal` now passes only awal's commands that move no money (`status`, `address`,
+  `balance`, `show`, `auth login`, `auth verify`, `x402 bazaar list`, `x402 bazaar search`,
+  `x402 details`) and refuses the rest; the wallet's owner names more in `WALLETCAP_AWAL_ALLOW`.
+  Help for a counted command reaches awal as that command's words and `--help`, nothing else.
+- **`walletcap-mcp` forwarded every method but `tools/call`.** A request with a method of the
+  server's own went straight to the wallet. It now forwards MCP's own methods (`initialize`,
+  `ping`, `tools/list`, `tools/call`, the `resources/`, `prompts/`, `logging/` and `completion/`
+  requests, and notifications) and answers any other "method not found". What it forwards is the message it parsed and
+  checked, written out again: a line with two `method` keys can't be read one way by the proxy
+  and another by the server. Every answer that lists tools is filtered, whatever id it
+  answers: a second request sharing a `tools/list`'s id, or a null id, showed every tool.
+- An x402 request reaches the wallet with its own fields only (`baseURL`, `path`, `method`,
+  `headers`, `body`, `queryParams`, `extensions`, `preferredNetwork`, `preferredScheme`,
+  `correlationId`), on walletcap's terms and cap. 0.4 spread everything the caller sent into the
+  wallet's request, where a field walletcap doesn't know could be another name for either.
+  Terms under a scheme walletcap doesn't count are left out of what the wallet is handed.
+- A request path that names another host than its `baseURL` (`//other.example/x`) is refused:
+  walletcap priced that host's terms for a request to this one. A chain name is looked up among
+  the wallet's chains, not on `Object.prototype`.
+
+### Security: the budget and its file
+
+- **Only `notSent()` voids a payment, and only one.** `pay()` voided for any thrown value with a
+  `notSent` property (Python: a `not_sent` attribute), which an error built from a payee's JSON
+  body can carry: three $10 payments that "failed" that way left a $10 cap untouched. The tag
+  is now one data can't forge. It also speaks for one payment, the innermost `pay()` it leaves:
+  0.4.1 voided every `pay()` it travelled out through, so a helper's unsent $5 voided the $60
+  its caller had already sent, and $160 went out against a $100 cap.
+- **A running payer kept counting in a deleted file.** The JavaScript package holds the budget
+  file open, so after its owner removed the file and created a new budget, a running payer
+  went on in the old one, beside a fresh budget: $20 in one window against $10. Each
+  transaction now checks that the path still names the file that was opened, and refuses with
+  `BudgetUnavailable` once it doesn't. The Python package opens the file by its path each time;
+  it now opens without creating, so a deleted file is no longer replaced by an empty one
+  anyone can read.
+- **A wheel built from the sdist could take the rule from outside it.** The build hook read
+  `spec/` two folders above the build, even when building from an sdist that carries its own
+  copy. pip unpacks a by-name source build under the temp folder, so on Linux that was
+  `/tmp/spec/`, which any local user can write: a planted `schema.sql` replaced the admission
+  rule in the built wheel. The published wheel and a default `pip install` were not affected.
+  An sdist now builds from its own copy and never reads above its root.
+- A budget is created at the path itself: with `create`, a symbolic link to a file that doesn't
+  exist is refused, where 0.4.1 let SQLite create the target, readable by anyone. Every folder
+  the Python package creates is `0700`, not only the last, as the npm package's are.
+- One address is one budget in more spellings: `base:0x…`, `EIP155:1:0x…`, `did:pkh:eip155:1:0x…`
+  and the 40 digits with no `0x` were each a budget of its own beside the address's, and are
+  now refused. [`spec/vectors/wallets.json`](spec/vectors/wallets.json) pins both packages.
+- Holding an id another wallet's payment has is refused without describing that payment: 0.4.1
+  answered with its amount and wallet. A new payment's id can't start with `-`, which a command
+  line reads as an option.
+- Both command lines print each control character in a payer's or a payee's text as U+FFFD. A
+  note or a "transaction" of terminal escapes could hide a held payment in `walletcap holds` or
+  forge a row in `walletcap history`. `--json` was never affected.
+- A function that voids its hold, then pays after all and returns the transaction (Python: sets
+  `hold.tx`), is settled, so the payment counts. 0.4.1 left it void.
+
+### Fixed in the Python package
+
+- `payment.tx = send_usdc(...)` with a transaction hash in `bytes`, as web3.py returns one,
+  raised `PaymentNotRecorded` on every payment and left each in flight for good. A hash in
+  bytes is kept as hex, and evidence that can't be kept is dropped: it never strands a payment
+  that paid.
+- A settle-by time past the year 9999, or a `payTo`, `network`, `tx` or `error` that isn't a
+  string, broke `holds()`, `payment()` and the command line with `ValueError` or
+  `AttributeError`, and `walletcap void <id>` with them. Times are clamped to the last moment
+  a `datetime` holds, and those fields are read only as strings, as the npm package reads them.
+- The command line no longer takes a flag's abbreviation (`--all` for `--all-unknown`), and
+  `set --per-payment none` alone is a change, as it is in the npm command line.
+- An exception whose text can't be stored (a lone surrogate) no longer replaces the block's own
+  exception, and `max_payments` past 64 bits is a `UsageError`.
+
+### Release pipeline
+
+- Each build job checks out the commit the release job verified, not the tag's name, and packs
+  and uploads its artifact before it runs a test. The wheel's build backend is pinned by hash
+  (`packages/python/build-constraints.txt`); the release build names its uv and restores no
+  cache. `mcp-registry.yml` runs from `main` only, gets its token in the one job that needs it,
+  and first checks that the npm package it lists was published by this repository.
+- `scripts/check-workflows.mjs` reads every workflow, not three by name, and fails one that
+  drops any of the above, keeps a checkout's token, runs on `pull_request_target`, or grants
+  `write-all`. Dependabot opens grouped weekly updates for actions, npm and uv.
+
+### Added
+
+- `walletcap check <dollars>`, in both command lines: whether a payment of that much would be
+  paid right now, without holding it. It exits 0 if it would and 1 if the budget would refuse
+  it, and `--json` prints what `budget.check()` returns.
+- `walletcap doctor`, in both command lines: checks a budget file before you rely on it, and
+  changes nothing. It reports the file's mode, folder and owner; on Linux, the filesystem it is
+  on, failing NFS, SMB, 9p and virtiofs; the runtime's SQLite; the file's schema, integrity and
+  journal mode; whether every table, index, view and trigger of the rule is in the file as
+  walletcap ships it, so a dropped or edited trigger fails the check; and whether every
+  payment's state is the one its ledger entries give it. It lists frozen budgets and budgets
+  with held payments that nothing bounds. It exits 1 if a check fails, and `--json` prints the
+  same report from both command lines.
+- `COUNTED_SCHEMES` and the type `GuardOptions` from `walletcap/x402`, and the `schemes` option
+  of `guard()` and `guardAgentKit()`.
+- For contributors: `npm run check`, the quick gate (lint, types and both suites in about two
+  minutes; `npm run check js -- test/x402.test.mjs` runs one file), `npm run ci` for the whole
+  gate, an opt-in pre-push hook in `.githooks/`, and [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Changed
+
+- `guard()` and `guardAgentKit()` refuse an x402 scheme other than `exact`, `upto` and
+  `auth-capture` unless `schemes` lists it. 0.4 counted any scheme at its terms' amount.
+- An x402 amount that isn't a whole number in decimal digits is refused with the code `terms`.
+  0.4 read whatever `BigInt()` reads, a hexadecimal string or one with spaces included.
+- `walletcap awal` refuses a command it doesn't know, and `walletcap-mcp` a method it doesn't
+  know. 0.4 passed both to the wallet.
+- A `notSent` property on a thrown value, or a `not_sent` attribute in Python, no longer voids:
+  use `notSent()` or `NotSent`.
+- A payment's `note` no longer falls back to a `network` that isn't a string.
+
 ## 0.4.1 — 2026-11-07
 
 ### Fixed

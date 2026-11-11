@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Opt in with: git config core.hooksPath .githooks
+# Lint and types before a push, about fifteen seconds. Skip once with: git push --no-verify
+exec bash "$(git rev-parse --show-toplevel)/scripts/check.sh" lint

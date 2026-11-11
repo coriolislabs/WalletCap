@@ -48,7 +48,9 @@ Then start the server behind walletcap from the MCP client, Claude Desktop for e
   pass through. Any other tool, `trade` or one the server adds later, is refused and left out of
   the tool list, because walletcap can't count it. `--allow-tool <name>` lets one through,
   uncounted.
-- JSON-RPC batches are refused.
+- JSON-RPC batches are refused, and so is a request whose method isn't one of MCP's own: the
+  server never sees it. What reaches the server is the message walletcap parsed and checked,
+  written out again, not the client's own line.
 - To run another server, put its command after `--`.
 
 ## What gets counted

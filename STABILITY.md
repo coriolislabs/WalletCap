@@ -25,9 +25,9 @@ Each entry point, and the names it exports. Exported TypeScript types are public
 | Entry point | Exports |
 |---|---|
 | `walletcap` | `openBudget`, `Budget`, `Hold`, `openOwner`, `Owner`, `BudgetUnavailable`, `BudgetRefused`, `PaymentNotRecorded`, `UsageError`, `notSent`, `toMicros`, `formatUsd`, `defaultBudgetPath`, `MAX_AMOUNT`, `SCHEMA_VERSION`, `MIN_SQLITE_VERSION`; types `BudgetOptions`, `HoldOptions`, `Check`, `Status`, `Payment`, `HeldPayment`, `PaymentRecord`, `BudgetLimits`, `VoidedPayment`, `OwnerOptions`, `LimitOptions`, `Dollars`, `Micros`, `Window`, `RefusalCode`, `RefusalSource`, `Outcome`, `PaymentState`, `NotSent` |
-| `walletcap/x402` | `guard`, `MAX_PAYMENT_TIMEOUT_SECONDS`, `USD_ASSETS`; types `AssetEntry`, `PaymentRequirements`, `PaymentCreationContext`, `PaymentCreatedContext`, `PaymentCreationFailureContext`, `PaymentResponseContext`, `X402HookedClient` |
+| `walletcap/x402` | `guard`, `MAX_PAYMENT_TIMEOUT_SECONDS`, `USD_ASSETS`, `COUNTED_SCHEMES`; types `AssetEntry`, `GuardOptions`, `PaymentRequirements`, `PaymentCreationContext`, `PaymentCreatedContext`, `PaymentCreationFailureContext`, `PaymentResponseContext`, `X402HookedClient` |
 | `walletcap/cdp` | `cdpStore`; types `SpendStore`, `SpendLedgerEntry`, `SpendLedgerEntryInput` |
-| `walletcap/agentkit` | `guardAgentKit`; type `AssetEntry` |
+| `walletcap/agentkit` | `guardAgentKit`; types `AssetEntry`, `GuardOptions` |
 | `walletcap/agentic` | `guardAgenticWallet`, `discoverRequirements`, `usdcAtomic`, `AWAL_CHAINS`; types `WalletRequest`, `RequestData`, `PaymentRequired`, `GuardedWallet`, `FetchLike` |
 
 Every method of the payer and owner handles returns a Promise, except `close()` and
@@ -121,13 +121,20 @@ other message's, may change in any release.
 
 - `walletcap` (npm), and `walletcap` or `python -m walletcap` (PyPI): the commands `status`,
   `set`, `freeze`, `unfreeze`, `history`, `holds`, `void <id> [--evidence <text>]`,
-  `void --all-unknown --older-than <duration>` and
-  `settle <id> [--tx <hash>] [--evidence <text>]`, with the flags `--wallet`, `--path`,
+  `void --all-unknown --older-than <duration>`,
+  `settle <id> [--tx <hash>] [--evidence <text>]`, `check <dollars>` and `doctor`, with the flags `--wallet`, `--path`,
   `--per-payment`, `--per-hour`, `--per-day`, `--per-week`, `--cap`, `--window`,
   `--max-payments`, `--limit`, `--older-than`, `--all-unknown`, `--tx`, `--evidence` and
   `--json`. The npm CLI also has `awal <command>`.
 - Exit codes: 0 when the command worked; 1 when walletcap refused or couldn't use the budget;
-  2 when the command line is wrong.
+  2 when the command line is wrong. `check` exits 1 when the budget would refuse the payment,
+  and `doctor` exits 1 when a check fails (a warning doesn't); both still print their answer.
+- `doctor --json` prints `path`, `ok`, `sqlite_version` and `checks`, each with `id`, `status`
+  (`ok`, `warn`, `fail` or `skipped`), `message` and `wallet`. The check ids are `file`,
+  `file_mode`, `folder_mode`, `file_owner`, `filesystem`, `sqlite`, `schema`, `integrity`,
+  `journal`, `rules`, `projection`, `budgets`, `frozen` and `open_holds`. A release may add a check; a
+  message's wording may change. `sqlite_version` names the runtime's own SQLite, so it is the
+  one field the two command lines may print differently.
 - `--json` prints the same output from both command lines, field for field: object keys in
   snake_case (`window_ms`, `in_flight`, `counts_until`), every amount, count and duration as a
   string of decimal digits (micro-dollars for amounts), every time as an ISO 8601 UTC string to
@@ -135,10 +142,13 @@ other message's, may change in any release.
   runs every command through both command lines on copies of one file and compares the output.
 - The fields of `--json` output are public: a release may add fields, and removing or renaming
   one is a breaking change. The plain-text output is for people and may change.
+- `walletcap awal`: which of awal's commands it counts (`send`, `x402 pay`), passes through
+  (`AWAL_PASS_THROUGH_COMMANDS`) or refuses is public behaviour, as is `WALLETCAP_AWAL_ALLOW`.
 - `walletcap-mcp`: the flags `--wallet`, `--path`, `--allow-tool` and `--help`, and a server
   command after `--`. It exits with the MCP server's own code, 1 when the default server isn't
   installed, and 2 when `--` has no command after it. Which tools it counts, passes through or
-  refuses is public behaviour, and the CHANGELOG names every change to those lists.
+  refuses, and which methods it forwards, is public behaviour, and the CHANGELOG names every
+  change to those lists.
 
 ### The budget file
 
@@ -153,9 +163,9 @@ other message's, may change in any release.
 
 ## Not public
 
-- Modules whose names start with `_`: `_clock`, `_keccak`, `_ledgers`, `_spec.generated` and
-  `adapters/_x402` in the npm package, and `walletcap._clock`, `walletcap._keccak` and
-  `walletcap._ledger` in the PyPI one.
+- Modules whose names start with `_`: `_clock`, `_keccak`, `_ledgers`, `_sqlite`,
+  `_spec.generated` and `adapters/_x402` in the npm package, and `walletcap._clock`,
+  `walletcap._doctor`, `walletcap._keccak` and `walletcap._ledger` in the PyPI one.
 - Anything in `packages/js/src/core` that the entry points above don't export, such as the
   ledger client and `budgetPathFor`.
 - The test clock: replacing `julianday('now')` on a test's own connections. It exists for

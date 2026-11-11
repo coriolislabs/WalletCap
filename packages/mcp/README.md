@@ -22,7 +22,8 @@ In the MCP client's config:
   less, capped at that amount.
 - Tools that move no money (balance, address, sign-in, bazaar search, payment discovery) pass
   through. Any other tool, `trade` included, is refused and left out of `tools/list`.
-  `--allow-tool <name>` lets one through, uncounted. JSON-RPC batches are refused.
+  `--allow-tool <name>` lets one through, uncounted. JSON-RPC batches are refused, and so is a
+  request whose method isn't one of MCP's own.
 - A refusal tells the agent why, not which open payments its owner could void.
 - It runs `~/.payments-mcp/bundle.js`, the server Coinbase's installer puts there. To run another
   server, put its command after `--`. `--path <file>` names the budget file when it isn't the

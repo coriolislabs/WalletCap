@@ -43,6 +43,18 @@ const response = await fetchPaid('https://api.example.com/paid');
 - A payee may ask for an authorization valid up to an hour, as Coinbase's CDP spend controls
   allow. Longer terms are passed over for shorter ones on offer; when none are, the payment is
   refused before signing, with the code `timeout`.
+- A payment is priced at the most its terms ask the wallet to sign for. x402 v2 names that
+  `amount` and v1 `maxAmountRequired`, and a client signs whichever its protocol version reads,
+  so terms that carry both are priced at the larger. An amount is a whole number in decimal
+  digits; anything else (`0x10`, `5e4`, a space) is refused with the code `terms`. Once the
+  wallet has signed, the payment is held at what the payload itself moves, an EIP-3009 `value`, a
+  Permit2 `amount` or a channel deposit, when that is more than the terms said.
+- The schemes `exact`, `upto` and `auth-capture` are counted (`COUNTED_SCHEMES`): under each the
+  wallet signs for at most the terms' amount. Any other scheme is refused before signing, with
+  the code `terms`, unless you list it: `guard(client, budget, { schemes: ['batch-settlement'] })`.
+  Under `batch-settlement` the wallet signs a deposit into the payee's channel, five times the
+  request's amount by default or the minimum the payee announces. On EVM the guard reads that
+  deposit from the payload and holds it; on Solana it can't, and holds the request's amount.
 - A refusal is a `BudgetRefused` whose `brief` tells the agent why, without the open payments
   that take up the room or how to void them: `budget.check().message` and `npx walletcap holds`
   name them for the owner.
